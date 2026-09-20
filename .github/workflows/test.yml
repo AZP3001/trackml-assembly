@@ -1,0 +1,57 @@
+name: Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang and lld
+        run: sudo apt-get update && sudo apt-get install -y clang lld
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build both wasm variants
+        run: ./wasm/build.sh
+
+      # There is no libm in a freestanding wasm build, so sin/cos/atan2/tanh/
+      # acos/exp are hand-written in sim.c. A wrong polynomial coefficient there
+      # doesn't throw — it just makes cars steer slightly wrong. Both variants
+      # get checked because -msimd128 changes codegen throughout.
+      - name: Math self-test
+        run: |
+          node tools/mathtest.mjs wasm/sim.wasm
+          node tools/mathtest.mjs wasm/sim-simd.wasm
+
+      # Runs the wasm backend and the JavaScript edition's worker side by side
+      # on the same tracks and the same brains, and compares the driving.
+      - name: Parity against the JavaScript edition
+        run: |
+          node tools/paritytest.mjs wasm/sim.wasm
+          node tools/paritytest.mjs wasm/sim-simd.wasm
+
+      - name: Install Playwright
+        run: npm install --no-save playwright@1.56.1 && npx playwright install --with-deps chromium
+
+      # Loads the real page in a real browser: module compiles, worker pool
+      # comes up, tracks generate, cars drive, generations advance, editor edits.
+      - name: End-to-end
+        run: |
+          npx --yes http-server -p 8765 --silent . &
+          npx --yes wait-on -t 30000 http://127.0.0.1:8765/index.html
+          node tools/e2e.mjs http://127.0.0.1:8765
+
+      - name: Benchmark (informational)
+        run: |
+          node tools/bench.mjs
+          WASM=wasm/sim-simd.wasm node tools/bench.mjs

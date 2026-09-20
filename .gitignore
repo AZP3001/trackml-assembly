@@ -1,0 +1,32 @@
+# Node — only ever a dev dependency here (Playwright for the end-to-end test).
+# The app itself ships no npm packages: everything it loads at runtime is either
+# in external/ or compiled into wasm/.
+node_modules/
+npm-debug.log*
+yarn-error.log*
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Build intermediates. wasm/sim.wasm and wasm/sim-simd.wasm are deliberately
+# NOT ignored — GitHub Pages serves this repository as-is, so the modules have
+# to be committed or the published site has no backend. CI rebuilds them and
+# fails if the committed bytes don't match, which is what keeps them honest.
+*.o
+*.bc
+*.ll
+wasm/*.wasm.map
+wasm/*.tmp.wasm
+
+# Test and tooling output
+/test-results/
+/playwright-report/
+*.png.diff
+.coverage/
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/

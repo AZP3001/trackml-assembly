@@ -1,0 +1,63 @@
+name: Deploy Static Content
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one deploy at a time; a queued run supersedes an older one rather than
+# racing it to the same environment.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  # The site is served straight out of the repository, so the committed
+  # wasm/*.wasm ARE the backend. This job rebuilds them from wasm/sim.c and
+  # fails if the result differs from what's checked in — the committed binaries
+  # can never quietly drift from their source.
+  verify-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang and lld
+        run: sudo apt-get update && sudo apt-get install -y clang lld
+
+      - name: Record committed checksums
+        run: sha256sum wasm/sim.wasm wasm/sim-simd.wasm | tee committed.sha256
+
+      - name: Rebuild from source
+        run: ./wasm/build.sh
+
+      - name: Compare against committed binaries
+        run: |
+          if ! sha256sum -c committed.sha256; then
+            echo "::error file=wasm/sim.c::wasm/sim.c does not match the committed .wasm files. Run ./wasm/build.sh and commit the result."
+            exit 1
+          fi
+
+  deploy:
+    needs: verify-wasm
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
