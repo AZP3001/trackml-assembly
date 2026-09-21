@@ -103,8 +103,8 @@ export function createReferenceWorker(self) {
     // Fixed lateral grip — see CAR_LAT_GRIP in sim.c for why this is no
     // longer a config field.
     const CAR_LAT_GRIP = 0.93;
-    // See TURN_GRIP_MIN_SPEED / TURN_GRIP_REF_SPEED in sim.c.
-    const TURN_GRIP_MIN_SPEED = 0.05, TURN_GRIP_REF_SPEED = 3.0;
+    // See STOPPED_SPEED / STOPPED_GRACE_FRAMES / TURN_GRIP_REF_SPEED in sim.c.
+    const STOPPED_SPEED = 0.05, STOPPED_GRACE_FRAMES = 15, TURN_GRIP_REF_SPEED = 3.0;
 
     function updateCar(c, config) {
         if (c.crashed) return;
@@ -115,9 +115,9 @@ export function createReferenceWorker(self) {
         const throttle = c.oL[1] || 0;
 
         // Grip-limited turning: authority falls off past TURN_GRIP_REF_SPEED
-        // instead of ramping UP with speed, and a car below TURN_GRIP_MIN_SPEED
+        // instead of ramping UP with speed, and a car below STOPPED_SPEED
         // gets none at all — see sim.c's updateCar for the reasoning.
-        if (c.speed > TURN_GRIP_MIN_SPEED) {
+        if (c.speed > STOPPED_SPEED) {
             const authority = Math.min(TURN_GRIP_REF_SPEED / c.speed, 1.0);
             c.angle += steer * config.turnSpeed * authority;
         }
@@ -148,6 +148,10 @@ export function createReferenceWorker(self) {
         if(speed > config.maxSpeed) { const r = config.maxSpeed/speed; vx *= r; vy *= r; speed = config.maxSpeed; }
 
         c.vx = vx; c.vy = vy; c.speed = speed;
+
+        // No momentum, no race — see sim.c's updateCar.
+        if (c.framesAlive > STOPPED_GRACE_FRAMES && speed < STOPPED_SPEED) { c.crashed = true; return; }
+
         const prevX = c.x, prevY = c.y;
         c.x += vx; c.y += vy;
         c.fitness += (speed / config.maxSpeed) * 0.1;

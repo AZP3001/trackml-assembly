@@ -12,6 +12,9 @@
 //      roughly ref_speed/speed above TURN_GRIP_REF_SPEED — the opposite of
 //      the old (0.2 + 0.8*speedFactor) curve, which made a car turn WORSE
 //      the slower it went and BEST at speed.
+//   4. A car with no momentum is eliminated once the spawn grace window
+//      passes, whether it never launched or braked to a standstill. Heading
+//      changes don't count as momentum — only speed does.
 //
 // Cars are driven with a synthetic brain — all input weights zero, only the
 // output bias set — so steer/throttle are exactly what the test wants every
@@ -75,6 +78,7 @@ function readCar(carIndex) {
 }
 
 const BIG = 20.0; // tanh(20) saturates to 1.0 well past f32 precision
+const STOPPED_SPEED = 0.05;   // mirrors sim.c
 
 // ---------------------------------------------------------------------------
 // 1. A stopped car cannot turn.
@@ -85,12 +89,55 @@ const BIG = 20.0; // tanh(20) saturates to 1.0 well past f32 precision
     setBiasBrain(0, BIG, 0);   // steer = full lock, throttle = 0 (never accelerates, never brakes)
     w.pop_reset();
     const before = readCar(0);
-    w.run(60);
+
+    // Inside the spawn grace window: still alive, still stopped, and — the
+    // point of the test — the heading has not moved despite full lock.
+    w.run(10);
+    const inGrace = readCar(0);
+    check(!inGrace.crashed, 'a stopped car survives the spawn grace window', `10 frames in`);
+    check(inGrace.speed === 0, 'a car given zero throttle never gains speed', `speed ${inGrace.speed}`);
+    check(inGrace.angle === before.angle, 'a car at a standstill cannot turn',
+        `angle ${before.angle} -> ${inGrace.angle} over 10 frames of full steering lock`);
+
+    // Past it: no momentum, no race.
+    w.run(30);
     const after = readCar(0);
-    check(!after.crashed, 'stationary-turn car survives 60 frames', `speed ${after.speed}`);
-    check(after.speed === 0, 'a car given zero throttle never gains speed', `speed ${after.speed}`);
-    check(after.angle === before.angle, 'a car at a standstill cannot turn',
-        `angle ${before.angle} -> ${after.angle} over 60 frames of full steering lock`);
+    check(after.crashed, 'a car with no momentum is eliminated once the grace window passes',
+        `crashed=${after.crashed} at speed ${after.speed}`);
+    check(after.angle === before.angle, 'and spinning the wheel never bought it any momentum',
+        `angle unchanged at ${after.angle}`);
+}
+
+// ---------------------------------------------------------------------------
+// 1b. Elimination is on SPEED, not on steering: a car that is moving keeps
+//     racing however hard it is turning, and one that brakes to a stop
+//     mid-track is out the same as one that never left the line.
+// ---------------------------------------------------------------------------
+{
+    w.set_config(20, 1.0, 0.04, 0.5, 1000, 99, 0.15, H);
+    w.pop_init(1, 0, H, 7);
+    setBiasBrain(0, BIG, BIG);   // full steer AND full throttle
+    w.pop_reset();
+    w.run(1); w.run(1);          // one frame of lag, then the throttle lands
+    const rolling = readCar(0);
+    w.run(20);
+    const stillRolling = readCar(0);
+    check(!stillRolling.crashed, 'a moving car is never eliminated for turning hard',
+        `speed ${stillRolling.speed.toFixed(3)} after 20 frames at full lock`);
+    check(rolling.speed > STOPPED_SPEED, 'and it really was moving', `speed ${rolling.speed.toFixed(3)}`);
+
+    // Now stamp on the brakes and watch it get eliminated when it runs out
+    // of momentum, rather than sitting there until TTL.
+    setBiasBrain(0, 0, -BIG);
+    const framesToStop = (() => {
+        for (let n = 0; n < 200; n++) {
+            w.run(1);
+            if (readCar(0).crashed) return n + 1;
+        }
+        return null;
+    })();
+    check(framesToStop !== null, 'braking to a standstill eliminates the car',
+        framesToStop !== null ? `out after ${framesToStop} braking frames` : 'still alive after 200 frames');
 }
 
 // ---------------------------------------------------------------------------

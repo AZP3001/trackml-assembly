@@ -1562,8 +1562,18 @@ static void feedForward(i32 i) {
     }
 }
 
-// See the steering block inside updateCar for the physics these implement.
-static const float TURN_GRIP_MIN_SPEED = 0.05f;
+// Below this a car counts as not moving at all: it cannot steer (no grip to
+// turn against without roll) and it is out of the race (see updateCar). One
+// threshold rather than two, because it is one idea — "this car has no
+// momentum" — and the two rules would be incoherent apart.
+static const float STOPPED_SPEED = 0.05f;
+// How long a car is allowed to have no momentum before it is eliminated.
+// reset_car zeroes car_out, so EVERY car's first frame moves on zero throttle
+// whatever its brain would ask for, and a real launch needs a few more frames
+// to build measurable speed. Short enough that a car which never commands
+// throttle is gone almost immediately instead of idling out its whole TTL.
+static const i32 STOPPED_GRACE_FRAMES = 15;
+// See the steering block inside updateCar for the physics this implements.
 static const float TURN_GRIP_REF_SPEED = 3.0f;
 
 static void updateCar(i32 i) {
@@ -1577,11 +1587,11 @@ static void updateCar(i32 i) {
     // speed v asks the tires for lateral acceleration proportional to v times
     // the yaw rate, and a tire only has so much of that to give before it
     // slides instead of turning — so the available yaw rate falls off as
-    // roughly 1/v once past TURN_GRIP_REF_SPEED. Below TURN_GRIP_MIN_SPEED
-    // there is no rolling for the tires to grip at all, so a stopped car gets
-    // zero authority: turning the wheel does nothing until it is moving,
-    // exactly like a real parked car.
-    if (car_speed[i] > TURN_GRIP_MIN_SPEED) {
+    // roughly 1/v once past TURN_GRIP_REF_SPEED. Below STOPPED_SPEED there is
+    // no rolling for the tires to grip at all, so a stopped car gets zero
+    // authority: turning the wheel does nothing until it is moving, exactly
+    // like a real parked car.
+    if (car_speed[i] > STOPPED_SPEED) {
         float authority = minf(TURN_GRIP_REF_SPEED / car_speed[i], 1.0f);
         car_angle[i] += steer * cfg_turnSpeed * authority;
     }
@@ -1617,6 +1627,18 @@ static void updateCar(i32 i) {
     if (speed > cfg_maxSpeed) { float r = cfg_maxSpeed / speed; vx *= r; vy *= r; speed = cfg_maxSpeed; }
 
     car_vx[i] = vx; car_vy[i] = vy; car_speed[i] = speed;
+
+    // No momentum, no race. A car sitting still is either parked on the line
+    // having never asked for throttle, or it has braked to a standstill
+    // somewhere on track — and since a stopped car cannot steer either, it
+    // has no way back out of that state. It used to sit there burning frames
+    // until its TTL ran out, which at 500 cars is most of a generation spent
+    // simulating cars that are not going anywhere.
+    //
+    // Speed only: spinning the heading on the spot is not momentum, and the
+    // steering block above will not turn a stopped car anyway.
+    if (car_frames[i] > STOPPED_GRACE_FRAMES && speed < STOPPED_SPEED) { car_crashed[i] = 1; return; }
+
     float prevX = car_x[i], prevY = car_y[i];
     car_x[i] += vx; car_y[i] += vy;
     car_fitness[i] += (speed / cfg_maxSpeed) * 0.1f;

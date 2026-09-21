@@ -89,9 +89,10 @@ const moved = await page.evaluate(async () => {
     return { off: peak, farthest, total: app.state.cars.length, aliveOk, sawDrop };
 });
 // A quarter of the field, not half: with the random brains of generation 1 a
-// good fraction of cars never command any throttle and sit on the line until
-// their TTL runs out. That is the simulation working, not a stuck population —
-// so the second check is the one that really says "driving".
+// good fraction of cars never command any throttle at all, and those are
+// eliminated within a few frames for having no momentum rather than ever
+// showing up as "moving". That is the simulation working, not a stuck
+// population — so the second check is the one that really says "driving".
 check(moved.off > moved.total * 0.25, 'cars leave the start line',
     `peak ${moved.off}/${moved.total} moving`);
 check(moved.farthest > 100, 'cars drive a real distance',
