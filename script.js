@@ -229,23 +229,37 @@ const app = {
         }
     },
 
-    // Show which build is actually on screen.
+    // Show which build is actually on screen — version number included.
     //
     // version.json is written by the deploy workflow, not committed, so it says
     // what is genuinely live rather than what the source happens to claim. When
     // it is absent — running locally, or a deploy that never landed — the
-    // static version in the markup stays as it is.
+    // static fallback in the markup stays as it is.
+    //
+    // The version itself (e.g. "21.9") is computed by the workflow from git
+    // history — a commit count since the WebAssembly port, which is V21.0 —
+    // not typed in by hand anywhere. See .github/workflows/deploy.yml for why:
+    // the predecessor project hand-maintained its version string and
+    // repeatedly forgot to bump it. A number nobody has to remember to update
+    // is a number that can't go stale.
     showBuildStamp: function() {
-        const el = document.getElementById('version-tag');
-        if (!el) return;
         fetch('./version.json', { cache: 'no-store' })
             .then(r => r.ok ? r.json() : null)
             .then(v => {
-                if (!v || !v.short) return;
-                el.textContent = `build ${v.short}`;
-                if (v.built) el.title = `deployed ${v.built} from ${v.ref || 'unknown branch'}`;
+                if (!v || !v.version) return;
+                const full = document.getElementById('version-tag');
+                if (full) {
+                    full.textContent = `V${v.version}${v.short ? ' · build ' + v.short : ''}`;
+                    if (v.built) full.title = `deployed ${v.built} from ${v.ref || 'unknown branch'}`;
+                }
+                // The two compact mobile headers get the version alone — no
+                // room there for a commit hash too.
+                document.querySelectorAll('.version-tag-compact').forEach(el => {
+                    el.textContent = ` · V${v.version}`;
+                    if (v.built) el.title = `deployed ${v.built} from ${v.ref || 'unknown branch'}`;
+                });
             })
-            .catch(() => { /* no stamp; leave the static version alone */ });
+            .catch(() => { /* no stamp; leave the static fallback alone */ });
     },
 
     // A failed wasm load is the one error worth explaining rather than silently

@@ -341,6 +341,49 @@ in git would be stale by definition.
 
 ---
 
+## Versioning
+
+The sidebar shows a version number next to the build hash — `V21.9 · build c55767a` —
+and it updates itself. Nobody sets it.
+
+**Where the numbers come from.** The predecessor of this project,
+[AZP3001/main](https://github.com/AZP3001/main), hand-maintained a `TrackML V14.0`
+style string in `index.html` across its whole history — V14.0 → V14.1 → V14.2 →
+V15 → V15.1 → V15.3 → V16 → V17 → V18 → V18.1…V18.7 → V19.0, ending at **V20.0** on
+the last commit before that repository was archived with a pointer to this one.
+Along the way it also has commits titled `Fixxed Version number` and `Update
+Version Number: Fixxed Version number forgotten from last update` — a number a
+human has to remember to bump is a number that goes stale, and it did, more than
+once.
+
+This repository continues that numbering rather than restarting it: the
+WebAssembly port — a new backend, the same order of change as V14→V20 taken as a
+whole — is **V21.0**. Everything after that increments automatically.
+
+**How it updates itself.** There is no version to edit, anywhere, ever. The number
+is a commit count, computed fresh on every deploy:
+
+```
+PORT_COMMIT = ebf75a7   # the WebAssembly port — this repo's first commit, V21.0
+version     = 21.<commits reachable from HEAD after PORT_COMMIT>
+```
+
+`.github/workflows/deploy.yml` runs that computation (`git rev-list --count
+PORT_COMMIT..HEAD`) as part of every deploy, writes the result into
+`version.json` alongside the commit hash, and `script.js` reads it into the
+sidebar — full `V21.9 · build c55767a` on desktop, a compact `· V21.9` in the two
+mobile headers. Locally, or if a deploy never lands, the sidebar says `dev build`
+rather than showing a number that might be lying.
+
+Because the number falls out of `git log` rather than being written by anyone,
+every commit on the default branch — including this one — moves it forward by
+exactly one, automatically, with nothing to remember and nothing to forget.
+`tools/versioncheck.mjs` checks the scheme itself: that `PORT_COMMIT` is still
+this repo's root commit and still an ancestor of `HEAD`, and that the count
+never decreases walking the branch forward.
+
+---
+
 ## Running it locally
 
 The page fetches a `.wasm` file and starts Workers, and browsers allow neither over `file://` — so
@@ -356,7 +399,7 @@ then open <http://localhost:8000>.
 
 ```sh
 npm run build        # compile both wasm variants
-npm test             # math, parity, auto width, gates, race behaviour
+npm test             # math, parity, auto width, gates, race behaviour, version scheme
 npm run test:e2e     # real browser, needs a server running
 npm run bench        # wasm vs the JavaScript edition
 ```
@@ -382,9 +425,13 @@ npm run bench        # wasm vs the JavaScript edition
   runs generations to completion rather than to a frame budget — a crawling car
   needs tens of thousands of frames to finish a lap, so a frame-capped harness
   cannot see the pace problem at all.
+* **`tools/versioncheck.mjs`** — the version scheme (see [Versioning](#versioning)): the
+  commit baked into `deploy.yml` as the V21.0 baseline is still this repo's root commit and still an
+  ancestor of `HEAD`, and the computed version never decreases walking the branch forward.
 * **`tools/e2e.mjs`** — drives the real page in Chromium: module loads, workers come up, tracks
   generate, cars drive, generations advance, hyper mode trains, the editor edits, brains export,
-  auto width responds to its controls, and a reload comes back with storage empty.
+  auto width responds to its controls, a reload comes back with storage empty, and the sidebar shows
+  the version and build stamp once one is available.
 
 The two engines are **not** bit-identical and can't be — `sim.c` runs the physics in `f32` where the
 JS runs it in `f64`, and a genetic driving sim is chaotic enough that a 1e-7 difference eventually
@@ -408,6 +455,6 @@ image-import.js         PNG/JPG -> track pipeline
 wasm/sim.c              the entire compute backend
 wasm/build.sh           clang -> sim.wasm + sim-simd.wasm
 wasm/*.wasm             committed build output (CI verifies it matches the source)
-tools/                  math, parity, auto-width, end-to-end and benchmark harnesses
+tools/                  math, parity, auto-width, gates, race, version, end-to-end and benchmark harnesses
 external/               tailwind, chart.js, lucide — vendored, no CDN at runtime
 ```

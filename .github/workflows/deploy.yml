@@ -72,9 +72,46 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       page_url: ${{ steps.deployment.outputs.page_url }}
+      version: ${{ steps.version.outputs.version }}
     steps:
+      # fetch-depth: 0, not the default shallow clone — the version number
+      # below is a commit count, and `git rev-list` on a depth-1 checkout sees
+      # only one commit and gets it wrong.
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The version number, computed from git history rather than typed by
+      # hand anywhere.
+      #
+      # The predecessor project (AZP3001/main) hand-maintained a "TrackML
+      # V14.0" style string in index.html, bumped it by editing that string on
+      # whatever commit seemed to deserve it, and repeatedly forgot to: see
+      # its own history for "Fixxed Version number" and "Fixxed Version
+      # number forgotten from last update" as separate commits after the
+      # feature that should have carried the bump. A number a human has to
+      # remember to update is a number that eventually lies.
+      #
+      # So this one can't be forgotten because nobody sets it: PORT_COMMIT is
+      # the commit that ported the project to WebAssembly — the first commit
+      # of this repository, and a new major line the same way V14→V20 in
+      # main's history each marked a step change, so it is V21.0. Every commit
+      # reachable from HEAD after it adds one to the minor number, counted
+      # fresh on every deploy. There is nothing to edit, so there is nothing
+      # to forget.
+      - name: Compute version
+        id: version
+        env:
+          PORT_COMMIT: ebf75a7deee71bd16b81ff5336ad054f9243c509
+        run: |
+          if ! git merge-base --is-ancestor "$PORT_COMMIT" HEAD; then
+            echo "::error::PORT_COMMIT ($PORT_COMMIT) is not an ancestor of HEAD — the version baseline in deploy.yml needs updating."
+            exit 1
+          fi
+          since=$(git rev-list --count "${PORT_COMMIT}..HEAD")
+          version="21.${since}"
+          echo "version=${version}" | tee -a "$GITHUB_OUTPUT"
 
       # A build stamp, so "did my push actually go live?" has an answer you can
       # read off the page and that CI can verify below. It is generated here
@@ -82,9 +119,12 @@ jobs:
       # conflict. The sidebar reads it; if it is missing (running locally) the
       # page just shows its static version instead.
       - name: Stamp the build
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           cat > version.json <<JSON
           {
+            "version": "${VERSION}",
             "commit": "${GITHUB_SHA}",
             "short": "${GITHUB_SHA:0:7}",
             "ref": "${GITHUB_REF_NAME}",
@@ -116,6 +156,7 @@ jobs:
       - name: Confirm the live site is serving this commit
         env:
           PAGE_URL: ${{ needs.deploy.outputs.page_url }}
+          VERSION: ${{ needs.deploy.outputs.version }}
         run: |
           set -u
           url="${PAGE_URL%/}/version.json"
@@ -124,11 +165,11 @@ jobs:
             live=$(curl -fsS -H 'Cache-Control: no-cache' "$url" 2>/dev/null \
                    | tr -d ' \n' | sed -n 's/.*"commit":"\([0-9a-f]*\)".*/\1/p') || true
             if [ "$live" = "$GITHUB_SHA" ]; then
-              echo "live site is serving ${GITHUB_SHA:0:7} after ${attempt} attempt(s)"
+              echo "live site is serving V${VERSION} (${GITHUB_SHA:0:7}) after ${attempt} attempt(s)"
               {
                 echo "### Deployed"
                 echo ""
-                echo "\`${GITHUB_SHA:0:7}\` is live at ${PAGE_URL}"
+                echo "**V${VERSION}** — \`${GITHUB_SHA:0:7}\` is live at ${PAGE_URL}"
               } >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi

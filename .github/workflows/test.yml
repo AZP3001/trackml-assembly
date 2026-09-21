@@ -12,8 +12,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 — versioncheck.mjs below walks full git history
+      # (git rev-list --count from the WebAssembly-port commit), which a
+      # shallow checkout can't see.
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install clang and lld
         run: sudo apt-get update && sudo apt-get install -y clang lld
@@ -63,6 +68,12 @@ jobs:
 
       - name: Race behaviour
         run: node tools/racepace.mjs wasm/sim.wasm
+
+      # The sidebar version number ("V21.9 · build ...") is computed from git
+      # history in deploy.yml, never typed by hand — this proves the formula
+      # is sound and stays monotonic walking the branch forward.
+      - name: Version scheme
+        run: node tools/versioncheck.mjs
 
       - name: Install Playwright
         run: npm install --no-save playwright@1.56.1 && npx playwright install --with-deps chromium

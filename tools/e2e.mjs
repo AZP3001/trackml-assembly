@@ -366,28 +366,52 @@ await page.evaluate(() => { if (app.state.isEditing) editor.cancel(); });
         `${gates.lazyApex} flagged`);
 }
 
-// --- build stamp ---------------------------------------------------------
+// --- build stamp + version number ----------------------------------------
 // version.json is written by the deploy workflow, so it is absent locally.
-// Both paths matter: absent must leave the static version alone rather than
-// blanking it or throwing, and present must be picked up — otherwise the whole
-// point (telling at a glance whether a push actually went live) is lost.
+// Both paths matter: absent must leave an honest fallback (not a stale-
+// looking fake version) rather than throwing, and present must be picked up
+// everywhere it's shown — otherwise the whole point (telling at a glance
+// whether a push actually went live, and which version that is) is lost.
+//
+// The version number itself is computed by the workflow from a commit count
+// (see .github/workflows/deploy.yml), never typed in by hand — that is what
+// this whole feature exists to guarantee, after the predecessor project's
+// history showed the hand-maintained version repeatedly going stale. This
+// test only has to prove the DISPLAY side: given a version.json, does every
+// place that shows a version actually show it.
 {
-    const noStamp = await page.evaluate(() => document.getElementById('version-tag').textContent.trim());
-    check(noStamp.length > 0, 'version line survives a missing build stamp', `shows "${noStamp}"`);
+    const noStamp = await page.evaluate(() => ({
+        desktop: document.getElementById('version-tag').textContent.trim(),
+        mobiles: [...document.querySelectorAll('.version-tag-compact')].map(e => e.textContent.trim())
+    }));
+    check(noStamp.desktop.length > 0 && !/^v?\d/i.test(noStamp.desktop),
+        'version line survives a missing build stamp without faking a number',
+        `shows "${noStamp.desktop}"`);
+    check(noStamp.mobiles.every(t => t === ''), 'mobile headers show nothing rather than a stale version',
+        JSON.stringify(noStamp.mobiles));
 
     const stamped = await page.evaluate(async () => {
-        const el = document.getElementById('version-tag');
         const real = window.fetch;
         window.fetch = (u, o) => String(u).includes('version.json')
-            ? Promise.resolve({ ok: true, json: () => Promise.resolve({ commit: 'deadbeefcafe', short: 'deadbee', ref: 'main', built: '2026-09-21T09:00:00Z' }) })
+            ? Promise.resolve({ ok: true, json: () => Promise.resolve({
+                version: '21.9', commit: 'deadbeefcafe', short: 'deadbee', ref: 'main', built: '2026-09-21T09:00:00Z'
+              }) })
             : real(u, o);
         app.showBuildStamp();
         await new Promise(r => setTimeout(r, 120));
         window.fetch = real;
-        return { text: el.textContent.trim(), title: el.title };
+        const el = document.getElementById('version-tag');
+        return {
+            text: el.textContent.trim(), title: el.title,
+            mobiles: [...document.querySelectorAll('.version-tag-compact')].map(e => e.textContent.trim())
+        };
     });
-    check(stamped.text === 'build deadbee', 'the live build stamp is displayed', `"${stamped.text}"`);
+    check(stamped.text === 'V21.9 · build deadbee', 'the version number and build hash are shown together',
+        `"${stamped.text}"`);
     check(/main/.test(stamped.title), 'and names the branch it came from', stamped.title);
+    check(stamped.mobiles.length === 2 && stamped.mobiles.every(t => t === '· V21.9'),
+        'the compact mobile headers pick up the same version',
+        JSON.stringify(stamped.mobiles));
 }
 
 // --- canvas actually drew something ------------------------------------
