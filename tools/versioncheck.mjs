@@ -70,12 +70,19 @@ if (isAncestor) {
     console.log(`  HEAD would deploy as: V${version}`);
 
     // --- monotonicity: version must never go backwards on the default branch
-    // A merge or a history rewrite could, in principle, make HEAD's ancestor
-    // count smaller than an earlier commit's. Walk the last handful of commits
-    // reachable from HEAD and confirm each one's count is >= the one before it
-    // (in commit order, oldest to newest) — this is what "automatically
-    // increases" actually promises the sidebar.
-    const recentLog = git('log', '--reverse', '--format=%H', `${PORT_COMMIT}..HEAD`).split('\n').filter(Boolean);
+    // A history rewrite could, in principle, make HEAD's ancestor count
+    // smaller than an earlier deploy's. What actually got deployed over time
+    // is the FIRST-PARENT chain — the sequence HEAD itself moved through,
+    // whether by a plain commit or a merge landing a side branch — not every
+    // commit reachable from HEAD. Walking the full DAG instead of just that
+    // chain used to fail this the moment two branches (kept identical until
+    // now by convention) genuinely diverged and got merged back together: a
+    // commit that only ever existed on the side branch has a smaller count
+    // than commits made in parallel on this one, even though neither was ever
+    // individually deployed on its own — only the merge that combined them
+    // was. Each link in --first-parent, by contrast, actually is an ancestor
+    // of the next, so its count can only stay the same or grow.
+    const recentLog = git('log', '--first-parent', '--reverse', '--format=%H', `${PORT_COMMIT}..HEAD`).split('\n').filter(Boolean);
     let prevCount = 0, monotone = true, brokenAt = null;
     for (const sha of recentLog) {
         const c = Number(git('rev-list', '--count', `${PORT_COMMIT}..${sha}`));
