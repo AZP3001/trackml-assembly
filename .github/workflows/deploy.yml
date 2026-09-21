@@ -1,8 +1,14 @@
 name: Deploy Static Content
 
+# Both branches, because the `github-pages` environment is restricted to the
+# repository's DEFAULT branch and this repo's default is still
+# claude/trackml-webassembly-port-rkvuac. A deploy from any other branch is
+# rejected by the environment before a single step runs — which looks like a
+# failure with no logs at all. Once main is made the default branch, the second
+# entry here can go.
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "claude/trackml-webassembly-port-rkvuac"]
   workflow_dispatch:
 
 permissions:
