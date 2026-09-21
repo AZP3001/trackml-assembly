@@ -18,6 +18,11 @@ yarn.lock
 wasm/*.wasm.map
 wasm/*.tmp.wasm
 
+# Written by the deploy workflow at publish time so the live site can report
+# which commit it is actually serving. Never committed — a stamp in git would
+# be stale by definition and would conflict on every merge.
+version.json
+
 # Test and tooling output
 /test-results/
 /playwright-report/

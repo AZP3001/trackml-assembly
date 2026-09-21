@@ -1,8 +1,10 @@
 name: Tests
 
+# Every branch. Gating these on "main" meant that for the whole life of this
+# repo — whose default branch is not main — the test suite never ran once.
 on:
   push:
-    branches: ["main"]
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 

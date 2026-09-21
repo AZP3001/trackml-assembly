@@ -337,6 +337,30 @@ check(imported.ok && imported.pts >= 3, 'image import builds a track',
     imported.ok ? `${imported.pts} points, width ${Math.round(imported.width)}` : imported.err);
 await page.evaluate(() => { if (app.state.isEditing) editor.cancel(); });
 
+// --- build stamp ---------------------------------------------------------
+// version.json is written by the deploy workflow, so it is absent locally.
+// Both paths matter: absent must leave the static version alone rather than
+// blanking it or throwing, and present must be picked up — otherwise the whole
+// point (telling at a glance whether a push actually went live) is lost.
+{
+    const noStamp = await page.evaluate(() => document.getElementById('version-tag').textContent.trim());
+    check(noStamp.length > 0, 'version line survives a missing build stamp', `shows "${noStamp}"`);
+
+    const stamped = await page.evaluate(async () => {
+        const el = document.getElementById('version-tag');
+        const real = window.fetch;
+        window.fetch = (u, o) => String(u).includes('version.json')
+            ? Promise.resolve({ ok: true, json: () => Promise.resolve({ commit: 'deadbeefcafe', short: 'deadbee', ref: 'main', built: '2026-09-21T09:00:00Z' }) })
+            : real(u, o);
+        app.showBuildStamp();
+        await new Promise(r => setTimeout(r, 120));
+        window.fetch = real;
+        return { text: el.textContent.trim(), title: el.title };
+    });
+    check(stamped.text === 'build deadbee', 'the live build stamp is displayed', `"${stamped.text}"`);
+    check(/main/.test(stamped.title), 'and names the branch it came from', stamped.title);
+}
+
 // --- canvas actually drew something ------------------------------------
 const drew = await page.evaluate(() => {
     const c = document.getElementById('sim-canvas');

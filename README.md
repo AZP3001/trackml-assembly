@@ -246,6 +246,34 @@ Custom tracks, slider settings and the trained population therefore all live in 
 
 ---
 
+## Deployment
+
+The site is served straight out of the repository by GitHub Pages, so the
+committed `wasm/*.wasm` **are** the backend. `.github/workflows/deploy.yml`
+rebuilds them from `wasm/sim.c` on every run and fails if the bytes differ, then
+publishes.
+
+**Pages only accepts a deployment from the repository's default branch.** A run
+from any other branch is rejected by the `github-pages` environment before a
+single step executes, which surfaces as a failed job with no logs and no
+explanation — which is exactly why this looked like "the workflows don't work"
+for a while. The workflow therefore doesn't hard-code a branch name; every job
+is gated on `github.event.repository.default_branch`, which GitHub fills in at
+run time. Change the default branch under **Settings → General → Default
+branch** and publishing keeps working with no edit here. Push to a branch that
+isn't the default and the run tells you so in its summary instead of failing.
+
+A successful deploy step is not the same as a live site, and the gap between
+them is what actually bit this project: the published site sat on a 21-hour-old
+commit while every workflow upstream was green. So the deploy writes a
+`version.json` stamp naming the commit, and a `verify-live` job then polls the
+published URL until it serves that commit — failing loudly if it never does.
+The sidebar reads the same file, so the build you are looking at is named under
+the title. The stamp is generated at publish time and never committed; a stamp
+in git would be stale by definition.
+
+---
+
 ## Running it locally
 
 The page fetches a `.wasm` file and starts Workers, and browsers allow neither over `file://` — so
