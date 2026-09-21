@@ -160,16 +160,16 @@
 
                 <h4 class="text-[10px] font-bold text-slate-400 uppercase tracking-wide border-b border-slate-600 pb-1 mt-2">Evolution & Brain</h4>
                 <div onmouseenter="app.showInfo('populationSize')" onmouseleave="app.showInfo(null)">
-                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Pop Size</span><span id="val-pop">200</span></label>
-                    <input id="cfg-populationSize" type="range" min="20" max="500" step="20" value="200" oninput="app.updateConfig('populationSize', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Pop Size</span><span id="val-pop">500</span></label>
+                    <input id="cfg-populationSize" type="range" min="20" max="500" step="20" value="500" oninput="app.updateConfig('populationSize', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                 <div onmouseenter="app.showInfo('eliteClones')" onmouseleave="app.showInfo(null)">
-                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Elite Clones</span><span id="val-elite">10</span></label>
-                    <input id="cfg-eliteClones" type="range" min="0" max="50" step="1" value="10" oninput="app.updateConfig('eliteClones', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Elite Clones</span><span id="val-elite">30</span></label>
+                    <input id="cfg-eliteClones" type="range" min="0" max="50" step="1" value="30" oninput="app.updateConfig('eliteClones', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                  <div onmouseenter="app.showInfo('mutationRate')" onmouseleave="app.showInfo(null)">
-                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Mutation Rate</span><span id="val-mut">15%</span></label>
-                    <input id="cfg-mutationRate" type="range" min="0.00" max="1.0" step="0.05" value="0.15" oninput="app.updateConfig('mutationRate', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Mutation Rate</span><span id="val-mut">30%</span></label>
+                    <input id="cfg-mutationRate" type="range" min="0.00" max="1.0" step="0.05" value="0.30" oninput="app.updateConfig('mutationRate', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                  <div onmouseenter="app.showInfo('hiddenLayers')" onmouseleave="app.showInfo(null)">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Hidden Layers</span><span id="val-hidden">5</span></label>
@@ -197,9 +197,9 @@
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Turn Speed</span><span id="val-turn">0.04</span></label>
                     <input id="cfg-turnSpeed" type="range" min="0.02" max="0.4" step="0.01" value="0.04" oninput="app.updatePhysics('turnSpeed', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
-                <div onmouseenter="app.showInfo('grip')" onmouseleave="app.showInfo(null)">
-                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Grip (Friction)</span><span id="val-grip">93%</span></label>
-                    <input id="cfg-grip" type="range" min="0.8" max="0.99" step="0.01" value="0.93" oninput="app.updatePhysics('grip', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                <div onmouseenter="app.showInfo('brakeStrength')" onmouseleave="app.showInfo(null)">
+                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Brake Strength</span><span id="val-brakeStrength">0.2</span></label>
+                    <input id="cfg-brakeStrength" type="range" min="0.05" max="1.0" step="0.05" value="0.2" oninput="app.updatePhysics('brakeStrength', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
 
                 <div id="setting-info" class="text-[10px] text-slate-500 italic min-h-[50px] border-t border-slate-600 pt-2 mt-2 transition-colors">

@@ -137,7 +137,7 @@ function brainToRef(flat, h) {
     };
 }
 
-const cfg = { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.04, grip: 0.93, targetLaps: 3 };
+const cfg = { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.04, brakeStrength: 0.2, targetLaps: 3 };
 const POP = 40, HIDDEN = 5, TTL = 750;
 
 console.log('TrackML WASM vs JS parity test\n');
@@ -149,7 +149,7 @@ for (const def of TRACKS) {
     const track = buildTrack(def);
 
     // --- wasm side ---
-    w.set_config(cfg.maxSpeed, cfg.acceleration, cfg.turnSpeed, cfg.grip, TTL, cfg.targetLaps, 0.15, HIDDEN);
+    w.set_config(cfg.maxSpeed, cfg.acceleration, cfg.turnSpeed, cfg.brakeStrength, TTL, cfg.targetLaps, 0.15, HIDDEN);
     w.pop_init(POP, 0, HIDDEN, 12345);
     w.pop_randomize_brains();
     const stride = w.brain_stride();

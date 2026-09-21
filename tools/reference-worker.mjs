@@ -1,10 +1,16 @@
-// reference-worker.js — the JavaScript edition's simulation worker, copied
-// VERBATIM out of the JS TrackML's script.js. Nothing in the app loads this;
-// tools/paritytest.mjs runs it side by side with sim.wasm on identical tracks
-// and identical brains to prove the two produce the same driving.
+// reference-worker.js — started as the JS TrackML edition's simulation worker,
+// copied verbatim out of script.js in AZP3001/main. Nothing in the app loads
+// this; tools/paritytest.mjs runs it side by side with sim.wasm on identical
+// tracks and identical brains to prove the two agree.
 //
-// Do not "improve" anything below. Its only job is to be the other version.
-// Re-copy it from the JS edition if that one ever changes.
+// AZP3001/main is archived and frozen — it will not change again — while this
+// project's physics keeps moving (see the braking/turning/grip rework in
+// updateCar below, none of which the archived edition ever had). So this file
+// is no longer "re-copy it if the JS edition changes": it is now the
+// independent-language mirror of sim.c's CURRENT physics, kept hand-in-hand
+// with it. Its job is unchanged — an honest second implementation that a real
+// wasm bug (a sign error, an off-by-one bucket, a transposed matrix) blows up
+// against — it just tracks sim.c now instead of a repo that no longer moves.
 //
 // The one concession to running under Node: the original was a template string
 // evaluated inside a real Worker, so it closed over `self`. Here it is an
@@ -94,6 +100,12 @@ export function createReferenceWorker(self) {
         }
     }
 
+    // Fixed lateral grip — see CAR_LAT_GRIP in sim.c for why this is no
+    // longer a config field.
+    const CAR_LAT_GRIP = 0.93;
+    // See TURN_GRIP_MIN_SPEED / TURN_GRIP_REF_SPEED in sim.c.
+    const TURN_GRIP_MIN_SPEED = 0.05, TURN_GRIP_REF_SPEED = 3.0;
+
     function updateCar(c, config) {
         if (c.crashed) return;
         c.timeToLive--; c.framesAlive++;
@@ -102,19 +114,33 @@ export function createReferenceWorker(self) {
         const steer = c.oL[0] || 0;
         const throttle = c.oL[1] || 0;
 
-        const speedFactor = Math.min(c.speed / 4.0, 1.0); 
-        c.angle += steer * config.turnSpeed * (0.2 + 0.8 * speedFactor); 
+        // Grip-limited turning: authority falls off past TURN_GRIP_REF_SPEED
+        // instead of ramping UP with speed, and a car below TURN_GRIP_MIN_SPEED
+        // gets none at all — see sim.c's updateCar for the reasoning.
+        if (c.speed > TURN_GRIP_MIN_SPEED) {
+            const authority = Math.min(TURN_GRIP_REF_SPEED / c.speed, 1.0);
+            c.angle += steer * config.turnSpeed * authority;
+        }
 
         const cosA = Math.cos(c.angle), sinA = Math.sin(c.angle);
         let vx = c.vx, vy = c.vy;
 
-        if (throttle > 0) { vx += cosA * throttle * config.acceleration; vy += sinA * throttle * config.acceleration; } 
-        else { vx *= 0.95; vy *= 0.95; }
+        if (throttle > 0) {
+            vx += cosA * throttle * config.acceleration; vy += sinA * throttle * config.acceleration;
+        } else if (throttle < 0) {
+            // Proportional braking — see sim.c's updateCar.
+            const sp = Math.sqrt(vx * vx + vy * vy);
+            if (sp > 1.0e-4) {
+                const dec = Math.min(-throttle * config.brakeStrength, sp);
+                const k = (sp - dec) / sp;
+                vx *= k; vy *= k;
+            }
+        }
 
         const latVel = vx * (-sinA) + vy * cosA;
-        let grip = config.grip; if(Math.abs(latVel) > 2.5) grip *= 0.8;
-        
-        vx += (-sinA) * -latVel * grip; 
+        let grip = CAR_LAT_GRIP; if(Math.abs(latVel) > 2.5) grip *= 0.8;
+
+        vx += (-sinA) * -latVel * grip;
         vy += cosA * -latVel * grip;
         vx *= 0.99; vy *= 0.99;
         

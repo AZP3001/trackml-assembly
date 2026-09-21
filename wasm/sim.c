@@ -1337,15 +1337,23 @@ __attribute__((export_name("track_start_cp"))) i32 track_start_cp(void) { return
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
-static float cfg_maxSpeed = 10.0f, cfg_accel = 0.05f, cfg_turnSpeed = 0.04f, cfg_grip = 0.93f;
+static float cfg_maxSpeed = 10.0f, cfg_accel = 0.05f, cfg_turnSpeed = 0.04f, cfg_brakeStrength = 0.2f;
 static i32   cfg_initialTTL = 750, cfg_targetLaps = 3;
 static float cfg_mutationRate = 0.15f;
 static i32   cfg_hidden = 5;
 
+// Lateral grip used to cancel sideways slip and keep the car's velocity
+// tracking its heading (see updateCar). It used to be a user-facing slider,
+// but its usable range (0.8-0.99) canceled 80-99% of any sideways velocity
+// every single frame either way — a few frames in, the two ends of the slider
+// left the car in the same place. Fixed rather than exposed, so nothing about
+// turning or braking below depends on a knob that never did anything.
+static const float CAR_LAT_GRIP = 0.93f;
+
 __attribute__((export_name("set_config")))
-void set_config(float maxSpeed, float accel, float turnSpeed, float grip,
+void set_config(float maxSpeed, float accel, float turnSpeed, float brakeStrength,
                 i32 initialTTL, i32 targetLaps, float mutationRate, i32 hidden) {
-    cfg_maxSpeed = maxSpeed; cfg_accel = accel; cfg_turnSpeed = turnSpeed; cfg_grip = grip;
+    cfg_maxSpeed = maxSpeed; cfg_accel = accel; cfg_turnSpeed = turnSpeed; cfg_brakeStrength = brakeStrength;
     cfg_initialTTL = initialTTL; cfg_targetLaps = targetLaps;
     cfg_mutationRate = mutationRate;
     cfg_hidden = hidden < 1 ? 1 : (hidden > MAX_HIDDEN ? MAX_HIDDEN : hidden);
@@ -1554,6 +1562,10 @@ static void feedForward(i32 i) {
     }
 }
 
+// See the steering block inside updateCar for the physics these implement.
+static const float TURN_GRIP_MIN_SPEED = 0.05f;
+static const float TURN_GRIP_REF_SPEED = 3.0f;
+
 static void updateCar(i32 i) {
     car_ttl[i]--; car_frames[i]++;
     if (car_ttl[i] <= 0) { car_crashed[i] = 1; return; }
@@ -1561,18 +1573,41 @@ static void updateCar(i32 i) {
     float steer = car_out[i * OUT_N];
     float throttle = car_out[i * OUT_N + 1];
 
-    float speedFactor = minf(car_speed[i] / 4.0f, 1.0f);
-    car_angle[i] += steer * cfg_turnSpeed * (0.2f + 0.8f * speedFactor);
+    // Turning is grip-limited, not speed-boosted. Holding a steer angle at
+    // speed v asks the tires for lateral acceleration proportional to v times
+    // the yaw rate, and a tire only has so much of that to give before it
+    // slides instead of turning — so the available yaw rate falls off as
+    // roughly 1/v once past TURN_GRIP_REF_SPEED. Below TURN_GRIP_MIN_SPEED
+    // there is no rolling for the tires to grip at all, so a stopped car gets
+    // zero authority: turning the wheel does nothing until it is moving,
+    // exactly like a real parked car.
+    if (car_speed[i] > TURN_GRIP_MIN_SPEED) {
+        float authority = minf(TURN_GRIP_REF_SPEED / car_speed[i], 1.0f);
+        car_angle[i] += steer * cfg_turnSpeed * authority;
+    }
 
     double sd, cd; sincos_d((double)car_angle[i], &sd, &cd);
     float sinA = (float)sd, cosA = (float)cd;
     float vx = car_vx[i], vy = car_vy[i];
 
-    if (throttle > 0.0f) { vx += cosA * throttle * cfg_accel; vy += sinA * throttle * cfg_accel; }
-    else { vx *= 0.95f; vy *= 0.95f; }
+    if (throttle > 0.0f) {
+        vx += cosA * throttle * cfg_accel; vy += sinA * throttle * cfg_accel;
+    } else if (throttle < 0.0f) {
+        // Braking scales with how hard the pedal is pressed, not a flat
+        // snap — a throttle of -0.05 should barely touch the speedometer, and
+        // -1.0 should haul the car down hard. The old code multiplied speed
+        // by a flat 0.95 for ANY non-positive throttle, so -0.01 and -1.0
+        // braked identically hard and looked like an instant stop either way.
+        float sp = sqrtf_(vx * vx + vy * vy);
+        if (sp > 1.0e-4f) {
+            float dec = minf(-throttle * cfg_brakeStrength, sp);   // never reverses the car
+            float k = (sp - dec) / sp;
+            vx *= k; vy *= k;
+        }
+    }
 
     float latVel = vx * (-sinA) + vy * cosA;
-    float grip = cfg_grip; if (absf(latVel) > 2.5f) grip *= 0.8f;
+    float grip = CAR_LAT_GRIP; if (absf(latVel) > 2.5f) grip *= 0.8f;
 
     vx += (-sinA) * -latVel * grip;
     vy += cosA * -latVel * grip;

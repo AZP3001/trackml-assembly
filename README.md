@@ -98,9 +98,9 @@ it scales across cores the same way, and it needs no special headers.
 Fine-tune the simulation and the learning process using the built-in settings.
 
 ### AI & Evolutionary Parameters
-* **Pop Size:** The number of agents generated per generation.
-* **Elite Clones:** Number of top-performing agents preserved exactly for the next generation (prevents regression).
-* **Mutation Rate:** The probability and intensity of random changes to the neural weights.
+* **Pop Size** (default 500)**:** The number of agents generated per generation.
+* **Elite Clones** (default 30)**:** Number of top-performing agents preserved exactly for the next generation (prevents regression).
+* **Mutation Rate** (default 30%)**:** The probability and intensity of random changes to the neural weights.
 * **Hidden Layers:** Adjust the complexity of the AI's "brain" by changing the number of internal neurons.
 * **Initial TTL (Time-To-Live):** A countdown timer for each agent. Agents must reach checkpoints to reset this timer, ensuring they don't just sit still.
 * **Target Laps:** Defines the goalpost for a successful generation before moving to the next stage of evolution.
@@ -108,12 +108,19 @@ Fine-tune the simulation and the learning process using the built-in settings.
 ### Physics Engine
 * **Max Speed:** Maximum Speed of the Cars.
 * **Acceleration:** Acceleration to the Max Speed.
-* **Turn Speed:** Controls how quickly the cars are able to turn.
-* **Grip:** Doesnt do much, introduced as a fix for turning Physics.
+* **Turn Speed:** How quickly the cars can turn — but only up to what grip allows. Below about 3 px/frame of speed a car turns at full Turn Speed; past that, available turn rate falls off roughly as `3 / speed`, the same tradeoff a real driver feels: carrying too much speed into a corner costs you the turn, so the fast line is to slow down first, not to out-steer the corner. A car with essentially no speed gets no turn authority at all — turning the wheel does nothing until it's rolling, just like a parked car.
+* **Brake Strength** (default 0.2)**:** How hard the brake pedal bites when the AI's throttle output goes negative. Braking now scales with how hard it's pressed — a throttle of -0.05 barely touches the speedometer, -1.0 hauls the car down hard — rather than the old behaviour, where ANY negative throttle snapped speed down by the same flat 5% regardless of how lightly it was pressed, so brakes looked "instant" no matter what the AI actually asked for.
+* Lateral grip (the friction that keeps a car's velocity tracking its heading instead of drifting sideways) used to be a slider here too. It's fixed internally now: its usable range only ever canceled 80-99% of sideways slip every frame, so the two ends of that slider left a car in the same place after a couple of frames. Removed rather than kept as a knob that did effectively nothing.
 
 ### Simulation Control
 * **Simulation Speed:** Adjust the simulation speed.
 * **Hyper Mode:** Simulates as fast as your PC allows. (Doesn't render for even faster Processing)
+
+The fitness chart keeps a rolling window of the last 300 generations rather than the whole session's
+history. It used to keep everything and re-feed the full, ever-growing array into Chart.js on every
+single generation — cheap at first, then a redraw that got a little longer every generation, which is
+why a long-running session used to feel like it was gradually slowing down even though the simulation
+itself never changed pace.
 
 ---
 
@@ -399,7 +406,7 @@ then open <http://localhost:8000>.
 
 ```sh
 npm run build        # compile both wasm variants
-npm test             # math, parity, auto width, gates, race behaviour, version scheme
+npm test             # math, parity, auto width, gates, race behaviour, car physics, version scheme
 npm run test:e2e     # real browser, needs a server running
 npm run bench        # wasm vs the JavaScript edition
 ```
@@ -408,10 +415,12 @@ npm run bench        # wasm vs the JavaScript edition
   `sim.c` against the `Math.*` they replace, over millions of samples. `acos`, `tanh` and `atan2`
   come out bit-identical at f32 precision; `sin`/`cos` are within half an ulp out to ±4000 radians
   (the car heading is never wrapped, so large arguments are real).
-* **`tools/paritytest.mjs`** — the important one. It runs `sim.wasm` and the JavaScript edition's
-  actual worker (`tools/reference-worker.mjs`, copied verbatim) side by side on the same tracks with
-  the same brains, and compares them frame by frame. Trajectories stay within 4e-4 px over the first
-  60 frames, and all 160 test cars agree on who crashed and how many laps they finished.
+* **`tools/paritytest.mjs`** — the important one. It runs `sim.wasm` against an independent JS
+  mirror of the same physics (`tools/reference-worker.mjs` — it started as the archived JS edition's
+  worker copied verbatim, and is now kept hand-in-hand with `sim.c` since that edition is frozen and
+  this project's physics keeps moving) side by side on the same tracks with the same brains, and
+  compares them frame by frame. Trajectories stay within 4e-4 px over the first 60 frames, and all 160
+  test cars agree on who crashed and how many laps they finished.
 * **`tools/autowidth.mjs`** — the auto-width solver. Both failure modes are tested, since they're
   opposites: not narrowing a track that pinches, and narrowing one that doesn't (which would wreck
   every normal track). Also covers the local/global slider, the smoothness of the taper, and a
@@ -425,6 +434,12 @@ npm run bench        # wasm vs the JavaScript edition
   runs generations to completion rather than to a frame budget — a crawling car
   needs tens of thousands of frames to finish a lap, so a frame-capped harness
   cannot see the pace problem at all.
+* **`tools/carphysics.mjs`** — braking, turning and the standstill case in isolation, via a synthetic
+  brain (every input weight zero, only the output bias set) so steer/throttle are exactly what the
+  test wants every frame regardless of sensors. Proves: a car at zero speed gets zero turn authority
+  no matter how hard it's steering; a light brake input and a hard one decelerate by measurably
+  different amounts (not the same flat snap); and turning authority matches the grip formula exactly
+  at both a low-speed and a high-speed sample, with the low-speed one strictly higher.
 * **`tools/versioncheck.mjs`** — the version scheme (see [Versioning](#versioning)): the
   commit baked into `deploy.yml` as the V21.0 baseline is still this repo's root commit and still an
   ancestor of `HEAD`, and the computed version never decreases walking the branch forward.
@@ -455,6 +470,6 @@ image-import.js         PNG/JPG -> track pipeline
 wasm/sim.c              the entire compute backend
 wasm/build.sh           clang -> sim.wasm + sim-simd.wasm
 wasm/*.wasm             committed build output (CI verifies it matches the source)
-tools/                  math, parity, auto-width, gates, race, version, end-to-end and benchmark harnesses
+tools/                  math, parity, auto-width, gates, race, car physics, version, end-to-end and benchmark harnesses
 external/               tailwind, chart.js, lucide — vendored, no CDN at runtime
 ```

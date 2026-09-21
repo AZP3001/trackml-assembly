@@ -24,7 +24,8 @@ const SETTING_DESCRIPTIONS = {
     initialTTL: "Time to Live. Frames allowed before death if no checkpoint is reached.",
     targetLaps: "Laps needed to trigger the next generation automatically.",
     maxSpeed: "Top speed. Higher speeds require faster AI reaction times.",
-    acceleration: "Engine power.", turnSpeed: "Steering sensitivity.", grip: "Lateral Friction. 93% is balanced."
+    acceleration: "Engine power.", turnSpeed: "Steering sensitivity. Cars turn tightest at low speed and lose authority as they speed up, same as a real car's grip limit.",
+    brakeStrength: "How hard the brake pedal bites. Braking now scales with how hard the AI presses it, instead of every negative throttle snapping speed down by the same flat amount."
 };
 
 // How many simulation steps to ask for per round trip to the workers.
@@ -141,8 +142,8 @@ function wipeStorage() {
 // --- Main Application ---
 const app = {
     state: {
-        populationSize: 200, eliteClones: 10, targetLaps: 3, mutationRate: 0.15, hiddenLayers: 5, initialTTL: 750,
-        physics: { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.04, grip: 0.93 },
+        populationSize: 500, eliteClones: 30, targetLaps: 3, mutationRate: 0.30, hiddenLayers: 5, initialTTL: 750,
+        physics: { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.04, brakeStrength: 0.2 },
         tracks: [], currentTrackIndex: 1, cars: [], generation: 1, isRunning: false, speedMultiplier: 1, hyperMode: false,
         stats: [], globalBest: null, bestTimes: { gen: null, all: null }, isEditing: false, trackToEdit: null,
         bgCanvas: null, lapHistory: [], spectateCarId: null, aliveCount: 0
@@ -341,6 +342,13 @@ const app = {
             gen: this.state.generation, best, avg: sum / cars.length,
             time: this.state.bestTimes.gen ? this.state.bestTimes.gen.toFixed(2) : null
         });
+        // Unbounded here used to mean the chart re-fed and redrew its ENTIRE
+        // history on every single generation — cheap for the first few
+        // hundred, then a growing stall that made a long-running session look
+        // like it was "getting slower" the longer it was left going, even
+        // though the simulation itself never changed pace. Capped exactly
+        // like lapHistory below: a rolling window costs the same every time.
+        if(this.state.stats.length > 300) this.state.stats.shift();
         this.updateChart();
 
         // Elite clones keep the green/lime livery so you can pick the carried-
@@ -563,7 +571,7 @@ const app = {
     },
     
     // Physics is pure config — pushing it doesn't need the track rebuilding.
-    updatePhysics: function(k, v) { this.state.physics[k] = parseFloat(v); document.getElementById('val-'+(k==='maxSpeed'?'maxSpeed':(k==='acceleration'?'accel':(k==='turnSpeed'?'turn':'grip')))).innerText = k==='grip'?Math.round(v*100)+'%':v; Engine.pushConfig(this.state); },
+    updatePhysics: function(k, v) { this.state.physics[k] = parseFloat(v); document.getElementById('val-'+(k==='maxSpeed'?'maxSpeed':(k==='acceleration'?'accel':(k==='turnSpeed'?'turn':'brakeStrength')))).innerText = v; Engine.pushConfig(this.state); },
     updateConfig: function(k, v) {
         this.state[k] = parseFloat(v);
         let id = 'val-'+(k==='populationSize'?'pop':k==='targetLaps'?'laps':k==='speedMultiplier'?'speed':k==='eliteClones'?'elite':k==='mutationRate'?'mut':k==='hiddenLayers'?'hidden':'ttl');
@@ -591,7 +599,7 @@ const app = {
         apply('cfg-maxSpeed', st.physics.maxSpeed, 'val-maxSpeed');
         apply('cfg-acceleration', st.physics.acceleration, 'val-accel');
         apply('cfg-turnSpeed', st.physics.turnSpeed, 'val-turn');
-        apply('cfg-grip', st.physics.grip, 'val-grip', v => Math.round(v*100)+'%');
+        apply('cfg-brakeStrength', st.physics.brakeStrength, 'val-brakeStrength');
     },
 
     showInfo: function(k) {

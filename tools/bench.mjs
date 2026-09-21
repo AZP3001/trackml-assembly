@@ -24,7 +24,7 @@ const POP = Number(process.argv[2] || 200);
 const STEPS = Number(process.argv[3] || 3000);
 const HIDDEN = 5, TTL = 1e9;      // effectively immortal, so the work is comparable
 const IN_N = 9, OUT_N = 2;
-const cfg = { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.04, grip: 0.93, targetLaps: 1e9 };
+const cfg = { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.04, brakeStrength: 0.2, targetLaps: 1e9 };
 
 const CW = 1200, CH = 900, cx = CW / 2, cy = CH / 2;
 const path = Array.from({ length: 48 }, (_, i) => {
@@ -51,7 +51,7 @@ const track = { walls, checkpoints, zones: [], segStep: 34,
                 startPos: { x: w.track_start_x(), y: w.track_start_y() }, startAngle: w.track_start_angle() };
 
 // --- identical brains on both sides ---
-w.set_config(cfg.maxSpeed, cfg.acceleration, cfg.turnSpeed, cfg.grip, TTL, cfg.targetLaps, 0.15, HIDDEN);
+w.set_config(cfg.maxSpeed, cfg.acceleration, cfg.turnSpeed, cfg.brakeStrength, TTL, cfg.targetLaps, 0.15, HIDDEN);
 w.pop_init(POP, 0, HIDDEN, 999);
 w.pop_randomize_brains();
 const stride = w.brain_stride();

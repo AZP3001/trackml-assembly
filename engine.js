@@ -207,7 +207,7 @@ const Engine = {
     // ---- config --------------------------------------------------------
     pushConfig: function(state) {
         const p = state.physics;
-        const args = [p.maxSpeed, p.acceleration, p.turnSpeed, p.grip,
+        const args = [p.maxSpeed, p.acceleration, p.turnSpeed, p.brakeStrength,
                       state.initialTTL, state.targetLaps, state.mutationRate, state.hiddenLayers];
         if (this.master) this.master.ex.set_config(...args);
         this.workers.forEach(w => w.postMessage({ type: 'config', args }));
@@ -228,7 +228,7 @@ const Engine = {
             autoWidthBlend: track.autoWidthBlend || 0
         };
         const p = state.physics;
-        const config = [p.maxSpeed, p.acceleration, p.turnSpeed, p.grip,
+        const config = [p.maxSpeed, p.acceleration, p.turnSpeed, p.brakeStrength,
                         state.initialTTL, state.targetLaps, state.mutationRate, state.hiddenLayers];
         if (this.master) this.master.ex.set_config(...config);
         this.workers.forEach(w => w.postMessage({ type: 'track', def, config }));

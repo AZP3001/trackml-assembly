@@ -69,6 +69,16 @@ jobs:
       - name: Race behaviour
         run: node tools/racepace.mjs wasm/sim.wasm
 
+      # A stopped car can't pivot, braking scales with how hard the AI presses
+      # it instead of snapping speed down by the same flat amount regardless,
+      # and turning authority is grip-limited (full at low speed, falling off
+      # near maxSpeed) rather than the old curve that turned WORST at a
+      # standstill and BEST flat out.
+      - name: Car physics (braking, turning, grip)
+        run: |
+          node tools/carphysics.mjs wasm/sim.wasm
+          node tools/carphysics.mjs wasm/sim-simd.wasm
+
       # The sidebar version number ("V21.9 · build ...") is computed from git
       # history in deploy.yml, never typed by hand — this proves the formula
       # is sound and stays monotonic walking the branch forward.

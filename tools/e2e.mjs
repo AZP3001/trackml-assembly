@@ -264,7 +264,7 @@ check(!afterReload.sessionTrack, 'a track made this session does not come back')
 check(!afterReload.ghost, 'storage planted by an older build is ignored');
 check(afterReload.tracks === boot.tracks, 'reload gives the built-in track list',
     `${afterReload.tracks} tracks`);
-check(afterReload.pop === 200, 'settings reset to defaults', `population ${afterReload.pop}`);
+check(afterReload.pop === 500, 'settings reset to defaults', `population ${afterReload.pop}`);
 
 // --- auto width ----------------------------------------------------------
 // A wedge corridor: the track runs back alongside itself 70px away, which at a
