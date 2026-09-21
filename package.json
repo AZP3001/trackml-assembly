@@ -6,10 +6,11 @@
   "scripts": {
     "build": "./wasm/build.sh",
     "serve": "http-server -p 8765 .",
-    "test": "npm run test:math && npm run test:parity && npm run test:autowidth",
+    "test": "npm run test:math && npm run test:parity && npm run test:autowidth && npm run test:race",
     "test:math": "node tools/mathtest.mjs wasm/sim.wasm && node tools/mathtest.mjs wasm/sim-simd.wasm",
     "test:parity": "node tools/paritytest.mjs wasm/sim.wasm && node tools/paritytest.mjs wasm/sim-simd.wasm",
     "test:autowidth": "node tools/autowidth.mjs wasm/sim.wasm && node tools/autowidth.mjs wasm/sim-simd.wasm",
+    "test:race": "node tools/racepace.mjs wasm/sim.wasm",
     "test:e2e": "node tools/e2e.mjs",
     "bench": "node tools/bench.mjs && WASM=wasm/sim-simd.wasm node tools/bench.mjs"
   },

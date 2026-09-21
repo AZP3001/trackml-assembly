@@ -295,6 +295,7 @@ static Wall       *tk_walls;     static i32 tk_wall_n;
 static Checkpoint *tk_cps;       static i32 tk_cp_n;
 static Zone       *tk_zones;     static i32 tk_zone_n;
 static float       tk_start_x, tk_start_y, tk_start_angle, tk_width;
+static i32         tk_start_cp;   // checkpoint nearest the start line
 
 // Uniform grid over the centreline, CSR-packed (counts -> prefix sums -> fill)
 // instead of the JS Map<"gx,gy", []>. Same 3x3 neighbourhood query, but the
@@ -411,6 +412,29 @@ static float roadDepth(float px, float py, float *rOut) {
     }
     if (rOut) *rOut = bestR;
     return best;
+}
+
+// Is this point on the asphalt at all? Same union-of-discs question as
+// roadDepth, but it only needs a yes or no, so it skips the square roots and
+// bails on the first segment that claims the point — which is usually the
+// first one it looks at.
+static i32 insideRoad(float px, float py) {
+    if (!grid_items || !tk_w) return 1;      // no geometry to judge against
+    i32 gx = (i32)floorf_((px - grid_ox) / grid_cell);
+    i32 gy = (i32)floorf_((py - grid_oy) / grid_cell);
+    i32 xlo = maxi(gx - 1, 0), xhi = mini(gx + 1, grid_nx - 1);
+    i32 ylo = maxi(gy - 1, 0), yhi = mini(gy + 1, grid_ny - 1);
+    i32 n = tk_center_n;
+    for (i32 ix = xlo; ix <= xhi; ix++) for (i32 iy = ylo; iy <= yhi; iy++) {
+        i32 k = iy * grid_nx + ix;
+        for (i32 s = grid_start[k]; s < grid_start[k + 1]; s++) {
+            i32 i = grid_items[s], j = (i + 1) % n;
+            Vec2 a = tk_center[i], b = tk_center[j];
+            float r = maxf(tk_w[i], tk_w[j]);
+            if (_pointSegDist2(px, py, a.x, a.y, b.x, b.y) < r * r) return 1;
+        }
+    }
+    return 0;
 }
 
 // Distance from sample i to the nearest part of the track that isn't simply
@@ -1074,6 +1098,23 @@ i32 track_build(const float *path, i32 n_in, float width,
     tk_start_angle = has_angle ? sang
         : atan2f_(tk_center[1].y - tk_center[0].y, tk_center[1].x - tk_center[0].x);
 
+    // Which checkpoint the start line actually sits on.
+    //
+    // Cars used to be handed nextCheckpointIndex = 1 no matter where the start
+    // was. On a track whose start had been dragged elsewhere that aimed them at
+    // a checkpoint most of a lap away — and since the wall lookup is keyed on
+    // the checkpoint a car is heading for, it also handed them the walls from
+    // the wrong part of the track entirely.
+    tk_start_cp = 0;
+    {
+        float best = 1.0e30f;
+        for (i32 i = 0; i < tk_cp_n; i++) {
+            float dx = tk_cps[i].cx - tk_start_x, dy = tk_cps[i].cy - tk_start_y;
+            float d = dx * dx + dy * dy;
+            if (d < best) { best = d; tk_start_cp = i; }
+        }
+    }
+
     buildWallBuckets();
     return 1;
 }
@@ -1093,6 +1134,7 @@ __attribute__((export_name("track_cp_count"))) i32 track_cp_count(void) { return
 __attribute__((export_name("track_start_x"))) float track_start_x(void) { return tk_start_x; }
 __attribute__((export_name("track_start_y"))) float track_start_y(void) { return tk_start_y; }
 __attribute__((export_name("track_start_angle"))) float track_start_angle(void) { return tk_start_angle; }
+__attribute__((export_name("track_start_cp"))) i32 track_start_cp(void) { return tk_start_cp; }
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -1119,6 +1161,7 @@ static float car_vx[MAX_CARS], car_vy[MAX_CARS], car_speed[MAX_CARS], car_fitnes
 static i32   car_crashed[MAX_CARS], car_ttl[MAX_CARS], car_frames[MAX_CARS];
 static i32   car_nextCP[MAX_CARS], car_laps[MAX_CARS], car_cpReached[MAX_CARS];
 static float car_lastLap[MAX_CARS]; static i32 car_prevLapFrame[MAX_CARS];
+static i32   car_lastCpFrame[MAX_CARS];   // for scoring how fast each gate was reached
 static float car_sensors[MAX_CARS * SENS_N];
 static float car_out[MAX_CARS * OUT_N];
 static float car_in[MAX_CARS * IN_N];
@@ -1134,7 +1177,7 @@ static float hidden_scratch[MAX_HIDDEN];
 #define STASH_SLOT MAX_CARS
 static float brains[(MAX_CARS + 1) * BRAIN_MAX];
 static float render_buf[MAX_CARS * RENDER_STRIDE];
-static float fitness_buf[MAX_CARS * 3];
+static float fitness_buf[MAX_CARS * 4];
 
 static i32 pop_n = 0, pop_id_offset = 0, brain_stride_v = 0;
 
@@ -1163,8 +1206,9 @@ static void reset_car(i32 i) {
     car_vx[i] = 0.0f; car_vy[i] = 0.0f; car_speed[i] = 0.0f;
     car_fitness[i] = 0.0f; car_crashed[i] = 0;
     car_ttl[i] = cfg_initialTTL; car_frames[i] = 0;
-    car_nextCP[i] = 1; car_laps[i] = 0; car_cpReached[i] = 0;
-    car_lastLap[i] = 0.0f; car_prevLapFrame[i] = 0;
+    car_nextCP[i] = tk_cp_n > 0 ? (tk_start_cp + 1) % tk_cp_n : 0;
+    car_laps[i] = 0; car_cpReached[i] = 0;
+    car_lastLap[i] = 0.0f; car_prevLapFrame[i] = 0; car_lastCpFrame[i] = 0;
     for (i32 k = 0; k < SENS_N; k++) car_sensors[i * SENS_N + k] = 0.0f;
     for (i32 k = 0; k < OUT_N; k++) car_out[i * OUT_N + k] = 0.0f;
     for (i32 k = 0; k < IN_N; k++) car_in[i * IN_N + k] = 0.0f;
@@ -1347,6 +1391,19 @@ static void updateCar(i32 i) {
     if (car_x[i] < -100.0f || car_x[i] > 1300.0f || car_y[i] < -100.0f || car_y[i] > 1000.0f) { car_crashed[i] = 1; return; }
     if (tk_cp_n <= 0 || !wbs_start) { car_crashed[i] = 1; return; }
 
+    // Hard containment: off the asphalt is out, immediately.
+    //
+    // The wall tests below are the detailed ones — they catch the car's body
+    // clipping a barrier, which happens first and is what normally ends a run.
+    // This is the backstop underneath them, and it cannot be escaped by any of
+    // the ways a segment-versus-segment test can be: tunnelling through a wall
+    // in one fast frame, slipping through the seam where the barrier is left
+    // open because the track crosses itself, or driving into a stretch whose
+    // walls were not in the lookup bucket. The barrier sits exactly on the edge
+    // of the road, so "the centre is off the road" is "the centre is past a
+    // barrier", whether or not any particular wall segment noticed.
+    if (!insideRoad(car_x[i], car_y[i])) { car_crashed[i] = 1; car_fitness[i] -= 50.0f; return; }
+
     i32 nxt = car_nextCP[i];
     i32 curSeg = (nxt >= 0 && nxt < tk_cp_n) ? nxt : 0;
     i32 wStart = wbs_start[curSeg], wEnd = wbs_start[curSeg + 1];
@@ -1432,18 +1489,55 @@ static void updateCar(i32 i) {
 
         float mx = (nCP->p1x + nCP->p2x) * 0.5f, my = (nCP->p1y + nCP->p2y) * 0.5f;
         float cdx = cx_ - mx, cdy = cy_ - my;
-        if (cdx * cdx + cdy * cdy < 2500.0f) {
+        // How close to the middle of the gate the car has to be before it is
+        // even worth testing whether it crossed.
+        //
+        // This used to be a flat 50px, while a gate spans the full width of the
+        // road — up to 150 either side. A car taking the outside line was
+        // therefore never close enough to the middle to register, and sailed
+        // through gate after gate without its checkpoint index advancing. That
+        // is not a scoring curiosity: the wall lookup is bucketed by the
+        // checkpoint a car is heading for, so a car with a stale index is
+        // handed the walls for a part of the track it left long ago and drives
+        // straight through the ones actually in front of it. Sizing the radius
+        // to the gate (plus a frame of travel and half a car) makes the test
+        // reach the whole gate at any track width.
+        float gateR = tk_w_max + speed + 8.0f;
+        if (cdx * cdx + cdy * cdy < gateR * gateR) {
             if (fastIntersect(prevX, prevY, cx_, cy_, nCP->p1x, nCP->p1y, nCP->p2x, nCP->p2y)
                 || (cdx * cdx + cdy * cdy < 400.0f)) {
                 car_cpReached[i]++;
                 car_nextCP[i] = (nxt + 1) % tk_cp_n;
                 car_ttl[i] += 150; if (car_ttl[i] > 600) car_ttl[i] = 600;
-                car_fitness[i] += 500.0f * fitMult;
-                if (car_nextCP[i] == 0 && tk_cp_n > 2) {
+
+                // Scoring a gate purely on having reached it makes crawling the
+                // winning strategy: the reward is the same however long it took,
+                // and going slowly is far less likely to end in a wall. That is
+                // what produced cars pottering round for two and a half minutes
+                // a lap. The reward now scales with how quickly the gate came.
+                //
+                // It is a MULTIPLIER on a floor, never a subtraction, and that
+                // matters: every gate is still worth at least the old 500, so
+                // reaching more of them always beats reaching fewer, and a lap
+                // is never worth less than most of a lap. A per-frame time
+                // penalty would have inverted that and made crashing on purpose
+                // score better than finishing slowly.
+                float idealCp = TRACK_CP_SPACING / maxf(cfg_maxSpeed, 0.001f);
+                float dtCp = (float)(car_frames[i] - car_lastCpFrame[i]);
+                car_lastCpFrame[i] = car_frames[i];
+                car_fitness[i] += 500.0f * (1.0f + 3.0f * (idealCp / maxf(dtCp, idealCp))) * fitMult;
+
+                // A lap is complete when the car is back at the gate it
+                // started from — not when the index happens to wrap past zero,
+                // which only coincided with the start line on tracks whose
+                // start had never been moved.
+                if (car_nextCP[i] == (tk_start_cp + 1) % tk_cp_n && tk_cp_n > 2) {
                     car_laps[i]++;
-                    car_lastLap[i] = (float)(car_frames[i] - car_prevLapFrame[i]) / 60.0f;
+                    float lapFrames = (float)(car_frames[i] - car_prevLapFrame[i]);
+                    car_lastLap[i] = lapFrames / 60.0f;
                     car_prevLapFrame[i] = car_frames[i];
-                    car_fitness[i] += 3000.0f * fitMult;
+                    float idealLap = (float)tk_cp_n * TRACK_CP_SPACING / maxf(cfg_maxSpeed, 0.001f);
+                    car_fitness[i] += 3000.0f * (1.0f + 3.0f * (idealLap / maxf(lapFrames, idealLap))) * fitMult;
                 }
             }
         }
@@ -1531,11 +1625,17 @@ void write_render(void) {
 __attribute__((export_name("write_fitness")))
 void write_fitness(void) {
     for (i32 i = 0; i < pop_n; i++) {
-        fitness_buf[i * 3]     = car_fitness[i];
-        fitness_buf[i * 3 + 1] = (float)car_laps[i];
-        fitness_buf[i * 3 + 2] = car_lastLap[i];
+        fitness_buf[i * 4]     = car_fitness[i];
+        fitness_buf[i * 4 + 1] = (float)car_laps[i];
+        fitness_buf[i * 4 + 2] = car_lastLap[i];
+        // Gates passed: the progress measure that doesn't quantise to whole
+        // laps, so "nearly all the way round" is distinguishable from "barely
+        // started" both here and on screen.
+        fitness_buf[i * 4 + 3] = (float)car_cpReached[i];
     }
 }
+__attribute__((export_name("fitness_stride")))
+i32 fitness_stride(void) { return 4; }
 
 __attribute__((export_name("alive_count")))
 i32 alive_count(void) {

@@ -15,8 +15,16 @@
 //
 //   1. the two agree closely over a short horizon (drift stays sub-pixel),
 //   2. they agree on the things the simulation is *about* — who crashes, when,
-//      how many checkpoints were taken, roughly what fitness came out,
+//      and how many laps were finished,
 //   3. the geometry the two would drive on is the same track.
+//
+// FITNESS IS DELIBERATELY DIFFERENT and is no longer compared for equality.
+// The JavaScript edition pays the same for reaching a gate however long it
+// took, which makes crawling the winning strategy — that is the bug this port
+// fixes, so agreeing with it here would mean the fix had not been made. What
+// is checked instead is the property that makes the new scoring safe: it only
+// ever multiplies the old reward UP, never subtracts, so more progress still
+// always outranks less. tools/racepace.mjs covers the rest.
 //
 // A real port bug — a sign error in the grip term, a wall bucket off by one,
 // a transposed weight matrix — blows every one of these out immediately.
@@ -134,7 +142,7 @@ const POP = 40, HIDDEN = 5, TTL = 750;
 
 console.log('TrackML WASM vs JS parity test\n');
 
-let worstEarlyDrift = 0, worstCrashFrameDelta = 0, worstFitnessRel = 0;
+let worstEarlyDrift = 0, worstCrashFrameDelta = 0, worstFitnessShortfall = Infinity;
 let totalCars = 0, sameCrashStep = 0, sameCheckpoints = 0;
 
 for (const def of TRACKS) {
@@ -190,14 +198,16 @@ for (const def of TRACKS) {
     // Compare outcomes per car.
     const wasmFit = f32(w.render_ptr(), POP * 18);
     const refFinal = (() => { ref.post({ type: 'run', iters: 0 }); return ref.outbox.pop().buffer; })();
-    let crashAgree = 0, crashDelta = 0, fitRel = 0, lapsAgree = 0;
+    let crashAgree = 0, crashDelta = 0, fitRel = Infinity, lapsAgree = 0;
     for (let i = 0; i < POP; i++) {
         const a = wasmCrashAt[i], b = refCrashAt[i];
         if ((a < 0) === (b < 0)) crashAgree++;
         if (a > 0 && b > 0) crashDelta = Math.max(crashDelta, Math.abs(a - b));
         const fa = wasmFit[i * 18 + 9], fb = refFinal[i * 18 + 9];
+        // Signed, and the wrong way round on purpose: what matters is that the
+        // wasm score never falls BELOW the reference's for the same driving.
         const denom = Math.max(Math.abs(fa), Math.abs(fb), 1);
-        fitRel = Math.max(fitRel, Math.abs(fa - fb) / denom);
+        fitRel = Math.min(fitRel, (fa - fb) / denom);
         if (wasmFit[i * 18 + 8] === refFinal[i * 18 + 8]) lapsAgree++;
     }
 
@@ -206,11 +216,11 @@ for (const def of TRACKS) {
     sameCheckpoints += lapsAgree;
     worstEarlyDrift = Math.max(worstEarlyDrift, earlyDrift);
     worstCrashFrameDelta = Math.max(worstCrashFrameDelta, crashDelta);
-    worstFitnessRel = Math.max(worstFitnessRel, fitRel);
+    worstFitnessShortfall = Math.min(worstFitnessShortfall, fitRel);
 
     console.log(`  ${def.name.padEnd(8)} walls=${String(track.walls.length).padStart(4)} cps=${String(track.checkpoints.length).padStart(3)} ` +
         `centre=${String(track.centerCount).padStart(4)}  drift@${EARLY}f=${earlyDrift.toExponential(2)}px  ` +
-        `crash-agree=${crashAgree}/${POP}  laps-agree=${lapsAgree}/${POP}  max|Δfit|/fit=${fitRel.toExponential(2)}`);
+        `crash-agree=${crashAgree}/${POP}  laps-agree=${lapsAgree}/${POP}  min Δfit/fit=${fitRel.toExponential(2)}`);
 }
 
 console.log();
@@ -222,8 +232,13 @@ report(sameCrashStep / totalCars >= 0.9, 'same cars survive',
     `${sameCrashStep}/${totalCars} agree on crashed-vs-alive`);
 report(sameCheckpoints / totalCars >= 0.9, 'same lap counts',
     `${sameCheckpoints}/${totalCars} agree`);
-report(worstFitnessRel < 0.25, 'fitness lands in the same place',
-    `max relative difference ${worstFitnessRel.toExponential(2)}`);
+// Not "the same fitness" — a strictly-not-worse one. The new scoring multiplies
+// each gate and lap reward by how quickly it was reached, with a floor at the
+// old value, so for identical driving it can only land at or above the
+// reference. A negative shortfall here would mean the floor had been breached
+// and progress was no longer monotonic.
+report(worstFitnessShortfall >= -1e-3, 'the new scoring never pays less than the old for the same driving',
+    `smallest margin ${(worstFitnessShortfall * 100).toFixed(1)}% above the reference`);
 
 console.log();
 if (failures) { console.error(`${failures} parity check(s) failed.`); process.exit(1); }

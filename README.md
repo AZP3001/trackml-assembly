@@ -182,6 +182,58 @@ detour. The code export above is the replacement.
 
 ---
 
+## Staying on the track, and racing
+
+Two things a racing sim has to get right, both of which were wrong in the
+JavaScript edition and are fixed here.
+
+### Cars can no longer drive through the barriers
+
+The wall lookup is bucketed by the checkpoint a car is heading for, so a car
+whose checkpoint index went stale was handed the walls for a part of the track
+it had already left — and drove straight through the ones in front of it.
+
+The index went stale because a gate only counted as reached within a flat 50px
+of its middle, while a gate spans the *full width of the road* — up to 150px
+either side. A car taking the outside line was therefore never close enough to
+register one, and sailed through gate after gate. That is exactly the reported
+"you can still drive through the walls on the outside". The radius now scales
+with the track, so a gate registers across its whole span.
+
+Underneath that there is now a hard backstop: **if a car's centre leaves the
+asphalt, it is out immediately.** The barrier sits exactly on the edge of the
+road, so leaving the road *is* crossing a barrier — and unlike a
+segment-versus-segment test, this cannot be escaped by tunnelling through a
+wall in one fast frame, by slipping through a seam left open where the track
+crosses itself, or by reaching a stretch whose walls weren't in the bucket.
+`tools/racepace.mjs` checks two million live car-frames for a car that is off
+the road; before these fixes it found thousands, up to 270px past the barrier.
+
+### Evolution now selects for speed
+
+Reaching a gate paid the same whether it took four frames or four hundred, and
+driving slowly is far less likely to end in a wall — so the fittest car was the
+most patient one, not the quickest. On narrow, twisty tracks that produced
+winners crawling round at 40 to 90 seconds a lap.
+
+Gate and lap rewards are now scaled by how quickly they were reached. It is a
+**multiplier on a floor, never a subtraction**, which is the part that matters:
+every gate is still worth at least what it used to be, so covering more of the
+track always beats covering less, and a lap is never worth less than most of a
+lap. (A per-frame time penalty — the obvious fix — inverts that, and makes
+crashing on purpose score better than finishing slowly.)
+
+Measured on the same tracks and seeds, with generations run to completion the
+way the app runs them:
+
+| track | before | after |
+| --- | --- | --- |
+| gear, half-width 25 | 42.7s per lap | 14.7s |
+| clover, half-width 25, TTL 10000 | 88.4s | 8.8s, and reached 8 generations sooner |
+| ordinary tracks | 6–8s | unchanged |
+
+---
+
 ## Nothing is cached
 
 Every reload starts from scratch. There is no localStorage, no sessionStorage, no service worker and
@@ -209,7 +261,7 @@ then open <http://localhost:8000>.
 
 ```sh
 npm run build        # compile both wasm variants
-npm test             # math + parity + auto width, on both variants
+npm test             # math, parity, auto width, race behaviour
 npm run test:e2e     # real browser, needs a server running
 npm run bench        # wasm vs the JavaScript edition
 ```
@@ -226,6 +278,12 @@ npm run bench        # wasm vs the JavaScript edition
   opposites: not narrowing a track that pinches, and narrowing one that doesn't (which would wreck
   every normal track). Also covers the local/global slider, the smoothness of the taper, and a
   self-crossing figure eight.
+* **`tools/racepace.mjs`** — the two behavioural properties above: no car is
+  ever off the asphalt, gates register across the full width of the road, a
+  moved start line still works, and the fittest car is one of the fastest. It
+  runs generations to completion rather than to a frame budget — a crawling car
+  needs tens of thousands of frames to finish a lap, so a frame-capped harness
+  cannot see the pace problem at all.
 * **`tools/e2e.mjs`** — drives the real page in Chromium: module loads, workers come up, tracks
   generate, cars drive, generations advance, hyper mode trains, the editor edits, brains export,
   auto width responds to its controls, and a reload comes back with storage empty.
@@ -234,6 +292,11 @@ The two engines are **not** bit-identical and can't be — `sim.c` runs the phys
 JS runs it in `f64`, and a genetic driving sim is chaotic enough that a 1e-7 difference eventually
 separates two runs. What the tests assert is that they agree over a short horizon and agree on
 outcomes, which is what "works the same" actually means here.
+
+Fitness is the one place they deliberately disagree, for the reason above; agreeing with the
+JavaScript edition's scoring would mean the crawling bug had not been fixed. The parity test checks
+instead that the new scoring never pays *less* than the old for identical driving, which is the
+invariant that keeps progress monotonic.
 
 ## Repository layout
 

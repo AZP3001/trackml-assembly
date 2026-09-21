@@ -351,13 +351,15 @@ const app = {
                     if(c.completedLaps > prevLaps) this._recordLap(buf[idx+10]);
                 }
             } else {
+                const stride = 4;
                 for(let i=0; i<r.count; i++) {
                     const c = cars[r.start + i];
                     if(!c) continue;
-                    c.fitness = buf[i*3];
+                    c.fitness = buf[i*stride];
                     const prevLaps = c.completedLaps;
-                    c.completedLaps = buf[i*3+1];
-                    if(c.completedLaps > prevLaps) this._recordLap(buf[i*3+2]);
+                    c.completedLaps = buf[i*stride+1];
+                    c.checkpoints = buf[i*stride+3];
+                    if(c.completedLaps > prevLaps) this._recordLap(buf[i*stride+2]);
                 }
             }
         }

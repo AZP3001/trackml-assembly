@@ -100,7 +100,7 @@ self.onmessage = async (e) => {
                 // Hyper mode: nothing is on screen, so only fitness/laps/lap
                 // time cross the boundary.
                 ex.write_fitness();
-                buffer = f32(ex.fitness_ptr(), popCount * 3).slice();
+                buffer = f32(ex.fitness_ptr(), popCount * ex.fitness_stride()).slice();
             }
             // alive_count travels separately from the buffer: in hyper mode the
             // crashed flags never cross at all, so the main thread has no way to

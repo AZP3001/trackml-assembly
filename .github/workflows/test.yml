@@ -47,6 +47,13 @@ jobs:
           node tools/autowidth.mjs wasm/sim.wasm
           node tools/autowidth.mjs wasm/sim-simd.wasm
 
+      # Cars stay on the track, and evolution selects the fast ones. Runs
+      # generations to completion rather than to a frame budget — a crawling
+      # car needs tens of thousands of frames to finish a lap, so a capped
+      # harness cannot see the pace problem at all.
+      - name: Race behaviour
+        run: node tools/racepace.mjs wasm/sim.wasm
+
       - name: Install Playwright
         run: npm install --no-save playwright@1.56.1 && npx playwright install --with-deps chromium
 
