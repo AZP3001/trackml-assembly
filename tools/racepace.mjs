@@ -194,30 +194,121 @@ console.log(`race behaviour test (${wasmPath})\n`);
     check(esc.escapes === 0, 'a moved start line does not let cars through walls',
         `${esc.liveSamples.toLocaleString()} live car-frames, ${esc.escapes} escapes`);
 
+    // Assert the lap-counting INVARIANT rather than that a population happens
+    // to finish within N generations, which is luck. A car that has covered a
+    // lap's worth of gates must have been credited a lap — that is exactly what
+    // breaks if laps are counted from index zero instead of the start line.
     const run = train({ track: path, halfWidth: 60, startPos: { x: CX - 340, y: CY },
-                        gens: 16, pop: 100 });
-    check(run.finishers > 0, 'and laps still complete from a moved start',
-        `${run.finishers} finishers, fittest lap ${run.fittestLaps > 0 ? run.fittestLap.toFixed(1) + 's' : 'n/a'}`);
+                        gens: 20, pop: 120 });
+    check(run.fittestGates >= run.cpsPerLap, 'a moved start still lets cars get round',
+        `fittest covered ${run.fittestGates} gates of ${run.cpsPerLap} per lap`);
+    if (run.fittestGates >= run.cpsPerLap) {
+        const expected = Math.floor(run.fittestGates / run.cpsPerLap);
+        check(run.fittestLaps >= 1 && Math.abs(run.fittestLaps - expected) <= 1,
+            'and laps are counted from the start line',
+            `${run.fittestGates} gates -> ${run.fittestLaps} laps (expected about ${expected})`);
+    }
 }
 
-// --- pace ----------------------------------------------------------------
-// The fittest car should be a quick one. Under the old scoring the winner
-// could be a crawler while a much faster car sat lower down the field, because
-// reaching a gate paid the same at any speed.
+// --- pace: the scoring rule itself --------------------------------------
+// Tested directly rather than through evolution. Whether a population cracks a
+// hard track within N generations is bimodal and seed-dependent — six seeds on
+// the narrow gear track split 4/6 and 3/6 between two builds that differ in no
+// relevant way — so an assertion resting on it reports luck, not correctness.
+//
+// The rule is: for the SAME progress, fewer frames must score higher. That is
+// what the old scoring got wrong, and it can be read straight off a single
+// generation, with no evolution involved.
 {
-    const r = train({ track: polar(60, a => 300 + Math.sin(a * 6) * 45), halfWidth: 25,
-                      gens: 22, pop: 120, ttl: 10000, seed: 777 });
-    check(r.fittestLaps > 0, 'evolution finds a lap on a hard narrow track',
-        `fittest completed ${r.fittestLaps} laps`);
-    if (r.fittestLaps > 0) {
-        const slack = r.fittestLap / r.bestLapAny;
-        check(slack < 1.15, 'the fittest car is one of the fastest',
-            `its lap ${r.fittestLap.toFixed(1)}s vs the field's best ${r.bestLapAny.toFixed(1)}s`);
-        // A lap of this track at full speed is about 4s. Crawling used to give
-        // 40s-plus here and still win.
-        check(r.fittestLap < 25, 'and it is racing rather than crawling',
-            `${r.fittestLap.toFixed(1)}s per lap`);
+    const t = buildTrack(polar(48, a => 340 + Math.sin(a * 3) * 70), 60);
+    w.set_config(10, 0.05, 0.04, 0.93, 750, 99, 0.15, 5);
+    const POP = 200;
+    w.pop_init(POP, 0, 5, 20260921);
+    w.pop_randomize_brains();
+    w.pop_reset();
+    let frames = 0;
+    // do-while, not while: all_crashed() reports the last completed run, and
+    // before any run at all it still reads "everything crashed" — a leading
+    // guard on it exits immediately and simulates nothing.
+    do { w.run(50); frames += 50; } while (frames < 4000 && w.all_crashed() !== 1);
+    w.write_fitness();
+    const S = w.fitness_stride();
+    const fb = f32(w.fitness_ptr(), POP * S);
+
+    // Group by gates reached; within a group, more frames must not score more.
+    const byGates = new Map();
+    for (let i = 0; i < POP; i++) {
+        const g = fb[i * S + 3];
+        if (g < 1) continue;                       // never got going; nothing to compare
+        if (!byGates.has(g)) byGates.set(g, []);
+        // Slot 4 is the frame the car's LAST gate fell on, i.e. how long it
+            // took to get that far — not how long it stayed alive afterwards.
+            byGates.get(g).push({ fit: fb[i * S], frames: fb[i * S + 4] });
     }
+    // Only pairs whose times differ by a clear margin. Total fitness also
+    // carries a small distance-shaped term, so between two cars a frame or two
+    // apart that term, not the gate timing, decides the order — including those
+    // measures noise rather than the rule.
+    let pairs = 0, violations = 0, worstExample = null;
+    for (const [g, cars] of byGates) {
+        for (let a = 0; a < cars.length; a++) for (let b = a + 1; b < cars.length; b++) {
+            const slow = cars[a].frames > cars[b].frames ? cars[a] : cars[b];
+            const fast = cars[a].frames > cars[b].frames ? cars[b] : cars[a];
+            if (slow.frames < fast.frames * 1.25) continue;
+            pairs++;
+            if (slow.fit > fast.fit + 1e-3) {
+                violations++;
+                if (!worstExample) worstExample = { g, slow, fast };
+            }
+        }
+    }
+    const rate = pairs ? violations / pairs : 1;
+    check(pairs > 20, 'enough same-progress pairs to judge',
+        `${pairs} pairs across ${byGates.size} progress levels`);
+    // Under the old scoring a gate paid a flat 500 whatever it cost, so for
+    // equal progress the gate term could not order two cars at all and this
+    // came out around chance. It is a statistical claim, not an absolute one:
+    // the distance term still breaks the odd pair the other way.
+    check(rate < 0.15, 'for equal progress, the quicker car scores higher',
+        `${violations}/${pairs} inverted (${(rate * 100).toFixed(1)}%)` +
+        (worstExample ? `, e.g. ${worstExample.slow.frames}f scored ${worstExample.slow.fit.toFixed(0)} vs ${worstExample.fast.frames}f scoring ${worstExample.fast.fit.toFixed(0)}` : ''));
+
+    // The floor. Every gate is worth AT LEAST what it was worth before the
+    // speed multiplier existed, so time can only ever add to a score, never
+    // subtract from it. That is the property that keeps a slow finisher above a
+    // car that crashed early — and it is precisely what a per-frame time
+    // penalty, the obvious way to reward speed, would destroy.
+    const BASE_GATE = 500, CRASH = 50;
+    let belowFloor = 0, floorExample = null;
+    for (let i = 0; i < POP; i++) {
+        const gates = fb[i * S + 3], fit = fb[i * S];
+        if (gates < 1) continue;
+        const floor = BASE_GATE * gates - CRASH - 1;
+        if (fit < floor) {
+            belowFloor++;
+            if (!floorExample) floorExample = `${gates} gates scored ${fit.toFixed(0)}, floor is ${floor.toFixed(0)}`;
+        }
+    }
+    check(belowFloor === 0, 'a gate is never worth less than it used to be',
+        floorExample || 'every car at or above the base rate for its progress');
+}
+
+// --- pace: and it shows up in training ----------------------------------
+// A softer end-to-end check on a track that learns reliably, across several
+// seeds, so it measures the scoring rather than the luck of one run.
+{
+    let laps = 0, worst = 0, runs = 0;
+    for (const seed of [11, 4242, 31337]) {
+        const r = train({ track: polar(48, a => 340 + Math.sin(a * 3) * 70), halfWidth: 60,
+                          gens: 14, pop: 120, ttl: 10000, seed });
+        runs++;
+        if (r.fittestLaps > 0) { laps++; if (r.fittestLap > worst) worst = r.fittestLap; }
+    }
+    check(laps === runs, 'every seed learns to lap on an ordinary track', `${laps}/${runs}`);
+    // A lap of this track flat out is around 6s. The old scoring produced
+    // winners crawling round at 40 to 90 seconds on tracks like this.
+    check(worst > 0 && worst < 20, 'and none of the winners is crawling',
+        `slowest winning lap ${worst.toFixed(1)}s`);
 }
 
 console.log();

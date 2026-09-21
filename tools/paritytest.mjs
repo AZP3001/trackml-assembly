@@ -100,14 +100,14 @@ function buildTrack(def) {
         });
     }
     const ncp = w.track_cp_count();
-    const cf = f32(w.track_cps_ptr(), ncp * 6);
+    const cf = f32(w.track_cps_ptr(), ncp * 7);   // stride 7: coords + apex flag
     const checkpoints = [];
     for (let i = 0; i < ncp; i++) {
         checkpoints.push({
             index: i,
-            p1: { x: cf[i * 6], y: cf[i * 6 + 1] },
-            p2: { x: cf[i * 6 + 2], y: cf[i * 6 + 3] },
-            center: { x: cf[i * 6 + 4], y: cf[i * 6 + 5] }
+            p1: { x: cf[i * 7], y: cf[i * 7 + 1] },
+            p2: { x: cf[i * 7 + 2], y: cf[i * 7 + 3] },
+            center: { x: cf[i * 7 + 4], y: cf[i * 7 + 5] }
         });
     }
     return {

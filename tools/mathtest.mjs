@@ -64,7 +64,20 @@ check('cos', 2e-7, [...linspace(-Math.PI * 2, Math.PI * 2, 4001), ...randRange(-
     x => Math.cos(x), x => w.t_cos(x));
 
 // acos feeds the corner-arc solver; its argument is a clamped dot product.
-check('acos', 3e-7, [...linspace(-1, 1, 20001)], x => Math.acos(x), x => w.t_acos(x));
+//
+// SIGNED ZEROS ARE IN THE SAMPLES ON PURPOSE. The dot product of two
+// perpendicular unit vectors lands on exactly -0.0 for one of the four
+// orientations, and acos(-0.0) must be +pi/2 — an implementation that tests
+// `x < 0` for the quadrant gets -pi/2, because -0.0 is not less than 0.0. That
+// shipped, and it deleted a corner from every right-angled track. An even
+// linspace never produces -0.0, so it never caught it.
+{
+    const samples = [...linspace(-1, 1, 20001), [0], [-0], [1], [-1]];
+    // Math.fround(-0) is -0, so the negative zero survives into the call.
+    check('acos', 3e-7, samples, x => Math.acos(x), x => w.t_acos(x));
+    const negZero = w.t_acos(-0);
+    check('acos(-0)', 3e-7, [[-0]], () => Math.PI / 2, () => negZero);
+}
 
 // tanh is the activation — called (population x (hidden + 2)) times per frame.
 check('tanh', 2e-7, [...linspace(-12, 12, 20001), ...randRange(-40, 40, 5000, 13)],

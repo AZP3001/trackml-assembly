@@ -108,7 +108,7 @@ self.onmessage = async (e) => {
             self.postMessage({
                 type: 'done', index, start: popStart, count: popCount,
                 maxLaps, allCrashed, alive: ex.alive_count(),
-                render: !!msg.wantRender, buffer
+                render: !!msg.wantRender, stride: ex.fitness_stride(), buffer
             }, [buffer.buffer]);
             break;
         }

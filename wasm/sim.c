@@ -40,6 +40,7 @@
 
 #define TRACK_MAX_SEG      30.0f
 #define TRACK_CP_SPACING   34.0f
+#define TRACK_CP_MIN_GAP   18.0f   // closest two gates may sit, px
 #define TRACK_WALL_MAXLEN  110.0f
 
 #define PI_F  3.14159265358979323846f
@@ -221,7 +222,20 @@ static float acosf_(float x) {
     if (x >= 1.0f) return 0.0f;
     if (x <= -1.0f) return PI_F;
     double d = (double)x;
-    return (float)(atan_d(sqrtd_(1.0 - d * d) / d) + (d < 0.0 ? PI_D : 0.0));
+    // NEGATIVE ZERO. `d < 0.0` is false for -0.0, so the quadrant correction
+    // below was skipped while the division still yielded -infinity — and
+    // acos(-0.0) came back as -pi/2 instead of +pi/2.
+    //
+    // This is not a curiosity. A dot product of two perpendicular unit vectors
+    // lands on exactly -0.0 for one of the four orientations (0*-1 + -1*0), so
+    // every right-angled corner facing that way reported a negative interior
+    // angle. The tangent length solved from it was wrong, the corner's arc
+    // collapsed, and its neighbour's ballooned to swallow the straight between
+    // them: on a plain rectangle one corner simply vanished and was replaced by
+    // a diagonal across the track.
+    if (d == 0.0) return (float)(PI_D / 2.0);          // true for +0.0 and -0.0
+    double a = atan_d(sqrtd_(1.0 - d * d) / d);
+    return (float)(d < 0.0 ? a + PI_D : a);
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +301,10 @@ static void *arena_alloc(u32 bytes) {
 // ---------------------------------------------------------------------------
 typedef struct { float x, y; } Vec2;
 typedef struct { float x1, y1, x2, y2; i32 seg; } Wall;      // 20 bytes
-typedef struct { float p1x, p1y, p2x, p2y, cx, cy; } Checkpoint; // 24 bytes
+// 28 bytes. `apex` marks a gate placed at the middle of a corner rather than
+// by the regular spacing — the editor draws those differently, and it is what
+// makes the feature visible rather than merely present.
+typedef struct { float p1x, p1y, p2x, p2y, cx, cy; i32 apex; } Checkpoint;
 typedef struct { float x, y, radius; i32 type; float killTimer; } Zone; // 20 bytes
 
 static Vec2       *tk_center;    static i32 tk_center_n;
@@ -295,13 +312,29 @@ static Wall       *tk_walls;     static i32 tk_wall_n;
 static Checkpoint *tk_cps;       static i32 tk_cp_n;
 static Zone       *tk_zones;     static i32 tk_zone_n;
 static float       tk_start_x, tk_start_y, tk_start_angle, tk_width;
-static i32         tk_start_cp;   // checkpoint nearest the start line
+static i32         tk_start_cp;     // checkpoint nearest the start line
+static float       tk_cp_min_step;  // tightest gap between two gates, px
+static float       tk_len;          // centreline length, px
 
 // Uniform grid over the centreline, CSR-packed (counts -> prefix sums -> fill)
 // instead of the JS Map<"gx,gy", []>. Same 3x3 neighbourhood query, but the
 // lookup is two array reads rather than a string concat and a hash probe.
 static i32   *grid_start; static i32 *grid_items;
 static i32    grid_nx, grid_ny; static float grid_cell, grid_ox, grid_oy;
+
+// The centreline sample nearest a given distance along the track. cum[] is
+// sorted, so this is a binary search plus a look at the other neighbour.
+static i32 sampleAtDistance(const float *cum, i32 len, float d) {
+    if (d <= 0.0f) return 0;
+    if (d >= cum[len - 1]) return len - 1;
+    i32 lo = 0, hi = len - 1;
+    while (lo < hi) {
+        i32 mid = (lo + hi + 1) >> 1;
+        if (cum[mid] <= d) lo = mid; else hi = mid - 1;
+    }
+    if (lo + 1 < len && (cum[lo + 1] - d) < (d - cum[lo])) return lo + 1;
+    return lo;
+}
 
 static void _trackTol(float dist, float *flat, float *sag) {
     float t = dist * 0.015f;
@@ -598,7 +631,12 @@ static void vl_push(VecList *v, float x, float y) {
 // two close-together points soften each other instead of kinking).
 typedef struct { float ax, ay, bx, by, phi, turn, T, lb; i32 sign; i32 ok; } VtxArc;
 
-static i32 buildCentreline(const float *path, i32 n, float width, VecList *out) {
+// `apexOut` collects the midpoint of every corner arc this builds — the apex of
+// the turn. They are positions rather than sample indices because the polyline
+// is resampled at an even spacing afterwards, which renumbers everything; the
+// caller maps each position back to its nearest final sample.
+static i32 buildCentreline(const float *path, i32 n, float width, VecList *out,
+                           Vec2 *apexOut, i32 *apexCount, i32 apexCap) {
     float minRadius = width * 1.1f + 4.0f;
     float tol_flat, tol_sag; _trackTol(width, &tol_flat, &tol_sag);
 
@@ -669,6 +707,14 @@ static i32 buildCentreline(const float *path, i32 n, float width, VecList *out) 
         for (i32 k = 0; k <= steps; k++) {
             float a = a0 + sweep * ((float)k / (float)steps);
             PUSH(ox + cosf_(a) * r, oy + sinf_(a) * r);
+        }
+        // Halfway through the sweep, which is the apex of the turn — the point
+        // on the corner closest to its inside edge.
+        if (apexOut && apexCount && *apexCount < apexCap) {
+            float am = a0 + sweep * 0.5f;
+            apexOut[*apexCount].x = ox + cosf_(am) * r;
+            apexOut[*apexCount].y = oy + sinf_(am) * r;
+            (*apexCount)++;
         }
         PUSH(Bx, By);
         #undef PUSH
@@ -856,11 +902,41 @@ static float *b_x1, *b_y1, *b_dx, *b_dy, *b_mx, *b_my, *b_r2, *b_hl;
 static void buildWallBuckets(void) {
     i32 segs = tk_cp_n;
     if (segs <= 0) { wbs_start = 0; return; }
-    // A sensor reaches 180px, so the window has to cover that in *pixels* —
-    // derive it from checkpoint spacing rather than hard-coding a count.
-    float step = TRACK_CP_SPACING;
-    i32 back = maxi(4, (i32)ceilf_(240.0f / step));
-    i32 fwd  = maxi(5, (i32)ceilf_(260.0f / step));
+    // How far back and forward a car must be able to see walls. A sensor reaches
+    // 180px; the rest is the car's own travel and slack.
+    #define WALL_BACK_PX 240.0f
+    #define WALL_FWD_PX  260.0f
+
+    // The window is measured in PIXELS OF TRACK, walked gate by gate, rather
+    // than as a gate count derived from an assumed spacing.
+    //
+    // Gate spacing is not uniform — corner gates are anchored to the apex of
+    // each turn, so they sit wherever the corners are. Converting a pixel reach
+    // into a gate count needs some single spacing to divide by, and there isn't
+    // one: divide by the average and the tight clusters under-cover, which is
+    // precisely the stale-bucket bug that let cars through walls; divide by the
+    // tightest gap and every bucket on the track inflates to suit one outlier,
+    // roughly doubling the work the per-step cull does. Walking the actual
+    // distances gives each gate exactly the window it needs.
+    float *gap = (float *)arena_alloc((u32)segs * 4);
+    i32 *nBack = (i32 *)arena_alloc((u32)segs * 4);
+    i32 *nFwd  = (i32 *)arena_alloc((u32)segs * 4);
+    if (!gap || !nBack || !nFwd) { wbs_start = 0; return; }
+    for (i32 i = 0; i < segs; i++) {
+        i32 j = (i + 1) % segs;
+        gap[i] = hypotf_(tk_cps[j].cx - tk_cps[i].cx, tk_cps[j].cy - tk_cps[i].cy);
+        if (gap[i] < 0.5f) gap[i] = 0.5f;
+    }
+    for (i32 i = 0; i < segs; i++) {
+        float d = 0.0f; i32 k = 0;
+        while (k < segs - 1 && d < WALL_BACK_PX) { d += gap[((i - k - 1) % segs + segs) % segs]; k++; }
+        nBack[i] = maxi(4, k);
+        d = 0.0f; k = 0;
+        while (k < segs - 1 && d < WALL_FWD_PX) { d += gap[(i + k) % segs]; k++; }
+        nFwd[i] = maxi(5, k);
+        if (nBack[i] > segs - 1) nBack[i] = segs - 1;
+        if (nFwd[i] > segs - 1) nFwd[i] = segs - 1;
+    }
 
     i32 *cnt = (i32 *)arena_alloc((u32)(segs + 1) * 4);
     i32 *bstart = (i32 *)arena_alloc((u32)(segs + 1) * 4);
@@ -898,7 +974,7 @@ static void buildWallBuckets(void) {
     for (i32 i = 0; i < segs; i++) {
         wbs_start[i] = total;
         i32 n = nUndef;
-        for (i32 j = -back; j <= fwd; j++) {
+        for (i32 j = -nBack[i]; j <= nFwd[i]; j++) {
             i32 seg = ((i + j) % segs + segs) % segs;
             n += cnt[seg];
         }
@@ -923,7 +999,7 @@ static void buildWallBuckets(void) {
             b_dx[w] = wl->x2 - wl->x1; b_dy[w] = wl->y2 - wl->y1;
             w++;
         }
-        for (i32 j = -back; j <= fwd; j++) {
+        for (i32 j = -nBack[i]; j <= nFwd[i]; j++) {
             i32 seg = ((i + j) % segs + segs) % segs;
             for (i32 k = 0; k < cnt[seg]; k++) {
                 Wall *wl = &tk_walls[bitems[bstart[seg] + k]];
@@ -1010,7 +1086,9 @@ i32 track_build(const float *path, i32 n_in, float width,
     // width only decides how far the asphalt reaches either side of it. That
     // ordering is what makes the feature cheap — the corner radii were already
     // solved for the full width, so narrowing can only ever add clearance.
-    if (!buildCentreline(path2, n, dist, &cl) || cl.n < 3) return 0;
+    Vec2 *apex = (Vec2 *)arena_alloc((u32)(n + 2) * sizeof(Vec2));
+    i32 nApex = 0;
+    if (!buildCentreline(path2, n, dist, &cl, apex, &nApex, n + 2) || cl.n < 3) return 0;
     tk_center = cl.p; tk_center_n = cl.n;
 
     i32 len = tk_center_n;
@@ -1037,16 +1115,105 @@ i32 track_build(const float *path, i32 n_in, float width,
     // as big as the widest the road ever gets.
     buildCentreGrid(tk_center, len, maxf(tk_w_max, 16.0f));
 
-    // --- checkpoint gates, evenly spaced along the centreline ---
+    // --- checkpoint gates ---
+    //
+    // Two rules put a gate down: the regular spacing along the centreline, and
+    // the apex of every corner. The corner gates are what let progress be
+    // measured through a turn rather than only on the straights either side of
+    // it — on a long sweeper the nearest regular gate can be most of the way
+    // round the bend.
     i32 *cpOfSample = (i32 *)arena_alloc((u32)len * 4);
     Checkpoint *cps = (Checkpoint *)arena_alloc((u32)(len + 2) * sizeof(Checkpoint));
-    if (!cpOfSample || !cps) return 0;
-    i32 ncp = 0;
-    float acc = TRACK_CP_SPACING;
+    i32 *isApex = (i32 *)arena_alloc((u32)len * 4);
+    if (!cpOfSample || !cps || !isApex) return 0;
+    for (i32 i = 0; i < len; i++) isApex[i] = 0;
+
+    // Each recorded apex position lands on whichever final sample is nearest to
+    // it. The resample above renumbered everything, so this is the only way back.
+    for (i32 a = 0; a < nApex; a++) {
+        i32 best = 0; float bestD = 1.0e30f;
+        for (i32 i = 0; i < len; i++) {
+            float dx = tk_center[i].x - apex[a].x, dy = tk_center[i].y - apex[a].y;
+            float d = dx * dx + dy * dy;
+            if (d < bestD) { bestD = d; best = i; }
+        }
+        isApex[best] = 1;
+    }
+
+    // Corners are ANCHORS; the regular gates fill in between them.
+    //
+    // Laying gates down at a fixed spacing and then trying to squeeze an extra
+    // one in at each apex does not work: wherever a regular gate happens to
+    // fall just short of a corner, the apex gate is too close to keep and the
+    // corner silently goes without one. On a square that lost half of them.
+    // Anchoring on the corners first and dividing each run between them into
+    // equal steps gives every corner a gate by construction, and keeps the
+    // spacing even either side of it.
+    float *cum = (float *)arena_alloc((u32)len * 4);
+    i32 *anchor = (i32 *)arena_alloc((u32)(len + 2) * 4);
+    i32 *gateAt = (i32 *)arena_alloc((u32)len * 4);
+    i32 *gateApex = (i32 *)arena_alloc((u32)len * 4);
+    if (!cum || !anchor || !gateAt || !gateApex) return 0;
+    for (i32 i = 0; i < len; i++) { gateAt[i] = 0; gateApex[i] = 0; }
+
+    cum[0] = 0.0f;
+    for (i32 i = 1; i < len; i++)
+        cum[i] = cum[i-1] + hypotf_(tk_center[i].x - tk_center[i-1].x, tk_center[i].y - tk_center[i-1].y);
+    float total = cum[len-1] + hypotf_(tk_center[0].x - tk_center[len-1].x, tk_center[0].y - tk_center[len-1].y);
+    if (total < 1.0f) total = 1.0f;
+    tk_len = total;
+
+    // Anchors, in order, thinned so two never sit closer than the minimum gap.
+    // A densely traced import can put several arcs within a few pixels, and
+    // crowded gates cost more than the extra precision is worth.
+    i32 na = 0;
     for (i32 i = 0; i < len; i++) {
-        if (i > 0) acc += hypotf_(tk_center[i].x - tk_center[i-1].x, tk_center[i].y - tk_center[i-1].y);
-        if (acc >= TRACK_CP_SPACING) {
-            acc -= TRACK_CP_SPACING;
+        if (!isApex[i]) continue;
+        if (na > 0 && cum[i] - cum[anchor[na-1]] < TRACK_CP_MIN_GAP) continue;
+        anchor[na++] = i;
+    }
+    // The wrap-around pair needs the same clearance as every other.
+    if (na > 1 && (total - cum[anchor[na-1]] + cum[anchor[0]]) < TRACK_CP_MIN_GAP) na--;
+    // No corner worth anchoring (a path of near-straight vertices): fall back
+    // to plain even spacing from the first sample.
+    if (na == 0) { anchor[0] = 0; na = 1; }
+
+    for (i32 a = 0; a < na; a++) {
+        i32 ia = anchor[a];
+        gateAt[ia] = 1;
+        gateApex[ia] = isApex[ia] ? 1 : 0;
+
+        i32 ib = anchor[(a + 1) % na];
+        float L = (na == 1) ? total
+                            : (ib > ia ? cum[ib] - cum[ia] : total - cum[ia] + cum[ib]);
+        // Round rather than ceil: ceil biases every run short, so a run barely
+        // over the spacing gets split into two cramped halves.
+        i32 steps = (i32)(L / TRACK_CP_SPACING + 0.5f);
+        if (steps < 1) steps = 1;
+
+        for (i32 k = 1; k < steps; k++) {
+            // The run from the last anchor back to the first wraps past the end
+            // of the sample list, so the target distance wraps with it.
+            float target = cum[ia] + L * ((float)k / (float)steps);
+            if (target >= total) target -= total;
+            i32 at = sampleAtDistance(cum, len, target);
+            // Nudge forward off an occupied sample rather than giving up on the
+            // gate. Samples sit up to maxSeg apart and gates about
+            // TRACK_CP_SPACING apart, which are close enough that two targets
+            // land on the same sample fairly often; dropping one then leaves a
+            // double-width gap exactly where the spacing was meant to be even.
+            for (i32 t = 0; t < 3 && gateAt[at]; t++) at = (at + 1) % len;
+            if (!gateAt[at]) gateAt[at] = 1;
+        }
+    }
+
+    i32 ncp = 0;
+    float sinceGate = 0.0f;
+    tk_cp_min_step = TRACK_CP_SPACING;
+    i32 firstGate = -1;
+    for (i32 i = 0; i < len; i++) {
+        if (i > 0) sinceGate += hypotf_(tk_center[i].x - tk_center[i-1].x, tk_center[i].y - tk_center[i-1].y);
+        if (gateAt[i]) {
             Vec2 prev = tk_center[(i - 1 + len) % len], next = tk_center[(i + 1) % len], c = tk_center[i];
             float tx = next.x - prev.x, ty = next.y - prev.y;
             float tl = hypotf_(tx, ty); if (tl == 0.0f) tl = 1.0f;
@@ -1057,10 +1224,22 @@ i32 track_build(const float *path, i32 n_in, float width,
             cps[ncp].p1x = c.x - ty * hw_; cps[ncp].p1y = c.y + tx * hw_;
             cps[ncp].p2x = c.x + ty * hw_; cps[ncp].p2y = c.y - tx * hw_;
             cps[ncp].cx = c.x; cps[ncp].cy = c.y;
+            cps[ncp].apex = gateApex[i];
+            if (ncp > 0 && sinceGate < tk_cp_min_step) tk_cp_min_step = sinceGate;
+            if (firstGate < 0) firstGate = i;
+            sinceGate = 0.0f;
             ncp++;
         }
         cpOfSample[i] = ncp - 1;
     }
+    // The gap that closes the loop counts too.
+    if (ncp > 1 && firstGate >= 0) {
+        float wrap = sinceGate + cum[firstGate];
+        if (wrap < tk_cp_min_step) tk_cp_min_step = wrap;
+    }
+    if (tk_cp_min_step < 1.0f) tk_cp_min_step = 1.0f;
+    // Samples before the first gate belong to the last one, going round.
+    for (i32 i = 0; i < len && cpOfSample[i] < 0; i++) cpOfSample[i] = ncp - 1;
     tk_cps = cps; tk_cp_n = ncp;
 
     // --- barriers: the boundary of the stroked road, minus any fold-back ---
@@ -1095,8 +1274,27 @@ i32 track_build(const float *path, i32 n_in, float width,
         tk_start_x = floorf_(tk_center[best].x + 0.5f);
         tk_start_y = floorf_(tk_center[best].y + 0.5f);
     }
-    tk_start_angle = has_angle ? sang
-        : atan2f_(tk_center[1].y - tk_center[0].y, tk_center[1].x - tk_center[0].x);
+    // Default heading: the direction the track runs AT THE START LINE.
+    //
+    // This used to read the tangent at centreline sample 0 regardless of where
+    // the start actually was. On a track whose start had been dragged to the
+    // far side of the loop that is close to a reversed heading, so the whole
+    // field spawned pointing backwards down the road and drove straight into
+    // the barrier behind them. Same family of bug as aiming them at checkpoint
+    // 1 wherever the start was: a start that isn't sample 0 was simply not
+    // considered.
+    if (has_angle) {
+        tk_start_angle = sang;
+    } else {
+        i32 si = 0; float sd = 1.0e30f;
+        for (i32 i = 0; i < len; i++) {
+            float dx = tk_center[i].x - tk_start_x, dy = tk_center[i].y - tk_start_y;
+            float d = dx * dx + dy * dy;
+            if (d < sd) { sd = d; si = i; }
+        }
+        Vec2 a = tk_center[(si - 1 + len) % len], b = tk_center[(si + 1) % len];
+        tk_start_angle = atan2f_(b.y - a.y, b.x - a.x);
+    }
 
     // Which checkpoint the start line actually sits on.
     //
@@ -1177,7 +1375,7 @@ static float hidden_scratch[MAX_HIDDEN];
 #define STASH_SLOT MAX_CARS
 static float brains[(MAX_CARS + 1) * BRAIN_MAX];
 static float render_buf[MAX_CARS * RENDER_STRIDE];
-static float fitness_buf[MAX_CARS * 4];
+static float fitness_buf[MAX_CARS * 5];
 
 static i32 pop_n = 0, pop_id_offset = 0, brain_stride_v = 0;
 
@@ -1482,10 +1680,22 @@ static void updateCar(i32 i) {
 
     // The checkpoint captured here is the one relAng is measured against below,
     // even when the car passes it this frame — matching the JS exactly.
-    Checkpoint *nCP = (nxt >= 0 && nxt < tk_cp_n) ? &tk_cps[nxt] : 0;
-    if (nCP) {
+    // The gate the car was heading for when the frame began. relAng below is
+    // measured against THIS one even if the car goes on to cross it, which is
+    // the behaviour the network was trained against and the JS edition has.
+    Checkpoint *relCP = (nxt >= 0 && nxt < tk_cp_n) ? &tk_cps[nxt] : 0;
+    Checkpoint *nCP = relCP;
+    // Gates are checked in a LOOP, because one frame can cross more than one.
+    //
+    // Corner gates sit as little as TRACK_CP_MIN_GAP apart while a car covers
+    // up to maxSpeed in a frame, so at speed it can pass two or three at once.
+    // Registering only the first leaves the index trailing behind the car, and
+    // a trailing index is the failure that let cars drive through walls: the
+    // wall lookup is bucketed by the gate a car is heading for. The bound is a
+    // safety stop, not an expected limit.
+    for (i32 pass = 0; pass < 8 && nCP; pass++) {
         float dx = cx_ - nCP->cx, dy = cy_ - nCP->cy;
-        if (dx * dx + dy * dy > 160000.0f) { car_crashed[i] = 1; return; }  // off course
+        if (pass == 0 && dx * dx + dy * dy > 160000.0f) { car_crashed[i] = 1; return; }  // off course
 
         float mx = (nCP->p1x + nCP->p2x) * 0.5f, my = (nCP->p1y + nCP->p2y) * 0.5f;
         float cdx = cx_ - mx, cdy = cy_ - my;
@@ -1503,11 +1713,13 @@ static void updateCar(i32 i) {
         // to the gate (plus a frame of travel and half a car) makes the test
         // reach the whole gate at any track width.
         float gateR = tk_w_max + speed + 8.0f;
-        if (cdx * cdx + cdy * cdy < gateR * gateR) {
-            if (fastIntersect(prevX, prevY, cx_, cy_, nCP->p1x, nCP->p1y, nCP->p2x, nCP->p2y)
-                || (cdx * cdx + cdy * cdy < 400.0f)) {
+        if (cdx * cdx + cdy * cdy >= gateR * gateR) break;
+        if (!(fastIntersect(prevX, prevY, cx_, cy_, nCP->p1x, nCP->p1y, nCP->p2x, nCP->p2y)
+              || (cdx * cdx + cdy * cdy < 400.0f))) break;
+        {
+            {
                 car_cpReached[i]++;
-                car_nextCP[i] = (nxt + 1) % tk_cp_n;
+                car_nextCP[i] = (car_nextCP[i] + 1) % tk_cp_n;
                 car_ttl[i] += 150; if (car_ttl[i] > 600) car_ttl[i] = 600;
 
                 // Scoring a gate purely on having reached it makes crawling the
@@ -1522,7 +1734,14 @@ static void updateCar(i32 i) {
                 // is never worth less than most of a lap. A per-frame time
                 // penalty would have inverted that and made crashing on purpose
                 // score better than finishing slowly.
-                float idealCp = TRACK_CP_SPACING / maxf(cfg_maxSpeed, 0.001f);
+                // Measured from the track itself, not from the nominal gate
+                // spacing. Corner gates made the gate count depend on how many
+                // turns a track has, and an "ideal" derived from a fixed
+                // spacing then drifted with it — inflating the target time,
+                // saturating the speed bonus and flattening out the very
+                // gradient that stops cars crawling.
+                float meanGap = tk_len / (float)maxi(tk_cp_n, 1);
+                float idealCp = meanGap / maxf(cfg_maxSpeed, 0.001f);
                 float dtCp = (float)(car_frames[i] - car_lastCpFrame[i]);
                 car_lastCpFrame[i] = car_frames[i];
                 car_fitness[i] += 500.0f * (1.0f + 3.0f * (idealCp / maxf(dtCp, idealCp))) * fitMult;
@@ -1536,11 +1755,13 @@ static void updateCar(i32 i) {
                     float lapFrames = (float)(car_frames[i] - car_prevLapFrame[i]);
                     car_lastLap[i] = lapFrames / 60.0f;
                     car_prevLapFrame[i] = car_frames[i];
-                    float idealLap = (float)tk_cp_n * TRACK_CP_SPACING / maxf(cfg_maxSpeed, 0.001f);
+                    float idealLap = tk_len / maxf(cfg_maxSpeed, 0.001f);
                     car_fitness[i] += 3000.0f * (1.0f + 3.0f * (idealLap / maxf(lapFrames, idealLap))) * fitMult;
                 }
             }
         }
+        // On to the next gate, in case this frame crossed that one too.
+        nCP = &tk_cps[car_nextCP[i]];
     }
 
     // Sensors. The inner loop is the hot spot of the whole program: seven rays
@@ -1559,8 +1780,8 @@ static void updateCar(i32 i) {
         in[k] = 1.0f - minT;
     }
 
-    if (nCP) {
-        float tX = (nCP->p1x + nCP->p2x) * 0.5f, tY = (nCP->p1y + nCP->p2y) * 0.5f;
+    if (relCP) {
+        float tX = (relCP->p1x + relCP->p2x) * 0.5f, tY = (relCP->p1y + relCP->p2y) * 0.5f;
         float relAng = atan2f_(tY - cy_, tX - cx_) - car_angle[i];
         while (relAng >  PI_F) relAng -= 2.0f * PI_F;
         while (relAng < -PI_F) relAng += 2.0f * PI_F;
@@ -1625,17 +1846,23 @@ void write_render(void) {
 __attribute__((export_name("write_fitness")))
 void write_fitness(void) {
     for (i32 i = 0; i < pop_n; i++) {
-        fitness_buf[i * 4]     = car_fitness[i];
-        fitness_buf[i * 4 + 1] = (float)car_laps[i];
-        fitness_buf[i * 4 + 2] = car_lastLap[i];
+        fitness_buf[i * 5]     = car_fitness[i];
+        fitness_buf[i * 5 + 1] = (float)car_laps[i];
+        fitness_buf[i * 5 + 2] = car_lastLap[i];
         // Gates passed: the progress measure that doesn't quantise to whole
         // laps, so "nearly all the way round" is distinguishable from "barely
         // started" both here and on screen.
-        fitness_buf[i * 4 + 3] = (float)car_cpReached[i];
+        fitness_buf[i * 5 + 3] = (float)car_cpReached[i];
+        // The frame its most recent gate fell on — the time it took to get as
+        // far as it got. Total frames alive is the wrong measure of pace: a car
+        // can reach three gates briskly and then mill about for another four
+        // hundred frames without reaching a fourth, which says nothing about
+        // how quickly it covered those three.
+        fitness_buf[i * 5 + 4] = (float)car_lastCpFrame[i];
     }
 }
 __attribute__((export_name("fitness_stride")))
-i32 fitness_stride(void) { return 4; }
+i32 fitness_stride(void) { return 5; }
 
 __attribute__((export_name("alive_count")))
 i32 alive_count(void) {

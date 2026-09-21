@@ -234,6 +234,73 @@ way the app runs them:
 
 ---
 
+## Checkpoints
+
+A track is divided by gates spanning the road, and a car's progress is how many
+it has passed in order. They also do quiet structural work: the wall lookup is
+bucketed by the gate a car is heading for, and the time between gates is what
+the scoring rewards.
+
+Gates used to be laid down purely at a fixed spacing along the centre line, so a
+corner got one wherever the spacing happened to land. On a long sweeper the
+nearest gate could be most of the way round the bend, and progress through the
+turn was invisible.
+
+**Corners are now anchors.** Every corner gets a gate at its apex — the midpoint
+of the arc that rounds it — and the regular gates fill the runs in between,
+divided evenly so the spacing stays smooth either side. The editor draws corner
+gates in amber and the rest in blue.
+
+Anchoring first and filling afterwards is the whole trick. Laying the regular
+gates down and then trying to squeeze an extra one in at each apex does not
+work: wherever a regular gate falls just short of a corner the apex gate is too
+close to keep, and that corner silently goes without. On a square that lost half
+of them.
+
+Two consequences had to be handled rather than discovered later:
+
+* **A frame can now cross more than one gate.** Corner gates sit as little as
+  18px apart while a car covers up to 25px in a frame. Registering only the
+  first would leave the car's gate index trailing behind it — and a trailing
+  index is exactly what used to let cars drive through walls, since the wall
+  lookup is keyed on it. Gates are checked in a loop.
+* **The wall-lookup window is measured in pixels of track, not in gates.** Gate
+  spacing is no longer uniform, so converting a reach in pixels into a count of
+  gates needs a single spacing to divide by and there isn't one. Dividing by the
+  average under-covers the tight clusters, which is that same stale-bucket bug;
+  dividing by the tightest gap inflates every bucket on the track to suit one
+  outlier. The window now walks the real distances.
+
+### A bug this uncovered
+
+Building a gate at every corner meant checking that every corner *exists* — and
+on right-angled tracks, one did not.
+
+`acos(-0.0)` was returning **−π/2** instead of +π/2. The quadrant correction
+tested `x < 0`, which is false for negative zero, while the division still
+yielded −infinity. The dot product of two perpendicular unit vectors lands on
+exactly −0.0 for one of the four orientations, so every right-angled corner
+facing that way reported a negative interior angle. The tangent length solved
+from it was wrong: that corner's arc collapsed to nothing and its neighbour's
+ballooned to swallow the straight between them. On a plain rectangle one corner
+simply vanished, replaced by a diagonal cutting across the track.
+
+It had been there since the port and nothing caught it, because the geometry
+still produced *a* closed loop and the parity test compares the two engines
+against each other — both agreed on the same wrong shape. The math self-test
+swept acos across [-1, 1] on an even grid, which never produces −0.0.
+
+### And another
+
+With a custom start position but no custom start angle, the default heading was
+read from centre-line sample 0 rather than from the start line. On a track whose
+start had been dragged to the far side of the loop that is a near-reversed
+heading — the field spawned pointing backwards down the road, measured at 176°
+out. Same family as aiming cars at checkpoint 1 wherever the start was: a start
+that isn't sample 0 simply wasn't considered.
+
+---
+
 ## Nothing is cached
 
 Every reload starts from scratch. There is no localStorage, no sessionStorage, no service worker and
@@ -289,7 +356,7 @@ then open <http://localhost:8000>.
 
 ```sh
 npm run build        # compile both wasm variants
-npm test             # math, parity, auto width, race behaviour
+npm test             # math, parity, auto width, gates, race behaviour
 npm run test:e2e     # real browser, needs a server running
 npm run bench        # wasm vs the JavaScript edition
 ```
@@ -306,6 +373,9 @@ npm run bench        # wasm vs the JavaScript edition
   opposites: not narrowing a track that pinches, and narrowing one that doesn't (which would wreck
   every normal track). Also covers the local/global slider, the smoothness of the taper, and a
   self-crossing figure eight.
+* **`tools/checkpoints.mjs`** — gate placement: every corner anchors a gate at
+  its apex, spacing never crowds or leaves a hole, gates span the full road, and
+  a rectangle's four corners come out identical (the acos(−0) guard).
 * **`tools/racepace.mjs`** — the two behavioural properties above: no car is
   ever off the asphalt, gates register across the full width of the road, a
   moved start line still works, and the fittest car is one of the fastest. It

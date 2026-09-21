@@ -42,10 +42,10 @@ const walls = Array.from({ length: nw }, (_, i) => ({
     p1: { x: wf[i*5], y: wf[i*5+1] }, p2: { x: wf[i*5+2], y: wf[i*5+3] },
     segmentIndex: wi[i*5+4] < 0 ? undefined : wi[i*5+4]
 }));
-const ncp = w.track_cp_count(), cf = f32(w.track_cps_ptr(), ncp*6);
+const ncp = w.track_cp_count(), cf = f32(w.track_cps_ptr(), ncp*7);  // stride 7: coords + apex flag
 const checkpoints = Array.from({ length: ncp }, (_, i) => ({
-    index: i, p1: { x: cf[i*6], y: cf[i*6+1] }, p2: { x: cf[i*6+2], y: cf[i*6+3] },
-    center: { x: cf[i*6+4], y: cf[i*6+5] }
+    index: i, p1: { x: cf[i*7], y: cf[i*7+1] }, p2: { x: cf[i*7+2], y: cf[i*7+3] },
+    center: { x: cf[i*7+4], y: cf[i*7+5] }
 }));
 const track = { walls, checkpoints, zones: [], segStep: 34,
                 startPos: { x: w.track_start_x(), y: w.track_start_y() }, startAngle: w.track_start_angle() };

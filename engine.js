@@ -131,7 +131,7 @@ const Engine = {
         const autoBlend = typeof auto.blend === 'number' ? auto.blend : 0;
         const empty = () => makeTrack(id, name, pathInput || [], width, { x: 100, y: 100 }, 0, zones,
             new Float32Array(0), new Float32Array(0), new Int32Array(0), new Float32Array(0),
-            new Float32Array(0), { enabled: !!autoOn, blend: autoBlend });
+            new Uint8Array(0), new Float32Array(0), { enabled: !!autoOn, blend: autoBlend });
         if (!this.master || !pathInput || pathInput.length < 3) return empty();
 
         const ex = this.master.ex;
@@ -190,12 +190,17 @@ const Engine = {
             wallSeg[i] = wallsSegRaw[i * 5 + 4];
         }
 
+        // Stride 7: p1x,p1y,p2x,p2y,cx,cy and then an apex flag, read as an
+        // int through its own view over the same bytes.
         const ncp = ex.track_cp_count();
-        const cpF32 = this._f32(this.master, ex.track_cps_ptr(), ncp * 6).slice();
+        const cpF32 = this._f32(this.master, ex.track_cps_ptr(), ncp * CP_STRIDE).slice();
+        const cpApexRaw = this._i32(this.master, ex.track_cps_ptr(), ncp * CP_STRIDE);
+        const cpApex = new Uint8Array(ncp);
+        for (let i = 0; i < ncp; i++) cpApex[i] = cpApexRaw[i * CP_STRIDE + 6] ? 1 : 0;
 
         return makeTrack(id, name, pathInput, width,
             { x: ex.track_start_x(), y: ex.track_start_y() }, ex.track_start_angle(),
-            zones, centerF32, wallsF32, wallSeg, cpF32,
+            zones, centerF32, wallsF32, wallSeg, cpF32, cpApex,
             widthF32, { enabled: !!autoOn, blend: autoBlend });
     },
 
@@ -411,6 +416,10 @@ const Engine = {
 
 const ZONE_TYPE_ID = { speed: 0, precision: 1, focus: 2, spawnkill: 3 };
 
+// Floats per checkpoint in wasm memory — must track the Checkpoint struct in
+// sim.c, which carries an apex flag after the six coordinates.
+const CP_STRIDE = 7;
+
 // The track object the rest of the app sees.
 //
 // Geometry comes back as flat typed arrays — that is what the canvas wants and
@@ -418,14 +427,14 @@ const ZONE_TYPE_ID = { speed: 0, precision: 1, focus: 2, spawnkill: 3 };
 // {p1:{x,y}} objects. `walls` and `checkpoints` are still here as lazy getters
 // for anything that wants the old object shape; nothing on a hot path does.
 function makeTrack(id, name, path, trackWidth, startPos, startAngle, zones,
-                   centerF32, wallsF32, wallSeg, cpF32, widthF32, auto) {
+                   centerF32, wallsF32, wallSeg, cpF32, cpApex, widthF32, auto) {
     const t = {
         id, name, path, trackWidth, startPos, startAngle, zones,
-        centerF32, wallsF32, wallSeg, cpF32, widthF32,
+        centerF32, wallsF32, wallSeg, cpF32, cpApex, widthF32,
         autoWidth: !!(auto && auto.enabled),
         autoWidthBlend: (auto && typeof auto.blend === 'number') ? auto.blend : 0,
         wallCount: wallsF32.length / 4,
-        cpCount: cpF32.length / 6,
+        cpCount: cpF32.length / CP_STRIDE,
         segStep: 34
     };
     let _walls = null, _cps = null;
@@ -452,9 +461,10 @@ function makeTrack(id, name, path, trackWidth, startPos, startAngle, zones,
             for (let i = 0; i < t.cpCount; i++) {
                 _cps.push({
                     index: i,
-                    p1: { x: cpF32[i * 6], y: cpF32[i * 6 + 1] },
-                    p2: { x: cpF32[i * 6 + 2], y: cpF32[i * 6 + 3] },
-                    center: { x: cpF32[i * 6 + 4], y: cpF32[i * 6 + 5] }
+                    p1: { x: cpF32[i * CP_STRIDE], y: cpF32[i * CP_STRIDE + 1] },
+                    p2: { x: cpF32[i * CP_STRIDE + 2], y: cpF32[i * CP_STRIDE + 3] },
+                    center: { x: cpF32[i * CP_STRIDE + 4], y: cpF32[i * CP_STRIDE + 5] },
+                    apex: !!cpApex[i]
                 });
             }
             return _cps;

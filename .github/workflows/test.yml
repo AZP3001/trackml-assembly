@@ -53,6 +53,14 @@ jobs:
       # generations to completion rather than to a frame budget — a crawling
       # car needs tens of thousands of frames to finish a lap, so a capped
       # harness cannot see the pace problem at all.
+      # Gate placement: every corner anchors one, spacing stays sane, and the
+      # rectangle case guards the acos(-0) regression that used to delete a
+      # corner from every right-angled track.
+      - name: Checkpoint placement
+        run: |
+          node tools/checkpoints.mjs wasm/sim.wasm
+          node tools/checkpoints.mjs wasm/sim-simd.wasm
+
       - name: Race behaviour
         run: node tools/racepace.mjs wasm/sim.wasm
 

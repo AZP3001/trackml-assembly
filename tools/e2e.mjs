@@ -337,6 +337,35 @@ check(imported.ok && imported.pts >= 3, 'image import builds a track',
     imported.ok ? `${imported.pts} points, width ${Math.round(imported.width)}` : imported.err);
 await page.evaluate(() => { if (app.state.isEditing) editor.cancel(); });
 
+// --- corner checkpoints --------------------------------------------------
+// Every corner anchors a gate at its apex, and the editor draws those in amber
+// so the difference is visible rather than merely present.
+{
+    const gates = await page.evaluate(() => {
+        const path = [
+            { x: 250, y: 250, type: 'corner', radius: 60 }, { x: 950, y: 250, type: 'corner', radius: 60 },
+            { x: 950, y: 650, type: 'corner', radius: 60 }, { x: 250, y: 650, type: 'corner', radius: 60 }
+        ];
+        const t = generateTrackFromPath('cp', 'Corners', path, 60);
+        let apex = 0;
+        for (let i = 0; i < t.cpCount; i++) if (t.cpApex[i]) apex++;
+        // The centre line should pass the same distance from all four vertices;
+        // it used not to, which deleted a corner.
+        const d = path.map(v => {
+            let bd = Infinity;
+            for (let i = 0; i < t.centerF32.length; i += 2)
+                bd = Math.min(bd, Math.hypot(t.centerF32[i] - v.x, t.centerF32[i + 1] - v.y));
+            return bd;
+        });
+        return { total: t.cpCount, apex, spread: Math.max(...d) - Math.min(...d),
+                 lazyApex: t.checkpoints.filter(c => c.apex).length };
+    });
+    check(gates.apex === 4, 'each corner of a square anchors a gate', `${gates.apex} corner gates of ${gates.total}`);
+    check(gates.spread < 2, 'and all four corners are built alike', `spread ${gates.spread.toFixed(2)}px`);
+    check(gates.lazyApex === gates.apex, 'the apex flag survives into the object view',
+        `${gates.lazyApex} flagged`);
+}
+
 // --- build stamp ---------------------------------------------------------
 // version.json is written by the deploy workflow, so it is absent locally.
 // Both paths matter: absent must leave the static version alone rather than

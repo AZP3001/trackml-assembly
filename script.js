@@ -371,7 +371,9 @@ const app = {
                     if(c.completedLaps > prevLaps) this._recordLap(buf[idx+10]);
                 }
             } else {
-                const stride = 4;
+                // Reported by the worker rather than hard-coded, so adding a
+                // field in sim.c cannot silently shift every read by one.
+                const stride = r.stride || 5;
                 for(let i=0; i<r.count; i++) {
                     const c = cars[r.start + i];
                     if(!c) continue;
@@ -1205,8 +1207,19 @@ const editor = {
         ctx.strokeStyle='#cbd5e1'; ctx.lineWidth=3; ctx.lineJoin='round'; ctx.lineCap='round';
         strokeWalls(ctx, p);
         ctx.strokeStyle='#38bdf8'; ctx.lineWidth=2; ctx.beginPath();
-        for(let i=0; i<p.cpF32.length; i+=6) { ctx.moveTo(p.cpF32[i], p.cpF32[i+1]); ctx.lineTo(p.cpF32[i+2], p.cpF32[i+3]); }
-        ctx.stroke();
+        // Regular gates in blue, corner-apex gates in amber, so it is obvious
+        // at a glance that every turn got one.
+        const cp = p.cpF32, apex = p.cpApex;
+        for(let pass=0; pass<2; pass++) {
+            ctx.strokeStyle = pass ? '#f59e0b' : '#38bdf8';
+            ctx.lineWidth = pass ? 3 : 2;
+            ctx.beginPath();
+            for(let k=0, i=0; i<cp.length; i+=7, k++) {
+                if(!!(apex && apex[k]) !== !!pass) continue;
+                ctx.moveTo(cp[i], cp[i+1]); ctx.lineTo(cp[i+2], cp[i+3]);
+            }
+            ctx.stroke();
+        }
 
         p.zones.forEach(z => {
             ctx.beginPath(); ctx.arc(z.x, z.y, z.radius, 0, Math.PI*2);
