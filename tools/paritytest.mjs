@@ -78,7 +78,7 @@ function buildTrack(def) {
         pIn[i * 4 + 2] = p.type === 'corner' ? 1 : 0;
         pIn[i * 4 + 3] = p.radius ?? 60;
     });
-    const ok = w.track_build(w.path_in_ptr(), def.path.length, def.width, 0, 0, 0, 0, 0, w.zone_in_ptr(), 0);
+    const ok = w.track_build(w.path_in_ptr(), def.path.length, def.width, 0, 0, 0, 0, 0, w.zone_in_ptr(), 0, 0, 0);
     if (!ok) throw new Error(`track_build failed for ${def.name}`);
 
     const nw = w.track_wall_count();

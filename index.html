@@ -3,7 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>TrackML WASM: Evolution Racing</title>
+    <!-- Nothing here is meant to be cached. Reloading the page reloads the
+         actual page, not whatever the browser kept from last time. script.js
+         also clears local/session storage, Cache Storage and any service
+         worker on startup. -->
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>TrackML Assembly: Evolution Racing</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='18' fill='%230f172a'/%3E%3Cpath d='M20 65 Q20 25 50 25 Q80 25 80 55 Q80 75 55 75 L55 60 Q68 60 68 52 Q68 38 50 38 Q34 38 34 60 L34 75 Z' fill='%2334d399'/%3E%3C/svg%3E">
     <script src="./external/tailwind.js"></script>
     <script src="./external/lucide.min.js"></script>
@@ -15,7 +22,7 @@
     <div id="sidebar-overlay" onclick="closeSidebar()"></div>
 
     <div class="xl:hidden bg-slate-800 px-4 py-3 flex justify-between items-center border-b border-slate-700 z-40 relative shrink-0">
-        <h1 class="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">TrackML</h1>
+        <h1 class="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent leading-none">TrackML&nbsp;Assembly<span class="text-[9px] text-slate-500 font-normal block leading-tight">WASM backend</span></h1>
         <button onclick="openSidebar()" class="text-slate-300 hover:text-white bg-slate-700 rounded-lg px-3 py-2 flex items-center gap-2 text-sm font-bold">
             <i data-lucide="settings" class="w-4 h-4"></i> Settings
         </button>
@@ -23,13 +30,14 @@
 
     <div id="sidebar" class="w-full xl:w-80 bg-slate-800 p-4 flex flex-col border-r border-slate-700 overflow-y-auto shrink-0 custom-scrollbar shadow-xl">
         <div class="xl:hidden flex justify-between items-center mb-4 pb-3 border-b border-slate-700">
-            <h1 class="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">TrackML</h1>
+            <h1 class="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent leading-none">TrackML&nbsp;Assembly<span class="text-[9px] text-slate-500 font-normal block leading-tight">WASM backend</span></h1>
             <button id="sidebar-close-btn" onclick="closeSidebar()" class="text-slate-400 hover:text-white bg-slate-700 rounded-lg p-2 flex items-center gap-1 text-sm font-bold">
                 <i data-lucide="x" class="w-4 h-4"></i> Close
             </button>
         </div>
         <div class="hidden xl:flex justify-between items-center mb-4">
-		<h1 class="text-2xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">TrackML V20.0<span class="text-xs text-slate-500 font-normal block">Rebuilt track geometry</span>   <!-- Version -->
+		<h1 class="text-2xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent leading-tight">TrackML&nbsp;Assembly
+                <span class="text-[11px] text-slate-500 font-normal block leading-snug tracking-wide">WebAssembly backend &middot; <span id="version-tag">v1.0.0</span></span>
             </h1>
         </div>
 
@@ -296,7 +304,27 @@
                         <span class="text-[8px] md:text-[10px] text-slate-400">Width</span>
                         <input type="range" min="20" max="150" id="edit-width" oninput="editor.updateWidth(this.value)" class="w-full">
                     </div>
-				
+
+                    <!-- Auto width: pinch the road in where two passes of the
+                         track run close enough to leave a paper-thin barrier. -->
+                    <div class="flex flex-col gap-0.5 border-l border-slate-600 pl-2 md:pl-3">
+                        <label class="flex items-center gap-1.5 cursor-pointer" title="Narrow the road where the track runs close to itself, instead of letting the two sides merge">
+                            <input type="checkbox" id="edit-autowidth" onchange="editor.updateAutoWidth(this.checked)" class="accent-emerald-500 w-3 h-3">
+                            <span class="text-[8px] md:text-[10px] text-slate-300 font-bold">Auto Width</span>
+                        </label>
+                        <div id="autowidth-blend-wrap" class="flex flex-col w-20 md:w-28 opacity-40 pointer-events-none transition-opacity">
+                            <div class="flex justify-between text-[8px] md:text-[10px] text-slate-400">
+                                <span id="autowidth-blend-label">Pinch only</span>
+                            </div>
+                            <input type="range" min="0" max="100" step="5" value="0" id="edit-autowidth-blend"
+                                   oninput="editor.updateAutoWidthBlend(this.value)" class="w-full"
+                                   title="Left: only the tight spots narrow. Right: the whole track takes the narrowest width, so it stays one even width.">
+                            <div class="flex justify-between text-[7px] md:text-[9px] text-slate-500 -mt-0.5">
+                                <span>Local</span><span>Global</span>
+                            </div>
+                        </div>
+                    </div>
+
                      <div class="flex flex-col w-16 md:w-20">
                         <span class="text-[8px] md:text-[10px] text-slate-400">Start Angle</span>
                         <input type="range" min="0" max="360" id="edit-angle" oninput="editor.updateAngle(this.value)" class="w-full">
@@ -319,9 +347,6 @@
             </div>
             <div class="flex gap-2">
                 <button onclick="editor.cancel()" class="px-2 py-1 md:px-4 md:py-2 bg-slate-700 hover:bg-slate-600 rounded text-xs md:text-sm">Cancel</button>
-                <button onclick="editor.publishTrack()" title="Opens a GitHub issue with your track — an automated workflow validates it and opens a PR to add it for everyone" class="px-2 py-1 md:px-4 md:py-2 bg-purple-600 hover:bg-purple-500 rounded font-bold text-xs md:text-sm flex items-center gap-1.5">
-                    <i data-lucide="upload-cloud" class="w-3.5 h-3.5"></i> Publish
-                </button>
                 <button onclick="editor.save()" class="px-2 py-1 md:px-4 md:py-2 bg-emerald-600 hover:bg-emerald-500 rounded font-bold text-xs md:text-sm">Save Track</button>
             </div>
         </div>

@@ -1,4 +1,6 @@
-# AI RaceTrack Evolution — WebAssembly edition
+# TrackML Assembly
+
+*AI RaceTrack Evolution, with a WebAssembly backend.*
 [*To Simulation*](https://azp3001.github.io/trackml-assembly/)
 
 A 2D race-track simulation where AIs learn to navigate a racetrack through evolution algorithms.
@@ -132,21 +134,63 @@ The generator runs in wasm, which matters here more than it looks: the editor re
 track on every frame you drag a point, and the walls come back as flat `Float32Array`s the canvas
 can stroke directly rather than as thousands of freshly allocated point objects.
 
+### Auto width
+
+A closed loop can easily come back on itself. Where two passes of the track run close together, the
+road at its full width swallows the gap between them and the barrier that should separate them
+disappears — the two bits of road merge into one slab. **Auto Width** fixes that by narrowing the
+road there instead.
+
+It finds, for every point on the centre line, the nearest part of the track that isn't simply
+further along the road, and caps the width so a barrier still fits between the two. The awkward part
+is telling "the track curving round a corner" apart from "a different part of the track"; that's
+done by arc length, with a window sized to the tightest turn the generator will ever build, so an
+ordinary hairpin is left alone and a genuine near miss is not.
+
+The slider next to the checkbox decides how the narrowing is applied:
+
+* **Local** (far left) — only the tight spots narrow, the rest of the track keeps its full width.
+* **Global** (far right) — the whole track takes the narrowest width it needs anywhere, so it stays
+  one even width the whole way round.
+* Anywhere between blends the two.
+
+Narrowing tapers over a couple of track widths rather than stepping, and never goes below the width
+a car can physically get through. It's on by default for drawn and image-imported tracks, which are
+the ones where you can't judge the clearances by eye, and off for tracks you place by hand.
+
 Besides placing points by hand, the editor has three ways to build a track:
 * **Draw:** switch to the Draw tab and drag a loop directly on the canvas — it's simplified into an editable path automatically.
 * **Import from Image:** upload a PNG/JPG (a hand-drawn loop or a photo of a track layout) and it's analyzed (thresholded, skeletonized, traced) into a starting track for you to refine.
 * **Duplicate:** clone the currently-selected track as a starting point for a variant.
 
-Tracks you create are saved in your browser (localStorage) and are still there next time you load the page, alongside your last-used sim/physics settings.
+Tracks you create last for the session. **Nothing is cached or persisted** — see below.
 
-### Publishing a track for everyone
-Hit **Publish** while editing a track to open a prefilled GitHub issue with the track's data. A GitHub Actions workflow validates the submission and opens a pull request adding it to `tracks.js` — once a maintainer merges it, it's live for everyone. No account/backend setup needed beyond GitHub itself.
+### Keeping a track
+Hit **Save Track** and the editor hands you a `generateTrackFromPath(...)` line for it. Paste that
+into `tracks.js` and the track is built into the app for everyone on the next deploy.
+
+There is no Publish button. It used to open a prefilled GitHub issue that a workflow turned into a
+pull request; posting a track directly instead would need a server to post it *to*, and this is a
+static site on GitHub Pages with no backend, so that was removed rather than left as the GitHub
+detour. The code export above is the replacement.
 
 ## Keyboard Shortcuts
 * **Space:** Play / Pause
 * **H:** Toggle Hyper Mode
 * **R:** Reset
 * **Esc:** Cancel track editing, or release a manual spectator selection
+
+---
+
+## Nothing is cached
+
+Every reload starts from scratch. There is no localStorage, no sessionStorage, no service worker and
+no Cache Storage; the page clears all four on startup (including anything left behind by an earlier
+build that did persist), sends `no-store` cache headers, and fetches the wasm module with
+`cache: 'no-store'` so a reload really does re-fetch it.
+
+Custom tracks, slider settings and the trained population therefore all live in memory only. Use
+**Save AI** for a brain you want to keep, and the editor's code export for a track.
 
 ---
 
@@ -165,7 +209,7 @@ then open <http://localhost:8000>.
 
 ```sh
 npm run build        # compile both wasm variants
-npm test             # math + parity, on both variants
+npm test             # math + parity + auto width, on both variants
 npm run test:e2e     # real browser, needs a server running
 npm run bench        # wasm vs the JavaScript edition
 ```
@@ -178,8 +222,13 @@ npm run bench        # wasm vs the JavaScript edition
   actual worker (`tools/reference-worker.mjs`, copied verbatim) side by side on the same tracks with
   the same brains, and compares them frame by frame. Trajectories stay within 4e-4 px over the first
   60 frames, and all 160 test cars agree on who crashed and how many laps they finished.
+* **`tools/autowidth.mjs`** — the auto-width solver. Both failure modes are tested, since they're
+  opposites: not narrowing a track that pinches, and narrowing one that doesn't (which would wreck
+  every normal track). Also covers the local/global slider, the smoothness of the taper, and a
+  self-crossing figure eight.
 * **`tools/e2e.mjs`** — drives the real page in Chromium: module loads, workers come up, tracks
-  generate, cars drive, generations advance, hyper mode trains, the editor edits, brains export.
+  generate, cars drive, generations advance, hyper mode trains, the editor edits, brains export,
+  auto width responds to its controls, and a reload comes back with storage empty.
 
 The two engines are **not** bit-identical and can't be — `sim.c` runs the physics in `f32` where the
 JS runs it in `f64`, and a genetic driving sim is chaotic enough that a 1e-7 difference eventually
@@ -198,7 +247,6 @@ image-import.js         PNG/JPG -> track pipeline
 wasm/sim.c              the entire compute backend
 wasm/build.sh           clang -> sim.wasm + sim-simd.wasm
 wasm/*.wasm             committed build output (CI verifies it matches the source)
-tools/                  math, parity, end-to-end and benchmark harnesses
-scripts/                community track submission validator (used by CI)
+tools/                  math, parity, auto-width, end-to-end and benchmark harnesses
 external/               tailwind, chart.js, lucide — vendored, no CDN at runtime
 ```

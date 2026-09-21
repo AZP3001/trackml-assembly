@@ -39,19 +39,58 @@ const HYPER_CHUNK = 2500;
 // round join/cap — literally the region the barriers bound, so the two can
 // never disagree. Geometry arrives as a flat Float32Array of x,y pairs straight
 // out of wasm memory; there is no per-point object to walk.
+//
+// With auto width on, the road is no longer one width, so it can't be one
+// stroke. Each segment is stroked at its own width instead — round caps make
+// consecutive segments blend into a smooth taper, and overlapping strokes are
+// exactly what you want where the track crosses itself. Segments are bucketed
+// by rounded width so a few hundred of them still cost only a handful of paths.
 function drawRoadSurface(ctx, t, color) {
     const c = t.centerF32;
     if (!c || c.length < 4) return;
+    const n = c.length / 2;
+    const w = t.widthF32;
+
     ctx.save();
     ctx.strokeStyle = color;
-    ctx.lineWidth = Math.max(2, t.trackWidth * 2);
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(c[0], c[1]);
-    for (let i = 2; i < c.length; i += 2) ctx.lineTo(c[i], c[i + 1]);
-    ctx.closePath();
-    ctx.stroke();
+
+    if (!t.autoWidth || !w || w.length !== n) {
+        ctx.lineWidth = Math.max(2, t.trackWidth * 2);
+        ctx.beginPath();
+        ctx.moveTo(c[0], c[1]);
+        for (let i = 2; i < c.length; i += 2) ctx.lineTo(c[i], c[i + 1]);
+        ctx.closePath();
+        ctx.stroke();
+        ctx.restore();
+        return;
+    }
+
+    // Bucket by whole-pixel width. The widths were smoothed in wasm, so
+    // neighbouring samples almost always land in the same bucket and each
+    // bucket comes out as one path of mostly-contiguous segments.
+    const buckets = new Map();
+    for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        // The wider of the two ends, matching how the wasm side decides which
+        // segment owns a point — otherwise the fill would fall a hair short of
+        // the barrier on a taper.
+        const lw = Math.max(2, Math.round(Math.max(w[i], w[j]) * 2));
+        let b = buckets.get(lw);
+        if (!b) { b = []; buckets.set(lw, b); }
+        b.push(i);
+    }
+    for (const [lw, segs] of buckets) {
+        ctx.lineWidth = lw;
+        ctx.beginPath();
+        for (const i of segs) {
+            const j = (i + 1) % n;
+            ctx.moveTo(c[i * 2], c[i * 2 + 1]);
+            ctx.lineTo(c[j * 2], c[j * 2 + 1]);
+        }
+        ctx.stroke();
+    }
     ctx.restore();
 }
 
@@ -64,45 +103,40 @@ function strokeWalls(ctx, t) {
     ctx.stroke();
 }
 
-// --- localStorage persistence (custom tracks + settings) ---
-// Every call is try/caught: localStorage can throw (private browsing, quota,
-// disabled storage) and none of this should ever be able to crash the sim.
-const Persist = {
-    SETTINGS_KEY: 'trackml_settings_v1',
-    TRACKS_KEY: 'trackml_custom_tracks_v1',
+// --- No persistence, by design -----------------------------------------
+//
+// Nothing this app does survives a reload. Custom tracks, slider settings and
+// the trained population all live in memory only, so every load starts from a
+// clean slate. Use "Save AI" for a brain you want to keep and the code export
+// in the track editor for a track.
+//
+// wipeStorage() doesn't just decline to write — it actively clears everything
+// the page could be holding, including data written by an older build that did
+// persist, and any Cache Storage or service worker left over from one. Reload
+// really does mean reload.
+function wipeStorage() {
+    const clear = (store) => {
+        try { store && store.clear(); } catch (e) { /* blocked or unavailable */ }
+    };
+    clear(window.localStorage);
+    clear(window.sessionStorage);
 
-    saveSettings: function(state) {
-        try {
-            const { populationSize, eliteClones, mutationRate, hiddenLayers, initialTTL, targetLaps, speedMultiplier, physics } = state;
-            localStorage.setItem(this.SETTINGS_KEY, JSON.stringify({ populationSize, eliteClones, mutationRate, hiddenLayers, initialTTL, targetLaps, speedMultiplier, physics }));
-        } catch (e) { /* ignore — storage unavailable */ }
-    },
-    loadSettings: function() {
-        try {
-            const raw = localStorage.getItem(this.SETTINGS_KEY);
-            return raw ? JSON.parse(raw) : null;
-        } catch (e) { return null; }
-    },
+    // A service worker would keep serving stale JS and wasm from its own cache
+    // no matter what the network says, so retire any that's registered.
+    try {
+        if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+            navigator.serviceWorker.getRegistrations()
+                .then(rs => rs.forEach(r => r.unregister()))
+                .catch(() => {});
+        }
+    } catch (e) { /* not supported */ }
 
-    // Stores only the raw track definition (id/name/path/width/start/zones) —
-    // full geometry (walls, checkpoints, polys) is always rebuilt fresh via
-    // generateTrackFromPath, same as the built-in tracks.
-    saveCustomTracks: function(tracks, builtInIds) {
-        try {
-            const custom = tracks.filter(t => !builtInIds.has(t.id)).map(t => ({
-                id: t.id, name: t.name, path: t.path, trackWidth: t.trackWidth,
-                startPos: t.startPos, startAngle: t.startAngle, zones: t.zones || []
-            }));
-            localStorage.setItem(this.TRACKS_KEY, JSON.stringify(custom));
-        } catch (e) { /* ignore */ }
-    },
-    loadCustomTracks: function() {
-        try {
-            const raw = localStorage.getItem(this.TRACKS_KEY);
-            return raw ? JSON.parse(raw) : [];
-        } catch (e) { return []; }
-    }
-};
+    try {
+        if (window.caches && caches.keys) {
+            caches.keys().then(keys => keys.forEach(k => caches.delete(k))).catch(() => {});
+        }
+    } catch (e) { /* not supported */ }
+}
 
 // --- Main Application ---
 const app = {
@@ -184,7 +218,6 @@ const app = {
             this._initUICache();
             await Engine.ready();
             if(ui.coreCount && Engine._pendingCoreLabel) ui.coreCount.innerHTML = Engine._pendingCoreLabel;
-            this.loadSettingsFromStorage();
             this.resetTracks();
             this.initChart();
             if(window.lucide) lucide.createIcons();
@@ -217,17 +250,8 @@ const app = {
         // Load tracks from the external tracks.js file
         this.state.tracks = getDefaultTracks(generateTrackFromPath, CANVAS_WIDTH, CANVAS_HEIGHT);
         this._builtInTrackIds = new Set(this.state.tracks.map(t => t.id));
-
-        // Re-add any custom/imported/community tracks saved locally in a
-        // previous session — rebuilt fresh from their raw definition.
-        const saved = Persist.loadCustomTracks();
-        for (const raw of saved) {
-            try {
-                const t = generateTrackFromPath(raw.id, raw.name, raw.path, raw.trackWidth, raw.startPos, raw.startAngle, raw.zones);
-                if (!this._builtInTrackIds.has(t.id) && !this.state.tracks.some(existing => existing.id === t.id)) this.state.tracks.push(t);
-            } catch (e) { console.warn('Skipped a corrupt saved track:', e); }
-        }
-
+        // Nothing is restored from storage: tracks you make last for the
+        // session and no longer.
         this.renderTrackList();
         this.switchTrack(0);
     },
@@ -501,7 +525,7 @@ const app = {
     },
     
     // Physics is pure config — pushing it doesn't need the track rebuilding.
-    updatePhysics: function(k, v) { this.state.physics[k] = parseFloat(v); document.getElementById('val-'+(k==='maxSpeed'?'maxSpeed':(k==='acceleration'?'accel':(k==='turnSpeed'?'turn':'grip')))).innerText = k==='grip'?Math.round(v*100)+'%':v; Engine.pushConfig(this.state); this.queueSaveSettings(); },
+    updatePhysics: function(k, v) { this.state.physics[k] = parseFloat(v); document.getElementById('val-'+(k==='maxSpeed'?'maxSpeed':(k==='acceleration'?'accel':(k==='turnSpeed'?'turn':'grip')))).innerText = k==='grip'?Math.round(v*100)+'%':v; Engine.pushConfig(this.state); },
     updateConfig: function(k, v) {
         this.state[k] = parseFloat(v);
         let id = 'val-'+(k==='populationSize'?'pop':k==='targetLaps'?'laps':k==='speedMultiplier'?'speed':k==='eliteClones'?'elite':k==='mutationRate'?'mut':k==='hiddenLayers'?'hidden':'ttl');
@@ -512,28 +536,6 @@ const app = {
         // change the shape of things and only take effect on the next reset,
         // same as the JS edition.
         Engine.pushConfig(this.state);
-        this.queueSaveSettings();
-    },
-
-    _saveSettingsTimer: null,
-    queueSaveSettings: function() {
-        clearTimeout(this._saveSettingsTimer);
-        this._saveSettingsTimer = setTimeout(() => Persist.saveSettings(this.state), 400);
-    },
-
-    // Restores sliders left the way the user had them last session.
-    loadSettingsFromStorage: function() {
-        const s = Persist.loadSettings();
-        if (!s) return;
-        ['populationSize','eliteClones','mutationRate','hiddenLayers','initialTTL','targetLaps','speedMultiplier'].forEach(k => {
-            if (typeof s[k] === 'number' && isFinite(s[k])) this.state[k] = s[k];
-        });
-        if (s.physics) {
-            ['maxSpeed','acceleration','turnSpeed','grip'].forEach(k => {
-                if (typeof s.physics[k] === 'number' && isFinite(s.physics[k])) this.state.physics[k] = s.physics[k];
-            });
-        }
-        this.syncSettingsUI();
     },
     syncSettingsUI: function() {
         const st = this.state;
@@ -692,7 +694,9 @@ const app = {
             path: t.path.map(p => ({ x: p.x, y: p.y, type: p.type, radius: p.radius })),
             startPos: { x: t.startPos.x, y: t.startPos.y },
             startAngle: t.startAngle,
-            zones: (t.zones || []).map(z => Object.assign({}, z))
+            zones: (t.zones || []).map(z => Object.assign({}, z)),
+            autoWidth: !!t.autoWidth,
+            autoWidthBlend: t.autoWidthBlend || 0
         };
     },
     editTrack: function() {
@@ -703,7 +707,7 @@ const app = {
     },
     duplicateTrack: function() {
         const src = this.currentTrack; if (!src) return;
-        const copy = generateTrackFromPath('custom'+Date.now(), src.name + ' (Copy)', JSON.parse(JSON.stringify(src.path)), src.trackWidth, src.startPos, src.startAngle, JSON.parse(JSON.stringify(src.zones || [])));
+        const copy = generateTrackFromPath('custom'+Date.now(), src.name + ' (Copy)', JSON.parse(JSON.stringify(src.path)), src.trackWidth, src.startPos, src.startAngle, JSON.parse(JSON.stringify(src.zones || [])), { enabled: !!src.autoWidth, blend: src.autoWidthBlend || 0 });
         this.state.isEditing = true; this.state.trackToEdit = copy; editor.init(copy); this.state.isRunning = false;
         document.getElementById('editor-controls').classList.remove('hidden');
         closeSidebar();
@@ -715,13 +719,11 @@ const app = {
         this.state.isEditing = false;
         document.getElementById('editor-controls').classList.add('hidden');
         this.switchTrack(this.state.currentTrackIndex); this.renderTrackList();
-        Persist.saveCustomTracks(this.state.tracks, this._builtInTrackIds || new Set());
     },
     deleteTrack: function() {
         if(confirm("Delete this track?")) {
             if(this.state.tracks.length > 1) {
                 this.state.tracks.splice(this.state.currentTrackIndex, 1); this.switchTrack(0); this.renderTrackList();
-                Persist.saveCustomTracks(this.state.tracks, this._builtInTrackIds || new Set());
             } else alert("Cannot delete last track.");
         }
     },
@@ -788,9 +790,14 @@ const editor = {
 
     init: function(t) {
         this.track = t;
+        if (t.autoWidth === undefined) t.autoWidth = false;
+        if (t.autoWidthBlend === undefined) t.autoWidthBlend = 0;
         document.getElementById('edit-name').value = t.name;
         document.getElementById('edit-width').value = t.trackWidth;
         document.getElementById('edit-angle').value = Math.round((t.startAngle || 0) * (180/Math.PI));
+        document.getElementById('edit-autowidth').checked = !!t.autoWidth;
+        document.getElementById('edit-autowidth-blend').value = Math.round(t.autoWidthBlend * 100);
+        this.syncAutoWidthUI();
         this.setMode('path');
         const c = document.getElementById('sim-canvas');
         c.style.touchAction = 'none';
@@ -911,10 +918,18 @@ const editor = {
         // 'corner' now means "as tight as the track width allows" rather than
         // "no rounding at all", which is exactly what a traced stroke wants.
         this.track.path = spaced.map(p => ({ x: Math.round(p.x), y: Math.round(p.y), type: 'corner', radius: 35 }));
+        // A hand-drawn loop is the case auto width exists for — you can't judge
+        // by eye whether two parts of the stroke left room for a barrier
+        // between them. Turn it on and reflect that in the controls; the
+        // checkbox is right there if it isn't wanted.
+        this.track.autoWidth = true;
+        const awBox = document.getElementById('edit-autowidth');
+        if (awBox) awBox.checked = true;
+        this.syncAutoWidthUI();
         // Re-derive a concrete start pos/angle from the new path (the old ones
         // belonged to whatever shape was there before) — computed once now
         // rather than left null, since save() reads track.startPos.x directly.
-        const derived = generateTrackFromPath(this.track.id, this.track.name, this.track.path, this.track.trackWidth);
+        const derived = generateTrackFromPath(this.track.id, this.track.name, this.track.path, this.track.trackWidth, null, null, [], this.autoOpts());
         this.track.startPos = derived.startPos;
         this.track.startAngle = derived.startAngle;
         document.getElementById('edit-angle').value = Math.round((derived.startAngle || 0) * (180/Math.PI));
@@ -1014,7 +1029,7 @@ const editor = {
         }));
 
         this.track.path = cleanPath;
-        const t = generateTrackFromPath(this.track.id, this.track.name, cleanPath, this.track.trackWidth, this.track.startPos, this.track.startAngle, this.track.zones);
+        const t = generateTrackFromPath(this.track.id, this.track.name, cleanPath, this.track.trackWidth, this.track.startPos, this.track.startAngle, this.track.zones, this.autoOpts());
         app.saveTrack(t);
 
         let pathStr = JSON.stringify(cleanPath)
@@ -1025,56 +1040,14 @@ const editor = {
         const zonesStr = this.track.zones && this.track.zones.length ? `, ${JSON.stringify(this.track.zones)}` : '';
         const startAng = this.track.startAngle ? Number(this.track.startAngle.toFixed(4)) : 0;
         
-        const code = `generateTrackFromPath("${this.track.id}", "${name}", ${pathStr}, ${this.track.trackWidth}, {x:${Math.round(this.track.startPos.x)}, y:${Math.round(this.track.startPos.y)}}, ${startAng}${zonesStr}),`;
+        // Auto width is only emitted when it's on, so an ordinary track's
+        // exported line stays exactly as short as it always was.
+        const autoStr = this.track.autoWidth
+            ? `${zonesStr ? '' : ', []'}, { enabled: true, blend: ${Number((this.track.autoWidthBlend || 0).toFixed(2))} }`
+            : '';
+        const code = `generateTrackFromPath("${this.track.id}", "${name}", ${pathStr}, ${this.track.trackWidth}, {x:${Math.round(this.track.startPos.x)}, y:${Math.round(this.track.startPos.y)}}, ${startAng}${zonesStr}${autoStr}),`;
         document.getElementById('code-output').value = code;
         document.getElementById('code-modal').classList.remove('hidden');
-    },
-
-    // "Publish" — best-effort community sharing with no backend of our own:
-    // opens a prefilled GitHub issue carrying the track as JSON. A repo
-    // GitHub Action (.github/workflows/import-track.yml) validates it and
-    // opens a PR to add it to tracks.js for everyone, once a maintainer merges.
-    publishTrack: function() {
-        const name = document.getElementById('edit-name').value || this.track.name || 'Custom Track';
-        this.track.name = name;
-        const cleanPath = this.track.path.map(p => ({
-            x: Math.round(p.x), y: Math.round(p.y),
-            type: p.type || 'rounded',
-            radius: p.radius !== undefined ? Math.round(p.radius) : 60
-        }));
-        const payload = {
-            id: 'community' + Date.now(),
-            name,
-            path: cleanPath,
-            trackWidth: Math.round(this.track.trackWidth),
-            startPos: { x: Math.round(this.track.startPos.x), y: Math.round(this.track.startPos.y) },
-            startAngle: Number((this.track.startAngle || 0).toFixed(4)),
-            zones: this.track.zones || []
-        };
-        const json = JSON.stringify(payload, null, 2);
-        const title = `[Track Submission] ${name}`;
-        const REPO = 'AZP3001/trackml-assembly';
-        const body = `Submitting a track built in the TrackML in-app editor.\n\nAn automated workflow will validate this and open a pull request to add it for everyone — no manual copy/paste needed. Please don't edit the JSON block below.\n\n\`\`\`json\n${json}\n\`\`\`\n`;
-
-        // GitHub's issue-prefill URL has a practical length limit — very large
-        // hand-edited tracks could overflow it. Fall back to clipboard + a
-        // blank prefilled issue (title/label only) rather than sending a
-        // broken/truncated link.
-        if (body.length > 6000) {
-            const blankUrl = `https://github.com/${REPO}/issues/new?title=${encodeURIComponent(title)}&labels=${encodeURIComponent('track-submission')}`;
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(body).then(() => {
-                    alert('This track is large, so its JSON was copied to your clipboard instead of being pre-filled. A new GitHub issue tab is opening — paste the clipboard contents into the issue body and submit it.');
-                    window.open(blankUrl, '_blank', 'noopener');
-                }).catch(() => alert('This track is too large to publish via a link, and your browser blocked clipboard access. Try Save Track + the code export instead.'));
-            } else {
-                alert('This track is too large to publish via a link on this browser. Try Save Track + the code export instead.');
-            }
-            return;
-        }
-
-        const url = `https://github.com/${REPO}/issues/new?title=${encodeURIComponent(title)}&labels=${encodeURIComponent('track-submission')}&body=${encodeURIComponent(body)}`;
-        window.open(url, '_blank', 'noopener');
     },
 
     cancel: function() {
@@ -1083,6 +1056,34 @@ const editor = {
         const cv = document.getElementById('sim-canvas'); cv.onpointerdown = null; cv.onpointermove = null; cv.onpointerup = null; cv.onpointercancel = null;
     },
     updateWidth: function(v) { this.track.trackWidth = parseInt(v); },
+
+    // The auto-width settings, in the shape generateTrackFromPath wants. Every
+    // rebuild the editor does goes through this so the live preview shows the
+    // same road the simulation will actually use.
+    autoOpts: function() {
+        return { enabled: !!this.track.autoWidth, blend: this.track.autoWidthBlend || 0 };
+    },
+    updateAutoWidth: function(on) {
+        this.track.autoWidth = !!on;
+        this.syncAutoWidthUI();
+    },
+    updateAutoWidthBlend: function(v) {
+        this.track.autoWidthBlend = parseInt(v) / 100;
+        this.syncAutoWidthUI();
+    },
+    syncAutoWidthUI: function() {
+        const wrap = document.getElementById('autowidth-blend-wrap');
+        const label = document.getElementById('autowidth-blend-label');
+        const on = !!this.track.autoWidth;
+        if (wrap) {
+            wrap.classList.toggle('opacity-40', !on);
+            wrap.classList.toggle('pointer-events-none', !on);
+        }
+        if (label) {
+            const b = Math.round((this.track.autoWidthBlend || 0) * 100);
+            label.textContent = b === 0 ? 'Pinch only' : b === 100 ? 'Whole track' : `Mix ${b}%`;
+        }
+    },
     updateAngle: function(v) { this.track.startAngle = parseFloat(v) * (Math.PI/180); },
     addZone: function(type) { 
         const z = { id:Date.now().toString(), x:CANVAS_WIDTH/2, y:CANVAS_HEIGHT/2, radius:80, type };
@@ -1175,7 +1176,7 @@ const editor = {
     },
 
     draw: function(ctx) {
-        const p = generateTrackFromPath(this.track.id, this.track.name, this.track.path, this.track.trackWidth, this.track.startPos, this.track.startAngle, this.track.zones);
+        const p = generateTrackFromPath(this.track.id, this.track.name, this.track.path, this.track.trackWidth, this.track.startPos, this.track.startAngle, this.track.zones, this.autoOpts());
         drawRoadSurface(ctx, p, '#343a40');
         // Light, not slate: the barrier now sits exactly on the edge of the
         // asphalt, so a near-asphalt colour made it invisible while editing.
@@ -1247,6 +1248,8 @@ const editor = {
     }
 };
 
+// Before anything else: clear every trace of a previous visit.
+wipeStorage();
 window.onload = () => app.init();
 
 function openSidebar() {

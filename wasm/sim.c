@@ -368,14 +368,30 @@ static void buildCentreGrid(Vec2 *pts, i32 n, float cell) {
     }
 }
 
-// Squared distance to the nearest centreline segment. Anything more than a cell
-// away reads as "very far", which is all the callers need — they only ever
-// compare against the offset distance.
-static float centreDist2(float px, float py) {
-    if (!grid_items) return 1.0e30f;
+// ---------------------------------------------------------------------------
+// Variable width
+//
+// The road used to be one number wide everywhere. It is now a per-centreline-
+// sample half-width in tk_w[], which is what lets the track pinch in where two
+// passes of it run close together instead of merging into one slab.
+//
+// Everything downstream that used to compare a distance against the single
+// `dist` now has to ask "how wide is the road *here*", so the inside-the-road
+// test below replaces the plain distance query: a point is inside the road when
+// some segment's own half-width reaches it, and the depth it reaches by is what
+// the offset trim wants to know.
+// ---------------------------------------------------------------------------
+static float *tk_w;          // per-sample half-width
+static float  tk_w_max;      // the widest it gets, for grid sizing
+static float  tk_w_min;      // the narrowest, for approximation budgets
+
+// How deep inside the road this point sits, and the half-width of the segment
+// that claims it. Negative depth means outside the asphalt altogether.
+static float roadDepth(float px, float py, float *rOut) {
+    if (!grid_items || !tk_w) { if (rOut) *rOut = tk_width; return -1.0e30f; }
     i32 gx = (i32)floorf_((px - grid_ox) / grid_cell);
     i32 gy = (i32)floorf_((py - grid_oy) / grid_cell);
-    float best = 1.0e30f;
+    float best = -1.0e30f, bestR = tk_width;
     i32 xlo = maxi(gx - 1, 0), xhi = mini(gx + 1, grid_nx - 1);
     i32 ylo = maxi(gy - 1, 0), yhi = mini(gy + 1, grid_ny - 1);
     i32 n = tk_center_n;
@@ -383,12 +399,158 @@ static float centreDist2(float px, float py) {
         i32 k = iy * grid_nx + ix;
         for (i32 s = grid_start[k]; s < grid_start[k + 1]; s++) {
             i32 i = grid_items[s];
-            Vec2 a = tk_center[i], b = tk_center[(i + 1) % n];
-            float d2 = _pointSegDist2(px, py, a.x, a.y, b.x, b.y);
-            if (d2 < best) best = d2;
+            i32 j = (i + 1) % n;
+            Vec2 a = tk_center[i], b = tk_center[j];
+            // The segment's width is taken as the wider of its two ends, so a
+            // taper never leaves a sliver of unclaimed road between samples.
+            float r = maxf(tk_w[i], tk_w[j]);
+            float d = sqrtf_(_pointSegDist2(px, py, a.x, a.y, b.x, b.y));
+            float depth = r - d;
+            if (depth > best) { best = depth; bestR = r; }
         }
     }
+    if (rOut) *rOut = bestR;
     return best;
+}
+
+// Distance from sample i to the nearest part of the track that isn't simply
+// "further along the road" — used to decide how much room the road actually
+// has at that point.
+//
+// The arc-length exclusion window is the whole trick. Excluding too little and
+// every corner reads as a collision with itself; excluding too much and a
+// hairpin's other leg goes unnoticed. The window is sized to the tightest turn
+// the generator will build (minRadius = 1.1 * width + 4): half a circle of that
+// radius is about 3.5 widths of arc, so anything inside ~4 widths of arc is the
+// road curving normally and is left alone. Past that, a close approach is two
+// genuinely different parts of the track and the road should give way.
+static void computeClearance(i32 n, float reqW, float *segLen, float *out) {
+    float window = reqW * 4.0f + 15.0f;
+    for (i32 i = 0; i < n; i++) {
+        float px = tk_center[i].x, py = tk_center[i].y;
+        float best = 1.0e30f;
+        // Walk outward from i in both directions, skipping the window, and stop
+        // once the remaining track is all on the far side of the loop.
+        float fwd = 0.0f;
+        for (i32 k = 1; k < n; k++) {
+            i32 j = (i + k) % n;
+            fwd += segLen[(i + k - 1) % n];
+            if (fwd <= window) continue;
+            // The same pair is reached from the other end too; stopping at the
+            // halfway point keeps this O(n^2/2) instead of O(n^2).
+            if (k > n / 2) break;
+            float dx = tk_center[j].x - px, dy = tk_center[j].y - py;
+            float d2 = dx * dx + dy * dy;
+            if (d2 < best) best = d2;
+        }
+        float bwd = 0.0f;
+        for (i32 k = 1; k < n; k++) {
+            i32 j = (i - k + n * 2) % n;
+            bwd += segLen[(i - k + n * 2) % n];
+            if (bwd <= window) continue;
+            if (k > n / 2) break;
+            float dx = tk_center[j].x - px, dy = tk_center[j].y - py;
+            float d2 = dx * dx + dy * dy;
+            if (d2 < best) best = d2;
+        }
+        out[i] = best >= 1.0e30f ? 1.0e30f : sqrtf_(best);
+    }
+}
+
+// Turn clearances into half-widths.
+//
+// mode: 0 = off (flat requested width), 1 = auto.
+// blend: 0 = narrow only where it's needed, 1 = one uniform width for the whole
+//        track (the narrowest any point needs). Anything between tapers toward
+//        uniform, which is the slider in the editor.
+#define AUTO_MIN_HALF  11.0f   // a car is 14x7; below this it cannot get through
+#define AUTO_GAP       12.0f   // barrier-to-barrier gap left between two passes
+
+// A cyclic box blur, in place, via a running sum — O(n) per pass regardless of
+// the window size, which matters because the window here is large on purpose.
+static void boxBlur(float *v, float *tmp, i32 n, i32 r) {
+    if (r < 1 || n < 3) return;
+    if (r > (n - 1) / 2) r = (n - 1) / 2;
+    if (r < 1) return;
+    float inv = 1.0f / (float)(2 * r + 1);
+    float sum = 0.0f;
+    for (i32 k = -r; k <= r; k++) sum += v[(k + n * 2) % n];
+    for (i32 i = 0; i < n; i++) {
+        tmp[i] = sum * inv;
+        sum -= v[(i - r + n * 2) % n];
+        sum += v[(i + r + 1 + n * 2) % n];
+    }
+    for (i32 i = 0; i < n; i++) v[i] = tmp[i];
+}
+
+static void computeWidths(i32 n, float reqW, i32 mode, float blend, float *clear, float *segLen) {
+    if (mode == 0) {
+        for (i32 i = 0; i < n; i++) tk_w[i] = reqW;
+        tk_w_max = reqW; tk_w_min = reqW;
+        return;
+    }
+    for (i32 i = 0; i < n; i++) {
+        float c = clear[i];
+        float w = reqW;
+        // Two passes closer together than a single half-width have merged into
+        // a junction. Pinching there doesn't restore a wall between them, it
+        // just puts a notch in the middle of a crossing — so leave those alone.
+        if (c > reqW && c < 2.0f * reqW + AUTO_GAP) {
+            w = (c - AUTO_GAP) * 0.5f;
+            if (w > reqW) w = reqW;
+            if (w < AUTO_MIN_HALF) w = AUTO_MIN_HALF;
+        }
+        tk_w[i] = w;
+    }
+
+    // Erode, then blur.
+    //
+    // The erosion pass widens each narrow stretch along the track so the pinch
+    // begins before the tight bit rather than at it; the blur then turns the
+    // resulting steps into a taper. The order matters — blurring first would
+    // average the narrow point back open and undo the whole thing.
+    //
+    // Both windows are sized in PIXELS OF TRACK, not in samples, and converted
+    // through the average sample spacing. Sizing them in samples instead ties
+    // how gentle the taper looks to how finely the centreline happened to be
+    // resampled, which varies with track width — the same pinch then tapers
+    // smoothly on one track and steps visibly on another.
+    float perim = 0.0f;
+    for (i32 i = 0; i < n; i++) perim += segLen[i];
+    float avgSeg = maxf(perim / (float)n, 0.5f);
+    float taper = maxf(reqW * 2.5f, 40.0f);          // how long the ramp should be
+    i32 blurR = (i32)(taper / avgSeg + 0.5f);
+    blurR = maxi(1, mini(blurR, n / 6));
+    i32 erodeR = blurR + 2;                          // keep the minimum after blurring
+
+    float *tmp = (float *)arena_alloc((u32)n * 4);
+    if (tmp) {
+        for (i32 i = 0; i < n; i++) {
+            float m = tk_w[i];
+            for (i32 k = -erodeR; k <= erodeR; k++) {
+                float v = tk_w[(i + k + n * 2) % n];
+                if (v < m) m = v;
+            }
+            tmp[i] = m;
+        }
+        for (i32 i = 0; i < n; i++) tk_w[i] = tmp[i];
+        // Two box passes make a triangular kernel — smooth enough that the
+        // asphalt reads as a taper rather than a series of steps.
+        boxBlur(tk_w, tmp, n, blurR);
+        boxBlur(tk_w, tmp, n, blurR);
+    }
+
+    if (blend > 0.0f) {
+        float gmin = tk_w[0];
+        for (i32 i = 1; i < n; i++) if (tk_w[i] < gmin) gmin = tk_w[i];
+        for (i32 i = 0; i < n; i++) tk_w[i] = tk_w[i] + (gmin - tk_w[i]) * blend;
+    }
+
+    tk_w_max = tk_w[0]; tk_w_min = tk_w[0];
+    for (i32 i = 1; i < n; i++) {
+        if (tk_w[i] > tk_w_max) tk_w_max = tk_w[i];
+        if (tk_w[i] < tk_w_min) tk_w_min = tk_w[i];
+    }
 }
 
 // A growable Vec2 list over the arena. Doubling and copying wastes arena space,
@@ -526,13 +688,16 @@ static void ol_push(OffList *v, float x, float y, i32 ci) {
     v->p[v->n].x = x; v->p[v->n].y = y; v->p[v->n].ci = ci; v->n++;
 }
 
-static void offsetOutline(Vec2 *pts, i32 n, float dist, i32 side, OffList *raw) {
-    float flat, sag; _trackTol(dist, &flat, &sag);
-    float arcStep = clampf(2.0f * acosf_(maxf(0.0f, 1.0f - flat / dist)), 0.08f, 0.5f);
+// `dist` is now per-sample (tk_w), so each offset point steps out by however
+// wide the road is at the sample it belongs to.
+static void offsetOutline(Vec2 *pts, i32 n, i32 side, OffList *raw) {
     raw->p = (OffPt *)arena_alloc((u32)(n * 2 + 64) * sizeof(OffPt));
     raw->n = 0; raw->cap = raw->p ? n * 2 + 64 : 0;
 
     for (i32 i = 0; i < n; i++) {
+        float dist = tk_w[i];
+        float flat, sag; _trackTol(dist, &flat, &sag);
+        float arcStep = clampf(2.0f * acosf_(maxf(0.0f, 1.0f - flat / dist)), 0.08f, 0.5f);
         Vec2 prev = pts[(i - 1 + n) % n], curr = pts[i], next = pts[(i + 1) % n];
         float ix = curr.x - prev.x, iy = curr.y - prev.y; float il = hypotf_(ix, iy);
         float ox = next.x - curr.x, oy = next.y - curr.y; float ol = hypotf_(ox, oy);
@@ -584,12 +749,14 @@ static void wl_push(WallList *v, float x1, float y1, float x2, float y2, i32 seg
 // Drop every offset point that landed inside the road — which only happens
 // where the outline folded back through itself — and chain the survivors.
 static void trimOutlineToWalls(OffList *raw, float dist, i32 *cpOfSample, WallList *outw) {
-    float insideLimit = (dist - 0.75f) * (dist - 0.75f);
     i32 *keep = (i32 *)arena_alloc((u32)(raw->n + 1) * 4);
     if (!keep) return;
     i32 m = 0;
     for (i32 i = 0; i < raw->n; i++) {
-        if (centreDist2(raw->p[i].x, raw->p[i].y) >= insideLimit) keep[m++] = i;
+        // "Is this offset point inside the road?" — which with a variable width
+        // is no longer a fixed distance from the centreline but whether any
+        // segment's own half-width reaches it.
+        if (roadDepth(raw->p[i].x, raw->p[i].y, 0) <= 0.75f) keep[m++] = i;
     }
     if (m < 3) return;
 
@@ -597,7 +764,7 @@ static void trimOutlineToWalls(OffList *raw, float dist, i32 *cpOfSample, WallLi
     // simplifyWalls pass). `dropped` holds every point the current run has
     // swallowed: checking only the newest one lets the error creep up over a
     // long run and quietly narrow the road.
-    float flat, sag; _trackTol(dist, &flat, &sag);
+    float flat, sag; _trackTol(tk_w_min > 0.0f ? tk_w_min : dist, &flat, &sag);
     float sag2 = sag * sag;
     #define MAX_DROPPED 4096
     static Vec2 dropped[MAX_DROPPED];
@@ -615,7 +782,10 @@ static void trimOutlineToWalls(OffList *raw, float dist, i32 *cpOfSample, WallLi
             i32 cuts = 0;
             for (i32 s = 1; s <= 3 && !cuts; s++) {
                 float t = (float)s / 4.0f;
-                if (centreDist2(a.x + dx * t, a.y + dy * t) < dist * dist * 0.3f) cuts = 1;
+                // Originally `d < r * 0.548`; expressed as a depth so it reads
+                // the local half-width rather than one global one.
+                float r, depth = roadDepth(a.x + dx * t, a.y + dy * t, &r);
+                if (depth > r * 0.4523f) cuts = 1;
             }
             if (cuts) { ndrop = 0; continue; }
         }
@@ -775,12 +945,13 @@ __attribute__((export_name("track_build")))
 i32 track_build(const float *path, i32 n_in, float width,
                 i32 has_start, float sx, float sy,
                 i32 has_angle, float sang,
-                const float *zones, i32 nz) {
+                const float *zones, i32 nz,
+                i32 auto_width, float auto_blend) {
     arena_reset();
     tk_center = 0; tk_center_n = 0; tk_walls = 0; tk_wall_n = 0;
     tk_cps = 0; tk_cp_n = 0; tk_zones = 0; tk_zone_n = 0;
-    wbs_start = 0; grid_items = 0;
-    tk_width = width;
+    wbs_start = 0; grid_items = 0; tk_w = 0;
+    tk_width = width; tk_w_max = width;
     tk_start_x = 100.0f; tk_start_y = 100.0f; tk_start_angle = 0.0f;
 
     tk_zone_n = nz;
@@ -811,11 +982,36 @@ i32 track_build(const float *path, i32 n_in, float width,
 
     float dist = maxf(4.0f, width);
     VecList cl;
+    // The centreline is built at the requested width and never changes: auto
+    // width only decides how far the asphalt reaches either side of it. That
+    // ordering is what makes the feature cheap — the corner radii were already
+    // solved for the full width, so narrowing can only ever add clearance.
     if (!buildCentreline(path2, n, dist, &cl) || cl.n < 3) return 0;
     tk_center = cl.p; tk_center_n = cl.n;
 
     i32 len = tk_center_n;
-    buildCentreGrid(tk_center, len, maxf(dist, 16.0f));
+
+    // --- per-sample width ---
+    tk_w = (float *)arena_alloc((u32)len * 4);
+    if (!tk_w) return 0;
+    if (auto_width) {
+        float *segLen = (float *)arena_alloc((u32)len * 4);
+        float *clear = (float *)arena_alloc((u32)len * 4);
+        if (!segLen || !clear) { auto_width = 0; }
+        else {
+            for (i32 i = 0; i < len; i++) {
+                Vec2 a = tk_center[i], b = tk_center[(i + 1) % len];
+                segLen[i] = hypotf_(b.x - a.x, b.y - a.y);
+            }
+            computeClearance(len, dist, segLen, clear);
+            computeWidths(len, dist, 1, clampf(auto_blend, 0.0f, 1.0f), clear, segLen);
+        }
+    }
+    if (!auto_width) computeWidths(len, dist, 0, 0.0f, 0, 0);
+
+    // The grid backs the inside-the-road test, so its cells have to be at least
+    // as big as the widest the road ever gets.
+    buildCentreGrid(tk_center, len, maxf(tk_w_max, 16.0f));
 
     // --- checkpoint gates, evenly spaced along the centreline ---
     i32 *cpOfSample = (i32 *)arena_alloc((u32)len * 4);
@@ -831,8 +1027,11 @@ i32 track_build(const float *path, i32 n_in, float width,
             float tx = next.x - prev.x, ty = next.y - prev.y;
             float tl = hypotf_(tx, ty); if (tl == 0.0f) tl = 1.0f;
             tx /= tl; ty /= tl;
-            cps[ncp].p1x = c.x - ty * dist; cps[ncp].p1y = c.y + tx * dist;
-            cps[ncp].p2x = c.x + ty * dist; cps[ncp].p2y = c.y - tx * dist;
+            // The gate spans the road as it is *here*, so a narrowed stretch
+            // gets a narrowed gate rather than one poking through the barrier.
+            float hw_ = tk_w[i];
+            cps[ncp].p1x = c.x - ty * hw_; cps[ncp].p1y = c.y + tx * hw_;
+            cps[ncp].p2x = c.x + ty * hw_; cps[ncp].p2y = c.y - tx * hw_;
             cps[ncp].cx = c.x; cps[ncp].cy = c.y;
             ncp++;
         }
@@ -845,7 +1044,7 @@ i32 track_build(const float *path, i32 n_in, float width,
     for (i32 s = 0; s < 2; s++) {
         i32 side = s == 0 ? 1 : -1;
         OffList raw;
-        offsetOutline(tk_center, len, dist, side, &raw);
+        offsetOutline(tk_center, len, side, &raw);
         trimOutlineToWalls(&raw, dist, cpOfSample, &wl);
     }
     // Walls long enough to be a bridging chord belong to no one checkpoint, so
@@ -860,7 +1059,9 @@ i32 track_build(const float *path, i32 n_in, float width,
     tk_start_y = has_start ? sy : floorf_(tk_center[0].y + 0.5f);
     // A start point left outside the asphalt spawns the whole field into a
     // wall; pull it back onto the nearest bit of centreline.
-    if (has_start && centreDist2(tk_start_x, tk_start_y) > (dist * 0.9f) * (dist * 0.9f)) {
+    // Originally `d > r * 0.9`, i.e. within a tenth of the edge; as a depth so
+    // it reads the local half-width.
+    if (has_start && roadDepth(tk_start_x, tk_start_y, 0) < tk_w[0] * 0.1f) {
         i32 best = 0; float bestD = 1.0e30f;
         for (i32 i = 0; i < len; i++) {
             float dx = tk_center[i].x - tk_start_x, dy = tk_center[i].y - tk_start_y;
@@ -880,6 +1081,10 @@ i32 track_build(const float *path, i32 n_in, float width,
 // Geometry accessors — JS wraps these in typed-array views over the module's
 // memory, so nothing is copied out unless the caller actually asks for it.
 __attribute__((export_name("track_centerline_ptr"))) i32 track_centerline_ptr(void) { return (i32)(unsigned long)tk_center; }
+// One half-width per centreline sample — what the canvas needs to stroke a road
+// that changes width along its length.
+__attribute__((export_name("track_widths_ptr"))) i32 track_widths_ptr(void) { return (i32)(unsigned long)tk_w; }
+__attribute__((export_name("track_width_max"))) float track_width_max(void) { return tk_w_max; }
 __attribute__((export_name("track_centerline_count"))) i32 track_centerline_count(void) { return tk_center_n; }
 __attribute__((export_name("track_walls_ptr"))) i32 track_walls_ptr(void) { return (i32)(unsigned long)tk_walls; }
 __attribute__((export_name("track_wall_count"))) i32 track_wall_count(void) { return tk_wall_n; }

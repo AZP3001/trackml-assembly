@@ -88,7 +88,9 @@ const Engine = {
     },
 
     _compile: async function(url) {
-        const res = await fetch(url);
+        // no-store, to match the rest of the page: a reload re-fetches the
+        // module rather than reviving whatever the browser had cached.
+        const res = await fetch(url, { cache: 'no-store' });
         if (!res.ok) throw new Error(`could not load ${url} (HTTP ${res.status})`);
         return WebAssembly.compile(await res.arrayBuffer());
     },
@@ -122,10 +124,14 @@ const Engine = {
     // Called from the editor on every frame while a track is being dragged
     // around, so this is a hot path in its own right even though no car is
     // moving. The generator itself is in sim.c; this only marshals.
-    buildTrack: function(id, name, pathInput, width, customStartPos, customStartAngle, zones) {
+    buildTrack: function(id, name, pathInput, width, customStartPos, customStartAngle, zones, auto) {
         zones = zones || [];
+        auto = auto || {};
+        const autoOn = auto.enabled ? 1 : 0;
+        const autoBlend = typeof auto.blend === 'number' ? auto.blend : 0;
         const empty = () => makeTrack(id, name, pathInput || [], width, { x: 100, y: 100 }, 0, zones,
-            new Float32Array(0), new Float32Array(0), new Int32Array(0), new Float32Array(0));
+            new Float32Array(0), new Float32Array(0), new Int32Array(0), new Float32Array(0),
+            new Float32Array(0), { enabled: !!autoOn, blend: autoBlend });
         if (!this.master || !pathInput || pathInput.length < 3) return empty();
 
         const ex = this.master.ex;
@@ -159,13 +165,17 @@ const Engine = {
             ex.path_in_ptr(), nPts, width,
             hasStart, hasStart ? customStartPos.x : 0, hasStart ? customStartPos.y : 0,
             hasAngle, hasAngle ? customStartAngle : 0,
-            ex.zone_in_ptr(), nZones);
+            ex.zone_in_ptr(), nZones,
+            autoOn, autoBlend);
         if (!ok) return empty();
 
         // Copy the results out. The arena they live in is reset by the next
         // track_build, and the editor calls that once a frame.
         const nc = ex.track_centerline_count();
         const centerF32 = this._f32(this.master, ex.track_centerline_ptr(), nc * 2).slice();
+        // One half-width per centreline sample. With auto width off these are
+        // all the same number, and the renderer takes a faster path.
+        const widthF32 = this._f32(this.master, ex.track_widths_ptr(), nc).slice();
 
         const nw = ex.track_wall_count();
         const wallsRaw = this._f32(this.master, ex.track_walls_ptr(), nw * 5);
@@ -185,7 +195,8 @@ const Engine = {
 
         return makeTrack(id, name, pathInput, width,
             { x: ex.track_start_x(), y: ex.track_start_y() }, ex.track_start_angle(),
-            zones, centerF32, wallsF32, wallSeg, cpF32);
+            zones, centerF32, wallsF32, wallSeg, cpF32,
+            widthF32, { enabled: !!autoOn, blend: autoBlend });
     },
 
     // ---- config --------------------------------------------------------
@@ -207,7 +218,9 @@ const Engine = {
             width: track.trackWidth,
             startPos: track.startPos,
             startAngle: track.startAngle,
-            zones: track.zones || []
+            zones: track.zones || [],
+            autoWidth: !!track.autoWidth,
+            autoWidthBlend: track.autoWidthBlend || 0
         };
         const p = state.physics;
         const config = [p.maxSpeed, p.acceleration, p.turnSpeed, p.grip,
@@ -405,10 +418,12 @@ const ZONE_TYPE_ID = { speed: 0, precision: 1, focus: 2, spawnkill: 3 };
 // {p1:{x,y}} objects. `walls` and `checkpoints` are still here as lazy getters
 // for anything that wants the old object shape; nothing on a hot path does.
 function makeTrack(id, name, path, trackWidth, startPos, startAngle, zones,
-                   centerF32, wallsF32, wallSeg, cpF32) {
+                   centerF32, wallsF32, wallSeg, cpF32, widthF32, auto) {
     const t = {
         id, name, path, trackWidth, startPos, startAngle, zones,
-        centerF32, wallsF32, wallSeg, cpF32,
+        centerF32, wallsF32, wallSeg, cpF32, widthF32,
+        autoWidth: !!(auto && auto.enabled),
+        autoWidthBlend: (auto && typeof auto.blend === 'number') ? auto.blend : 0,
         wallCount: wallsF32.length / 4,
         cpCount: cpF32.length / 6,
         segStep: 34
@@ -449,6 +464,8 @@ function makeTrack(id, name, path, trackWidth, startPos, startAngle, zones,
 }
 
 // The name the rest of the app (and every published track in tracks.js) calls.
-function generateTrackFromPath(id, name, pathInput, width, customStartPos, customStartAngle, zones = []) {
-    return Engine.buildTrack(id, name, pathInput, width, customStartPos, customStartAngle, zones);
+// `auto` is optional and defaults to off, so every existing call — including
+// every track in tracks.js — keeps its constant width.
+function generateTrackFromPath(id, name, pathInput, width, customStartPos, customStartAngle, zones = [], auto = null) {
+    return Engine.buildTrack(id, name, pathInput, width, customStartPos, customStartAngle, zones, auto);
 }

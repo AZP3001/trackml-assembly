@@ -220,38 +220,99 @@ const zones = await page.evaluate(async () => {
 check(zones.count === 4 && zones.walls > 20, 'zones survive a track rebuild',
     `${zones.count} zones: ${zones.types.join(', ')}`);
 
-// --- save + persistence round trip --------------------------------------
-// Persist stores only the raw definition; the geometry is regenerated. Worth
-// checking now that a track carries Float32Arrays a JSON round trip would ruin.
+// --- saving a track, and NOT persisting it ------------------------------
+// The app deliberately keeps nothing across reloads. A track you make lasts
+// the session; the code export is how you keep one.
 await page.evaluate(() => {
     app.createNewTrack();
-    document.getElementById('edit-name').value = 'E2E Persisted Track';
+    document.getElementById('edit-name').value = 'E2E Session Track';
     editor.save();
     document.getElementById('code-modal').classList.add('hidden');
 });
 await page.waitForTimeout(400);
-const saved = await page.evaluate(() => {
-    const raw = localStorage.getItem('trackml_custom_tracks_v1');
-    const parsed = raw ? JSON.parse(raw) : [];
-    const mine = parsed.find(t => t.name === 'E2E Persisted Track');
-    return { stored: !!mine, pts: mine ? mine.path.length : 0,
-             bloat: raw ? raw.length : 0, inList: app.state.tracks.some(t => t.name === 'E2E Persisted Track') };
-});
-check(saved.stored && saved.inList, 'custom track saves', `${saved.pts} path points`);
-// A Float32Array serialised by JSON.stringify becomes {"0":..,"1":..} — a few
-// hundred KB of it. Catching that is the point of this bound.
-check(saved.bloat > 0 && saved.bloat < 20000, 'persisted track stores only its definition',
-    `${saved.bloat} bytes in localStorage`);
+const saved = await page.evaluate(() => ({
+    inList: app.state.tracks.some(t => t.name === 'E2E Session Track'),
+    code: document.getElementById('code-output').value,
+    storageKeys: Object.keys(localStorage).length + Object.keys(sessionStorage).length
+}));
+check(saved.inList, 'custom track joins the track list');
+check(/^generateTrackFromPath\(/.test(saved.code), 'the editor exports code for the track',
+    saved.code.slice(0, 48) + '...');
+check(saved.storageKeys === 0, 'saving writes nothing to browser storage',
+    `${saved.storageKeys} keys after a save`);
 
-// Reload and confirm it comes back, rebuilt through wasm.
+// Plant some storage, reload, and confirm the page wiped it and came back with
+// only the built-in tracks.
+await page.evaluate(() => {
+    localStorage.setItem('trackml_custom_tracks_v1', '[{"id":"ghost","name":"Ghost Track"}]');
+    localStorage.setItem('trackml_settings_v1', '{"populationSize":123}');
+    sessionStorage.setItem('anything', 'at all');
+});
 await page.reload({ waitUntil: 'load' });
 await page.waitForFunction(APP_READY, null, { timeout: 30000 });
-const restored = await page.evaluate(() => {
-    const t = app.state.tracks.find(t => t.name === 'E2E Persisted Track');
-    return { found: !!t, walls: t ? t.wallCount : 0 };
+const afterReload = await page.evaluate(() => ({
+    local: Object.keys(localStorage).length,
+    session: Object.keys(sessionStorage).length,
+    sessionTrack: app.state.tracks.some(t => t.name === 'E2E Session Track'),
+    ghost: app.state.tracks.some(t => t.name === 'Ghost Track'),
+    tracks: app.state.tracks.length,
+    pop: app.state.populationSize
+}));
+check(afterReload.local === 0 && afterReload.session === 0, 'reload clears browser storage',
+    `${afterReload.local} local + ${afterReload.session} session keys remain`);
+check(!afterReload.sessionTrack, 'a track made this session does not come back');
+check(!afterReload.ghost, 'storage planted by an older build is ignored');
+check(afterReload.tracks === boot.tracks, 'reload gives the built-in track list',
+    `${afterReload.tracks} tracks`);
+check(afterReload.pop === 200, 'settings reset to defaults', `population ${afterReload.pop}`);
+
+// --- auto width ----------------------------------------------------------
+// A wedge corridor: the track runs back alongside itself 70px away, which at a
+// half-width of 60 would leave the two roads overlapping with no barrier.
+const autoWidth = await page.evaluate(() => {
+    const path = [
+        { x: 250, y: 200, type: 'corner', radius: 60 }, { x: 950, y: 200, type: 'corner', radius: 60 },
+        { x: 950, y: 270, type: 'corner', radius: 60 }, { x: 600, y: 270, type: 'corner', radius: 60 },
+        { x: 250, y: 500, type: 'corner', radius: 60 }
+    ];
+    const spread = t => Math.max(...t.widthF32) - Math.min(...t.widthF32);
+    const off   = generateTrackFromPath('aw0', 'off',    path, 40, null, null, [], { enabled: false });
+    const local = generateTrackFromPath('aw1', 'local',  path, 40, null, null, [], { enabled: true, blend: 0 });
+    const glob  = generateTrackFromPath('aw2', 'global', path, 40, null, null, [], { enabled: true, blend: 1 });
+    return {
+        offSpread: spread(off), offMin: Math.min(...off.widthF32),
+        localSpread: spread(local), localMin: Math.min(...local.widthF32), localMax: Math.max(...local.widthF32),
+        globSpread: spread(glob), globMin: Math.min(...glob.widthF32),
+        walls: local.wallCount, autoFlag: local.autoWidth
+    };
 });
-check(restored.found && restored.walls > 20, 'custom track survives a reload',
-    `rebuilt with ${restored.walls} walls`);
+check(autoWidth.offSpread === 0 && autoWidth.offMin === 40, 'auto width off keeps one width',
+    `all samples at ${autoWidth.offMin}`);
+check(autoWidth.localMin < 35 && autoWidth.localMax > 38, 'local mode pinches only the tight stretch',
+    `${autoWidth.localMin.toFixed(1)} at the pinch, ${autoWidth.localMax.toFixed(1)} elsewhere`);
+check(autoWidth.globSpread < 0.01 && Math.abs(autoWidth.globMin - autoWidth.localMin) < 0.01,
+    'global mode uses that width everywhere',
+    `uniform ${autoWidth.globMin.toFixed(1)}`);
+check(autoWidth.walls > 20 && autoWidth.autoFlag, 'the pinched track still generates barriers',
+    `${autoWidth.walls} walls`);
+
+// The editor controls have to drive it, not just the API.
+const autoUI = await page.evaluate(async () => {
+    app.createNewTrack();
+    const cb = document.getElementById('edit-autowidth');
+    const sl = document.getElementById('edit-autowidth-blend');
+    cb.checked = true; cb.dispatchEvent(new Event('change'));
+    const afterCheck = editor.track.autoWidth;
+    sl.value = '100'; sl.dispatchEvent(new Event('input'));
+    const afterSlide = editor.track.autoWidthBlend;
+    const label = document.getElementById('autowidth-blend-label').textContent;
+    const opts = editor.autoOpts();
+    editor.cancel();
+    return { afterCheck, afterSlide, label, opts };
+});
+check(autoUI.afterCheck === true && autoUI.afterSlide === 1,
+    'the editor controls drive auto width',
+    `checkbox -> ${autoUI.afterCheck}, slider -> ${autoUI.afterSlide} ("${autoUI.label}")`);
 
 // --- image import -------------------------------------------------------
 // Synthesise a hand-drawn-looking loop and push it through the real pipeline:

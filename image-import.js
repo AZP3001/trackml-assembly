@@ -85,7 +85,12 @@ const ImageImport = {
         }
         const path = spaced.map(p => ({ x: Math.round(p.x), y: Math.round(p.y), type: 'corner', radius: 35 }));
 
-        const t = generateTrackFromPath('img' + Date.now(), 'Imported Track', path, trackWidth);
+        // Auto width on by default: a traced shape has no idea how close its
+        // own loops came to each other, and this is precisely the case where
+        // two passes end up a few pixels apart. It's a checkbox in the editor
+        // if you'd rather it didn't.
+        const t = generateTrackFromPath('img' + Date.now(), 'Imported Track', path, trackWidth,
+            null, null, [], { enabled: true, blend: 0 });
         app.state.isEditing = true;
         app.state.trackToEdit = t;
         editor.init(t);

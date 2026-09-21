@@ -40,6 +40,13 @@ jobs:
           node tools/paritytest.mjs wasm/sim.wasm
           node tools/paritytest.mjs wasm/sim-simd.wasm
 
+      # The auto-width solver: does a pinched track narrow, does a normal one
+      # stay untouched, and does a self-crossing one survive.
+      - name: Auto-width behaviour
+        run: |
+          node tools/autowidth.mjs wasm/sim.wasm
+          node tools/autowidth.mjs wasm/sim-simd.wasm
+
       - name: Install Playwright
         run: npm install --no-save playwright@1.56.1 && npx playwright install --with-deps chromium
 

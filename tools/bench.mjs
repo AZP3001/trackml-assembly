@@ -35,7 +35,7 @@ const path = Array.from({ length: 48 }, (_, i) => {
 // --- build the track once, share the geometry with both engines ---
 const pIn = f32(w.path_in_ptr(), path.length * 4);
 path.forEach((p, i) => { pIn[i*4]=p.x; pIn[i*4+1]=p.y; pIn[i*4+2]=1; pIn[i*4+3]=60; });
-w.track_build(w.path_in_ptr(), path.length, 60, 0, 0, 0, 0, 0, w.zone_in_ptr(), 0);
+w.track_build(w.path_in_ptr(), path.length, 60, 0, 0, 0, 0, 0, w.zone_in_ptr(), 0, 0, 0);
 
 const nw = w.track_wall_count(), wf = f32(w.track_walls_ptr(), nw*5), wi = i32(w.track_walls_ptr(), nw*5);
 const walls = Array.from({ length: nw }, (_, i) => ({

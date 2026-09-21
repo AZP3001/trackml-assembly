@@ -68,7 +68,8 @@ self.onmessage = async (e) => {
                 ex.path_in_ptr(), nPts, d.width,
                 hasStart, hasStart ? d.startPos.x : 0, hasStart ? d.startPos.y : 0,
                 hasAngle, hasAngle ? d.startAngle : 0,
-                ex.zone_in_ptr(), nz);
+                ex.zone_in_ptr(), nz,
+                d.autoWidth ? 1 : 0, d.autoWidthBlend || 0);
             break;
         }
 
