@@ -1,5 +1,5 @@
 # TrackML Assembly 
-(Replacement for [*TrackML JS*](https://github.com/AZP3001/main)
+(Replacement for [*TrackML JS*](https://github.com/AZP3001/main))
 
 *AI RaceTrack Evolution, with a WebAssembly backend.*
 [*To Simulation*](https://azp3001.github.io/trackml-assembly/)
@@ -17,17 +17,20 @@ Tracks and brains move between the two versions untouched.
 The simulation puts a population of cars onto a track. Each car is controlled by a neural network which processes "lidar" data to produce continuous control outputs. Only the best performers pass their "genes" (weights) to the next generation.
 
 ### The Learning Process
-The AIs have four primary control axes. To allow for more precise controls the axes are **analog (0-100%)**, allowing for more precise & smooth driving:
-* **Gas**
-* **Brake**
-* **Steer Left**
-* **Steer Right**
+Each car's network produces **two analog outputs**, not four buttons — which is what lets it drive smoothly rather than in jerks:
+
+| output | range | what it does |
+| --- | --- | --- |
+| Steering | -1 … +1 | full left through straight to full right |
+| Throttle | -1 … +1 | positive is gas, negative is brake, and how far from zero is how hard |
+
+It reads eleven inputs: seven distance sensors fanned out ahead of it, its own speed, the bearing to the next checkpoint, and **its own two outputs from the previous frame** — that last pair is what gives an otherwise feedforward network a short memory, so it can hold a line through a corner instead of re-deciding its steering angle from scratch sixty times a second.
 
 ---
 
 ## The WebAssembly backend
 
-Everything that costs CPU time lives in [`wasm/sim.c`](wasm/sim.c) — about 1200 lines of C compiled
+Everything that costs CPU time lives in [`wasm/sim.c`](wasm/sim.c) — a couple of thousand lines of C compiled
 to a single freestanding `wasm32` module. The physics step, the wall collisions, the seven sensor
 raycasts per car, the neural network, the evolution, and the whole track generator are all in there.
 `script.js` keeps the UI, the editor and the drawing; it no longer does any simulation.
@@ -44,12 +47,13 @@ That produces two modules and no JavaScript glue at all:
 
 | file | size | notes |
 | --- | --- | --- |
-| `wasm/sim.wasm` | ~34 KB | scalar |
-| `wasm/sim-simd.wasm` | ~38 KB | adds 128-bit SIMD (`-msimd128`) |
+| `wasm/sim.wasm` | ~44 KB | scalar |
+| `wasm/sim-simd.wasm` | ~49 KB | adds 128-bit SIMD (`-msimd128`) |
 
 `engine.js` probes the browser for SIMD support and loads whichever it can run. There is no libc in
-the build, so `sin`, `cos`, `atan2`, `tanh`, `acos` and `exp` are implemented in `sim.c` too — see
-[Testing](#testing) for how they're kept honest.
+the build, so `sin`, `cos`, `atan2`, `tanh`, `acos` and `exp` are implemented in `sim.c` too. They
+are checked against the `Math.*` they replace over millions of samples by `tools/mathtest.mjs`; run
+`npm test` for that and the rest of the suite.
 
 Both files are committed, because GitHub Pages serves this repository as-is and they *are* the
 backend. CI rebuilds them from source on every push and fails if the bytes differ, so they can't
@@ -70,10 +74,19 @@ Fine-tune the simulation and the learning process using the built-in settings.
 ### AI & Evolutionary Parameters
 * **Pop Size** (default 500)**:** The number of agents generated per generation.
 * **Elite Clones** (default 30)**:** Number of top-performing agents preserved exactly for the next generation (prevents regression).
-* **Mutation Rate** (default 30%)**:** The probability and intensity of random changes to the neural weights.
+* **Mutation Rate** (default 30%)**:** How much of each brain is randomly nudged per generation. The size of each nudge is a Gaussian that **shrinks as the run goes on**, so a high rate explores hard early and still settles down later instead of permanently kicking a working solution apart.
 * **Hidden Layers:** Adjust the complexity of the AI's "brain" by changing the number of internal neurons.
-* **Initial TTL (Time-To-Live):** A countdown timer for each agent. Agents must reach checkpoints to reset this timer, ensuring they don't just sit still.
+* **Initial TTL (Time-To-Live):** A countdown for each agent, **reset in full every time it reaches a checkpoint**. It used to top the clock up by 150 frames and clamp it to 600, which quietly made the slider a lie — set it to 10,000 and the very first gate cut the car back to 600.
 * **Target Laps:** Defines the goalpost for a successful generation before moving to the next stage of evolution.
+
+How a generation is bred, for the curious: parents are drawn from the top fifth of the field
+**rank-weighted**, so the leader parents far more often than the hundredth car rather than equally.
+Crossover then works **one hidden unit at a time** — all of a unit's incoming weights, its bias and
+its outgoing weights come from the same parent — because picking each weight independently splits up
+groups of weights that only mean anything together, and two parents that both drive well routinely
+produced a child that drove into a wall. New populations start with fan-in scaled weights instead of
+a flat `[-1,1]`, which stopped the first few dozen generations being spent climbing back out of tanh
+saturation.
 
 ### Physics Engine
 * **Max Speed:** Maximum Speed of the Cars.
@@ -85,13 +98,28 @@ Fine-tune the simulation and the learning process using the built-in settings.
 
 ### Simulation Control
 * **Simulation Speed:** Adjust the simulation speed.
-* **Hyper Mode:** Simulates as fast as your PC allows. (Doesn't render for even faster Processing)
+* **Hyper Mode:** Simulates as fast as your PC allows, and draws nothing at all while it does.
+
+The canvas repaints at most 30 times a second, and not at all when nothing has changed — the
+simulation still steps on every animation frame, only the painting is throttled. Cars are blitted
+from a cached sprite per livery instead of half a dozen canvas state changes each, which at 500 cars
+was most of the main thread's paint cost.
 
 The fitness chart keeps a rolling window of the last 300 generations rather than the whole session's
-history. It used to keep everything and re-feed the full, ever-growing array into Chart.js on every
-single generation — cheap at first, then a redraw that got a little longer every generation, which is
-why a long-running session used to feel like it was gradually slowing down even though the simulation
-itself never changed pace.
+history. Unbounded, it re-fed and redrew the entire history every single generation — cheap for the
+first few hundred, then a stall that grew as the run went on, which is why a long session used to
+feel like it was gradually slowing down even though the simulation never changed pace.
+
+### Saving a run
+
+**Save AI** writes out a single brain. **Save Session** writes out the whole thing — every brain in
+the population, the generation counter, the best times, the lap history and the graph — and **Load
+Session** picks it up exactly where it left off. Loading a single brain can only reseed the field
+from mutated copies of that one network, which throws away all the diversity the run had built.
+
+Nothing is written to browser storage: settings and custom tracks do not survive a reload, so every
+visit starts clean. **Wipe All Data & Reload**, at the bottom of the settings panel, is the explicit
+escape hatch — it clears storage and the browser's cached copy of the app and reloads.
 
 ---
 

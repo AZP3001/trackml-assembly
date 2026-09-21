@@ -134,6 +134,19 @@ jobs:
           JSON
           cat version.json
 
+      # Point every asset URL at this build. index.html itself is served
+      # no-store, so it is always current; everything it references can then be
+      # cached hard, because a new deploy gives it a new URL. Without this the
+      # page had to refuse caching on everything, and paid the full download
+      # and wasm compile on every single visit.
+      - name: Stamp asset URLs with the build version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          sed -i "s/?v=dev/?v=${VERSION}/g; s/<meta name=\"asset-version\" content=\"dev\">/<meta name=\"asset-version\" content=\"${VERSION}\">/" index.html
+          grep -c "?v=${VERSION}" index.html
+          grep "asset-version" index.html
+
       - name: Setup Pages
         uses: actions/configure-pages@v4
       - name: Upload artifact
@@ -161,7 +174,11 @@ jobs:
           set -u
           url="${PAGE_URL%/}/version.json"
           echo "Polling $url for ${GITHUB_SHA}"
-          for attempt in $(seq 1 20); do
+          # Backs off instead of hammering a fixed 15s: a deploy that lands
+          # quickly is confirmed in a couple of seconds, and one that never
+          # lands stops burning five minutes of CI to say so.
+          delay=2
+          for attempt in $(seq 1 12); do
             live=$(curl -fsS -H 'Cache-Control: no-cache' "$url" 2>/dev/null \
                    | tr -d ' \n' | sed -n 's/.*"commit":"\([0-9a-f]*\)".*/\1/p') || true
             if [ "$live" = "$GITHUB_SHA" ]; then
@@ -173,8 +190,9 @@ jobs:
               } >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
-            echo "attempt ${attempt}: serving '${live:-nothing}', waiting..."
-            sleep 15
+            echo "attempt ${attempt}: serving '${live:-nothing}', waiting ${delay}s..."
+            sleep "$delay"
+            delay=$(( delay < 30 ? delay * 2 : 30 ))
           done
           echo "::error::Pages reported a successful deploy but ${PAGE_URL} is still serving '${live:-nothing}' instead of ${GITHUB_SHA}."
           exit 1

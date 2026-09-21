@@ -91,16 +91,28 @@ self.onmessage = async (e) => {
             const maxLaps = ex.run(msg.iters);
             const allCrashed = ex.all_crashed() === 1;
 
-            let buffer;
+            // Hyper mode puts nothing on screen, so only fitness/laps/lap time
+            // cross the boundary instead of the full render row.
+            let src, len;
             if (msg.wantRender) {
                 ex.write_render();
-                const stride = ex.render_stride();
-                buffer = f32(ex.render_ptr(), popCount * stride).slice();
+                len = popCount * ex.render_stride();
+                src = f32(ex.render_ptr(), len);
             } else {
-                // Hyper mode: nothing is on screen, so only fitness/laps/lap
-                // time cross the boundary.
                 ex.write_fitness();
-                buffer = f32(ex.fitness_ptr(), popCount * ex.fitness_stride()).slice();
+                len = popCount * ex.fitness_stride();
+                src = f32(ex.fitness_ptr(), len);
+            }
+            // Refill the buffer the main thread handed back rather than
+            // allocating a new one per step. It only comes back when it is the
+            // right size; anything else (a population or mode change) falls
+            // through to a fresh allocation.
+            let buffer;
+            if (msg.recycle && msg.recycle.byteLength === len * 4) {
+                buffer = new Float32Array(msg.recycle);
+                buffer.set(src);
+            } else {
+                buffer = src.slice();
             }
             // alive_count travels separately from the buffer: in hyper mode the
             // crashed flags never cross at all, so the main thread has no way to

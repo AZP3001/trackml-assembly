@@ -2,11 +2,12 @@ const CANVAS_WIDTH = 1200;
 const CANVAS_HEIGHT = 900; 
 const CAR_WIDTH = 14;
 const CAR_HEIGHT = 7;
-const SENSOR_LENGTH = 180;
 const SENSOR_ANGLES = [-Math.PI/2, -Math.PI/3, -Math.PI/6, 0, Math.PI/6, Math.PI/3, Math.PI/2];
 const SENSOR_COUNT = SENSOR_ANGLES.length;
 
-// Inline SVGs — avoids calling lucide.createIcons() on every toggle
+// Inline SVGs. Every icon on the page is inline markup now and the lucide
+// library is gone entirely — it was 399KB of JavaScript whose whole job was to
+// swap 23 <i> tags for the same <svg> tags once, at startup.
 const SVG_PLAY = `<svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>`;
 const SVG_PAUSE = `<svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>`;
 
@@ -19,7 +20,7 @@ const SETTING_DESCRIPTIONS = {
     speedMultiplier: "Simulation cycles per frame. High values train extremely fast.",
     populationSize: "Number of cars per generation. Scales perfectly via multi-threading.",
     eliteClones: "Top performers copied to the next generation without mutation. Prevents regression.",
-    mutationRate: "Randomness in brain evolution. 15-25% provides excellent exploratory learning.",
+    mutationRate: "How much of each brain is randomly nudged per generation. The size of each nudge shrinks as the run goes on, so a high rate explores early and still settles later.",
     hiddenLayers: "Brain complexity. More layers = smarter but heavier computation.",
     initialTTL: "Time to Live. Frames allowed before death if no checkpoint is reached.",
     targetLaps: "Laps needed to trigger the next generation automatically.",
@@ -35,6 +36,16 @@ const SETTING_DESCRIPTIONS = {
 // has crashed or something has hit the lap target, so a big chunk is never
 // wasted work.
 const HYPER_CHUNK = 2500;
+
+// Canvas repaint ceiling. The simulation is not capped by this — it steps on
+// every animation frame regardless — only the drawing is.
+const RENDER_HZ = 30;
+const RENDER_MIN_MS = 1000 / RENDER_HZ - 1;   // -1 so a 60Hz frame clock still lands on every other frame
+
+// Cached car sprite. The car body is 14x8 drawn at 1.5x, so 21x12 covers it
+// exactly; the origin sits at the middle.
+const SPRITE_W = 22, SPRITE_H = 12;
+const SPRITE_CX = SPRITE_W / 2, SPRITE_CY = SPRITE_H / 2;
 
 // The road surface is the centreline stroked at the full track width with a
 // round join/cap — literally the region the barriers bound, so the two can
@@ -183,18 +194,38 @@ const app = {
 
     // Resolves which car telemetry/highlight follows: a manually-clicked car
     // (until it crashes or the user releases it), otherwise the fastest alive.
-    getSpectatedCar: function() {
+    // The last pick, refreshed once per applied result round rather than on
+    // every animation frame — it is an O(population) scan and the answer only
+    // changes when the simulation does.
+    _spectated: null,
+
+    getSpectatedCar: function() { return this._spectated; },
+
+    _pickSpectated: function() {
         const id = this.state.spectateCarId;
         if (id !== null) {
             const car = this.state.cars[id];
             if (car && !car.crashed) return car;
             this.state.spectateCarId = null; // selection crashed/gone — auto-revert
         }
-        if (!this.state.cars.length) return null;
-        return this.state.cars.reduce((p,c) => (c.fitness > p.fitness && !c.crashed ? c : p), this.state.cars[0]);
+        // Seeded with the first car that is actually alive. Seeding with car 0
+        // regardless meant that if car 0 had crashed and no living car outscored
+        // it, the telemetry panel ended up pinned to a wreck.
+        const cars = this.state.cars;
+        let best = null;
+        for (let i = 0; i < cars.length; i++) {
+            const c = cars[i];
+            if (c.crashed) continue;
+            if (best === null || c.fitness > best.fitness) best = c;
+        }
+        return best;
     },
 
-    releaseSpectate: function() { this.state.spectateCarId = null; },
+    releaseSpectate: function() {
+        this.state.spectateCarId = null;
+        this._spectated = this._pickSpectated();
+        this._needsDraw = true;
+    },
 
     handleCanvasClick: function(e) {
         if (this.state.isEditing || this.state.hyperMode || !this.state.cars.length) return;
@@ -210,6 +241,8 @@ const app = {
             if (d < closestDist) { closestDist = d; closest = c; }
         }
         this.state.spectateCarId = closest ? closest.id : null;
+        this._spectated = this._pickSpectated();
+        this._needsDraw = true;
     },
 
     // Async now: nothing can be built until the wasm module is compiled and the
@@ -217,12 +250,13 @@ const app = {
     init: async function() {
         try {
             this._initUICache();
+            this.bindActions();
             this.showBuildStamp();
             await Engine.ready();
             if(ui.coreCount && Engine._pendingCoreLabel) ui.coreCount.innerHTML = Engine._pendingCoreLabel;
             this.resetTracks();
             this.initChart();
-            if(window.lucide) lucide.createIcons();
+
             this.loop();
         } catch (e) {
             console.error("Init Error:", e);
@@ -298,27 +332,60 @@ const app = {
     // never come back across; nothing here needs them.
     initPopulation: function(loadedBrainJSON) {
         if(!this.state.tracks.length) return;
-        const track = this.currentTrack;
         this.state.globalBest = null;
-        const newCars = [];
-        for(let i=0; i<this.state.populationSize; i++) {
-            newCars.push(this._makeCarRecord(i, track, `hsl(${Math.random()*360},80%,60%)`));
-        }
-        this.state.cars = newCars;
+        this._resetCars();
         this.state.bestTimes.gen = null;
-        this.state.aliveCount = newCars.length;
+        this._runToken++;
 
         Engine.initPopulation(this.state.populationSize, this.state.hiddenLayers, loadedBrainJSON);
         this.updateUI();
     },
 
-    _makeCarRecord: function(id, track, color) {
-        return {
-            id, x: track.startPos.x, y: track.startPos.y, angle: track.startAngle,
-            speed: 0, color, fitness: 0, crashed: false,
-            sensors: new Float32Array(SENSOR_COUNT), inputs: new Float32Array(2),
-            completedLaps: 0
-        };
+    // One colour per car SLOT, not per car per generation. The elite band is
+    // the first `eliteClones` slots either way, so the green/lime livery still
+    // marks exactly the carried-forward brains — it just stops rebuilding 500
+    // colour strings every generation, and it lets the sprite cache in draw()
+    // be built once for the whole run instead of thrown away each time.
+    _ensureColors: function() {
+        const n = this.state.populationSize;
+        const elite = Math.min(this.state.eliteClones, n);
+        if(this._colors && this._colors.length === n && this._colorElite === elite) return;
+        const out = new Array(n);
+        for(let i=0; i<n; i++) {
+            out[i] = i < elite ? (i === 0 ? '#22c55e' : '#84cc16') : `hsl(${(i * 137.508) % 360},80%,60%)`;
+        }
+        this._colors = out;
+        this._colorElite = elite;
+    },
+
+    // Resize the car array if the population changed, then reset every record
+    // in place. Rebuilding 500 objects (each with two fresh typed arrays) once
+    // a generation was pure churn: nothing about a car record changes shape.
+    _resetCars: function() {
+        const track = this.currentTrack;
+        const n = this.state.populationSize;
+        this._ensureColors();
+        let cars = this.state.cars;
+        if(!cars || cars.length !== n) {
+            cars = new Array(n);
+            for(let i=0; i<n; i++) cars[i] = {
+                id: i, x: 0, y: 0, angle: 0, speed: 0, color: this._colors[i],
+                fitness: 0, crashed: false, checkpoints: 0,
+                sensors: new Float32Array(SENSOR_COUNT), inputs: new Float32Array(2),
+                completedLaps: 0
+            };
+            this.state.cars = cars;
+        }
+        const sx = track ? track.startPos.x : 0, sy = track ? track.startPos.y : 0;
+        const sa = track ? track.startAngle : 0;
+        for(let i=0; i<n; i++) {
+            const c = cars[i];
+            c.color = this._colors[i];
+            c.x = sx; c.y = sy; c.angle = sa;
+            c.speed = 0; c.fitness = 0; c.crashed = false; c.completedLaps = 0; c.checkpoints = 0;
+            c.sensors.fill(0); c.inputs[0] = 0; c.inputs[1] = 0;
+        }
+        this.state.aliveCount = n;
     },
 
     // Selection, crossover and mutation all happen inside the master wasm
@@ -335,7 +402,7 @@ const app = {
             if(cars[i].fitness > best) best = cars[i].fitness;
         }
 
-        const res = Engine.evolve(fitness, this.state.eliteClones);
+        const res = Engine.evolve(fitness, this.state.eliteClones, this.state.generation);
         this.state.globalBest = { fitness: res.globalBest };
 
         this.state.stats.push({
@@ -353,17 +420,9 @@ const app = {
 
         // Elite clones keep the green/lime livery so you can pick the carried-
         // forward brains out of the pack on screen.
-        const track = this.currentTrack;
-        const elite = Math.min(this.state.eliteClones, this.state.populationSize);
-        const newCars = [];
-        for(let i=0; i<this.state.populationSize; i++) {
-            const color = i < elite ? (i === 0 ? '#22c55e' : '#84cc16') : `hsl(${Math.random()*360},80%,60%)`;
-            newCars.push(this._makeCarRecord(i, track, color));
-        }
-        this.state.cars = newCars;
+        this._resetCars();
         this.state.generation++;
         this.state.bestTimes.gen = null;
-        this.state.aliveCount = newCars.length;
         this.updateUI();
     },
 
@@ -374,6 +433,7 @@ const app = {
         const cars = this.state.cars;
         let alive = 0;
         for(const r of st.rows) {
+            // Read below, then returned to its worker to be refilled.
             alive += r.alive;
             const buf = r.buffer;
             if(r.render) {
@@ -407,7 +467,11 @@ const app = {
                 }
             }
         }
+        for(const r of st.rows) Engine.recycle(r.index, r.buffer.buffer);
         this.state.aliveCount = alive;
+        this._needsDraw = true;
+        // Once per applied round, not once per rendered frame — see draw().
+        this._spectated = this._pickSpectated();
     },
 
     _recordLap: function(time) {
@@ -419,17 +483,61 @@ const app = {
         this.updateLapHistory();
     },
 
+    // Invalidation token for in-flight worker chunks. Anything that replaces
+    // the population or the track bumps it, and results carrying a stale token
+    // are dropped rather than written into records they no longer describe.
+    _runToken: 0,
+    _pending: null,
+    _pendingToken: -1,
+    _lastDraw: 0,
+    // Set by anything that changes what the canvas should show. A paused,
+    // untouched screen repaints zero times instead of sixty times a second.
+    _needsDraw: true,
+
     loop: async function() {
-        if(this.state.isRunning && !this.state.isEditing) {
+        const running = this.state.isRunning && !this.state.isEditing;
+
+        if(this._pending) {
+            const st = await this._pending;
+            const token = this._pendingToken;
+            this._pending = null;
+            if(token === this._runToken && running) {
+                this._applyResults(st);
+                if(st.allCrashed || st.maxLaps >= this.state.targetLaps) this.evolve();
+            }
+        }
+
+        if(running && !this._pending) {
+            // Start the next chunk BEFORE the UI work below rather than after
+            // it. The workers used to sit idle through every updateUI/draw —
+            // a hard barrier once per frame — and now they compute the next
+            // chunk while the main thread paints the previous one.
             const hyper = this.state.hyperMode;
             const iters = hyper ? HYPER_CHUNK : this.state.speedMultiplier;
-            const st = await Engine.run(iters, !hyper);
-            this._applyResults(st);
-            if(st.allCrashed || st.maxLaps >= this.state.targetLaps) this.evolve();
+            this._pendingToken = this._runToken;
+            this._pending = Engine.run(iters, !hyper);
         }
 
         this.updateUI();
-        this.draw();
+
+        // What gets painted, and how often:
+        //   * the editor draws every frame, so dragging a point stays smooth;
+        //   * hyper mode draws NOTHING at all, not even the cached background,
+        //     because the whole point of it is that the screen is not the
+        //     output;
+        //   * everything else is capped at RENDER_HZ and skipped entirely when
+        //     nothing has changed. The simulation still steps on every
+        //     animation frame — only the painting is throttled.
+        if(this.state.isEditing) {
+            this.draw();
+        } else if(!this.state.hyperMode && this._needsDraw) {
+            const now = performance.now();
+            if(now - this._lastDraw >= RENDER_MIN_MS) {
+                this._lastDraw = now;
+                this._needsDraw = false;
+                this.draw();
+            }
+        }
         requestAnimationFrame(this.loop.bind(this));
     },
 
@@ -469,60 +577,107 @@ const app = {
 
         if(this.state.bgCanvas) ctx.drawImage(this.state.bgCanvas, 0, 0);
 
-        if(!this.state.hyperMode) {
-            // Render ALL cars persistently, no color flashing, no hiding.
-            // Telemetry/highlight follows a manually-clicked car, or else
-            // auto-follows the fastest alive car.
-            const spectated = this.getSpectatedCar();
-            const isManual = this.state.spectateCarId !== null;
+        // Render ALL cars persistently, no color flashing, no hiding.
+        // Telemetry/highlight follows a manually-clicked car, or else
+        // auto-follows the fastest alive car.
+        const spectated = this.getSpectatedCar();
+        const isManual = this.state.spectateCarId !== null;
 
-            if(ui.telemetryLabel) {
-                ui.telemetryLabel.textContent = spectated
-                    ? (isManual ? `Spectating Car #${spectated.id} (Manual)` : 'Live Telemetry (Auto — Fastest)')
-                    : 'Live Telemetry';
-            }
-            if(ui.btnRelease) ui.btnRelease.classList.toggle('hidden', !isManual);
+        this._drawTelemetry(spectated, isManual);
 
-            if(spectated && !spectated.crashed) {
-                const i = spectated.inputs || [0,0];
-                ui.telSteerL.style.width = i[0] < 0 ? Math.abs(i[0])*50 + '%' : '0%';
-                ui.telSteerR.style.width = i[0] > 0 ? i[0]*50 + '%' : '0%';
-                if(i[1] > 0) { ui.telGas.style.width = i[1]*100 + '%'; ui.telBrake.style.width = '0%'; }
-                else { ui.telGas.style.width = '0%'; ui.telBrake.style.width = Math.abs(i[1])*100 + '%'; }
-                ui.telSpeed.style.width = Math.min((spectated.speed / this.state.physics.maxSpeed)*100, 100) + '%';
-                ui.telSpeedVal.textContent = Math.round(spectated.speed);
-            }
+        // One drawImage per car instead of save/translate/rotate/scale, four
+        // fillRects and a restore — roughly 3,000 canvas state changes a frame
+        // at 500 cars, which was the bulk of the main thread's paint cost.
+        // setTransform composes the rotation and position in one call; the
+        // sprite for each livery is drawn once and cached.
+        const cars = this.state.cars;
+        for(let i=0; i<cars.length; i++) {
+            const c = cars[i];
+            if(c.crashed) continue;
+            const sprite = this._carSprite(c.color);
+            const cs = Math.cos(c.angle), sn = Math.sin(c.angle);
+            ctx.setTransform(cs, sn, -sn, cs, c.x, c.y);
+            ctx.drawImage(sprite, -SPRITE_CX, -SPRITE_CY);
+        }
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
 
-            this.state.cars.forEach(c => {
-                if(c.crashed) return;
-                ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.angle); ctx.scale(1.5,1.5);
-                ctx.globalAlpha = 1.0;
-                ctx.fillStyle = c.color;
-                ctx.fillRect(-7, -4, 14, 8);
-                ctx.fillStyle='#0f172a'; ctx.fillRect(-2, -3, 4, 6);
-                ctx.fillStyle='#fbbf24'; ctx.fillRect(6, -3, 1, 2); ctx.fillRect(6, 1, 1, 2);
-                ctx.restore();
+        if(spectated && !spectated.crashed) {
+            const c = spectated;
+            // Highlight ring around the spectated car — solid cyan when
+            // manually picked, a subtle dashed ring when auto-following.
+            ctx.save();
+            ctx.strokeStyle = isManual ? '#22d3ee' : 'rgba(255,255,255,0.55)';
+            ctx.lineWidth = isManual ? 2.5 : 1.5;
+            if(!isManual) ctx.setLineDash([4,3]);
+            ctx.beginPath(); ctx.arc(c.x, c.y, 16, 0, Math.PI*2); ctx.stroke();
+            ctx.restore();
 
-                if(c === spectated) {
-                    // Highlight ring around the spectated car — solid cyan when
-                    // manually picked, a subtle dashed ring when auto-following.
-                    ctx.save();
-                    ctx.strokeStyle = isManual ? '#22d3ee' : 'rgba(255,255,255,0.55)';
-                    ctx.lineWidth = isManual ? 2.5 : 1.5;
-                    if(!isManual) ctx.setLineDash([4,3]);
-                    ctx.beginPath(); ctx.arc(c.x, c.y, 16, 0, Math.PI*2); ctx.stroke();
-                    ctx.restore();
-
-                    if(c.sensors) {
-                        c.sensors.forEach((s,k) => {
-                            const ang = c.angle + SENSOR_ANGLES[k];
-                            ctx.strokeStyle='rgba(234,179,8,0.3)'; ctx.beginPath(); ctx.moveTo(c.x, c.y); ctx.lineTo(c.x+Math.cos(ang)*SENSOR_LENGTH, c.y+Math.sin(ang)*SENSOR_LENGTH); ctx.stroke();
-                            if(s>0) { const d=(1-s)*SENSOR_LENGTH; ctx.fillStyle='#f59e0b'; ctx.beginPath(); ctx.arc(c.x+Math.cos(ang)*d, c.y+Math.sin(ang)*d, 2, 0, Math.PI*2); ctx.fill(); }
-                        });
+            if(c.sensors) {
+                // Same reach the simulation raycast used — it follows Max
+                // Speed now, so a hard-coded 180 here would draw rays that
+                // stopped short of where the car can actually see.
+                const len = Engine.sensorLength();
+                ctx.strokeStyle = 'rgba(234,179,8,0.3)';
+                for(let k=0; k<c.sensors.length; k++) {
+                    const ang = c.angle + SENSOR_ANGLES[k];
+                    const ca = Math.cos(ang), sa = Math.sin(ang);
+                    ctx.beginPath(); ctx.moveTo(c.x, c.y); ctx.lineTo(c.x + ca*len, c.y + sa*len); ctx.stroke();
+                    const sv = c.sensors[k];
+                    if(sv > 0) {
+                        const d = (1-sv) * len;
+                        ctx.fillStyle = '#f59e0b';
+                        ctx.beginPath(); ctx.arc(c.x + ca*d, c.y + sa*d, 2, 0, Math.PI*2); ctx.fill();
                     }
                 }
-            });
+            }
         }
+    },
+
+    // A car is the same handful of rectangles every time, so each livery is
+    // rasterised once into a tiny offscreen canvas and then blitted.
+    _sprites: null,
+    _carSprite: function(color) {
+        if(!this._sprites) this._sprites = new Map();
+        let sp = this._sprites.get(color);
+        if(sp) return sp;
+        sp = document.createElement('canvas');
+        sp.width = SPRITE_W; sp.height = SPRITE_H;
+        const g = sp.getContext('2d');
+        g.translate(SPRITE_CX, SPRITE_CY);
+        g.scale(1.5, 1.5);
+        g.fillStyle = color;      g.fillRect(-7, -4, 14, 8);
+        g.fillStyle = '#0f172a';  g.fillRect(-2, -3, 4, 6);
+        g.fillStyle = '#fbbf24';  g.fillRect(6, -3, 1, 2); g.fillRect(6, 1, 1, 2);
+        this._sprites.set(color, sp);
+        return sp;
+    },
+
+    // Telemetry is six DOM writes; doing them unconditionally meant six style
+    // invalidations per frame for bars that mostly had not moved a pixel.
+    _tel: { label: '', manual: null, steerL: '', steerR: '', gas: '', brake: '', speed: '', speedVal: '' },
+    _drawTelemetry: function(spectated, isManual) {
+        const t = this._tel;
+        const label = spectated
+            ? (isManual ? `Spectating Car #${spectated.id} (Manual)` : 'Live Telemetry (Auto — Fastest)')
+            : 'Live Telemetry';
+        if(ui.telemetryLabel && label !== t.label) { ui.telemetryLabel.textContent = label; t.label = label; }
+        if(ui.btnRelease && isManual !== t.manual) { ui.btnRelease.classList.toggle('hidden', !isManual); t.manual = isManual; }
+        if(!spectated || spectated.crashed) return;
+
+        const i = spectated.inputs || [0,0];
+        const pct = v => Math.round(v) + '%';
+        const steerL = i[0] < 0 ? pct(Math.abs(i[0])*50) : '0%';
+        const steerR = i[0] > 0 ? pct(i[0]*50) : '0%';
+        const gas    = i[1] > 0 ? pct(i[1]*100) : '0%';
+        const brake  = i[1] > 0 ? '0%' : pct(Math.abs(i[1])*100);
+        const speed  = pct(Math.min((spectated.speed / this.state.physics.maxSpeed)*100, 100));
+        const speedVal = String(Math.round(spectated.speed));
+        if(steerL !== t.steerL) { ui.telSteerL.style.width = steerL; t.steerL = steerL; }
+        if(steerR !== t.steerR) { ui.telSteerR.style.width = steerR; t.steerR = steerR; }
+        if(gas !== t.gas)       { ui.telGas.style.width = gas; t.gas = gas; }
+        if(brake !== t.brake)   { ui.telBrake.style.width = brake; t.brake = brake; }
+        if(speed !== t.speed)   { ui.telSpeed.style.width = speed; t.speed = speed; }
+        if(speedVal !== t.speedVal) { ui.telSpeedVal.textContent = speedVal; t.speedVal = speedVal; }
     },
 
     toggleRun: function() { 
@@ -543,7 +698,6 @@ const app = {
             ui.btnPlayM.innerHTML = `${icon} <span>${txt}</span>`; 
             ui.btnPlayM.className = running ? clsOn : clsOff;
         }
-        // No lucide.createIcons() — inline SVGs don't need it
     },
     toggleHyper: function() { 
         this.state.hyperMode = !this.state.hyperMode; 
@@ -566,12 +720,27 @@ const app = {
         _ui_gen=-1; _ui_alive=-1; _ui_allBest=null;
         if(ui.lapHistoryM) ui.lapHistoryM.innerHTML = '<span class="text-[10px] text-slate-600 italic">No laps yet</span>';
         this.initPopulation(); 
-        if(this.chart) { this.chart.data.labels = []; this.chart.data.datasets.forEach(d => d.data = []); this.chart.update(); }
+        this.updateChart();
         this.updateUI(); this.toggleRun(); this.toggleRun(); 
     },
     
     // Physics is pure config — pushing it doesn't need the track rebuilding.
-    updatePhysics: function(k, v) { this.state.physics[k] = parseFloat(v); document.getElementById('val-'+(k==='maxSpeed'?'maxSpeed':(k==='acceleration'?'accel':(k==='turnSpeed'?'turn':'brakeStrength')))).innerText = v; Engine.pushConfig(this.state); },
+    updatePhysics: function(k, v) {
+        this.state.physics[k] = parseFloat(v);
+        const label = k==='maxSpeed' ? 'maxSpeed' : k==='acceleration' ? 'accel' : k==='turnSpeed' ? 'turn' : 'brakeStrength';
+        const el = document.getElementById('val-' + label);
+        if(el) el.innerText = v;
+        Engine.pushConfig(this.state);
+        // Sensor reach is derived from Max Speed, and the wall buckets a track
+        // was built with are sized to that reach. Changing it without
+        // rebuilding would leave longer rays looking through walls that were
+        // never put in the bucket.
+        if(k === 'maxSpeed' && this.currentTrack) {
+            Engine.setTrack(this.currentTrack, this.state);
+            this._runToken++;
+            this._needsDraw = true;
+        }
+    },
     updateConfig: function(k, v) {
         this.state[k] = parseFloat(v);
         let id = 'val-'+(k==='populationSize'?'pop':k==='targetLaps'?'laps':k==='speedMultiplier'?'speed':k==='eliteClones'?'elite':k==='mutationRate'?'mut':k==='hiddenLayers'?'hidden':'ttl');
@@ -632,8 +801,6 @@ const app = {
             if(ui.statAllBestM) ui.statAllBestM.textContent = allBestStr;
             _ui_allBest = allBestStr;
         }
-        // No lucide.createIcons() here — that was being called EVERY frame and is
-        // the #1 performance killer on ARM. Buttons now use inline SVGs instead.
     },
 
     updateLapHistory: function() {
@@ -656,6 +823,151 @@ const app = {
         a.download = `trackml-g${this.state.generation}.json`;
         a.click();
     },
+    // --- whole-session save / load ----------------------------------------
+    // "Save AI" keeps one brain, which is enough to show off a good lap and
+    // useless for carrying on a run — reloading it reseeds the whole field
+    // from mutated copies of that one network. This keeps everything: every
+    // brain in the population, the generation counter, the best times, the
+    // lap history and the fitness graph. Load it and the run continues as if
+    // the tab had never been closed.
+    saveSession: function() {
+        if(!this.state.cars.length) return;
+        const st = this.state;
+        const session = {
+            format: 'trackml-session',
+            version: 1,
+            savedAt: new Date().toISOString(),
+            generation: st.generation,
+            settings: {
+                populationSize: st.populationSize, eliteClones: st.eliteClones,
+                targetLaps: st.targetLaps, mutationRate: st.mutationRate,
+                hiddenLayers: st.hiddenLayers, initialTTL: st.initialTTL,
+                speedMultiplier: st.speedMultiplier,
+                physics: { ...st.physics }
+            },
+            trackName: this.currentTrack ? this.currentTrack.name : null,
+            stats: st.stats,
+            bestTimes: st.bestTimes,
+            lapHistory: st.lapHistory,
+            population: Engine.exportPopulation()
+        };
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([JSON.stringify(session)], {type:'application/json'}));
+        a.download = `trackml-session-g${st.generation}.json`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+    },
+
+    loadSession: function(inp) {
+        if(!inp.files[0]) return;
+        const r = new FileReader();
+        r.onload = e => {
+            let j;
+            try { j = JSON.parse(e.target.result); }
+            catch(er) { alert("That file isn't valid JSON."); return; }
+            if(!j || j.format !== 'trackml-session') {
+                alert('That is not a TrackML session file. (A single saved brain goes in "Load AI".)');
+                return;
+            }
+            const st = this.state;
+            st.isRunning = false;
+            const cfg = j.settings || {};
+            for(const k of ['populationSize','eliteClones','targetLaps','mutationRate','hiddenLayers','initialTTL','speedMultiplier']) {
+                if(typeof cfg[k] === 'number') st[k] = cfg[k];
+            }
+            if(cfg.physics) for(const k in cfg.physics) {
+                if(typeof cfg.physics[k] === 'number') st.physics[k] = cfg.physics[k];
+            }
+            this.syncSettingsUI();
+            Engine.pushConfig(st);
+
+            const bad = Engine.importPopulation(j.population);
+            if(bad) { alert('Could not load that session: ' + bad); return; }
+
+            st.generation = j.generation || 1;
+            st.stats = Array.isArray(j.stats) ? j.stats : [];
+            st.bestTimes = j.bestTimes || { gen: null, all: null };
+            st.lapHistory = Array.isArray(j.lapHistory) ? j.lapHistory : [];
+            st.globalBest = null;
+            st.spectateCarId = null;
+            _ui_gen = -1; _ui_alive = -1; _ui_allBest = null;
+
+            this._resetCars();
+            this._runToken++;
+            this._needsDraw = true;
+            this.updateChart();
+            this.updateLapHistory();
+            this.updateUI();
+            if(j.trackName && this.currentTrack && j.trackName !== this.currentTrack.name) {
+                alert(`Session loaded. It was trained on "${j.trackName}" — the current track is "${this.currentTrack.name}".`);
+            }
+        };
+        r.readAsText(inp.files[0]);
+        inp.value = '';
+    },
+
+    // The one explicit "forget everything" control. Nothing is persisted
+    // automatically — every open already starts clean — so this exists for the
+    // case where something cached looks wrong and you want the browser's copy
+    // of the site gone too, not just the run.
+    wipeEverything: function() {
+        if(!confirm('Wipe all site data and reload?\n\nThis clears browser storage and any cached copy of the app, and throws away the current run. Saved files on your computer are untouched.')) return;
+        wipeStorage();
+        const done = () => location.reload();
+        if(window.caches && caches.keys) {
+            caches.keys().then(ks => Promise.all(ks.map(k => caches.delete(k)))).then(done).catch(done);
+        } else done();
+    },
+
+    // --- declarative event binding ----------------------------------------
+    // The markup used to carry 82 inline on* handlers, each hard-wiring an
+    // element to a global function name with nothing to catch a rename — a
+    // typo failed silently at click time. Now every handler is a data-*
+    // attribute naming an action, and this binds them once at startup.
+    //
+    // The attribute value is "root.method|arg|arg", where an argument of
+    // @value, @checked, @el or @event is substituted at call time. Nothing is
+    // eval'd and only the three roots below are reachable, so the page stays
+    // Content-Security-Policy clean.
+    bindActions: function(root) {
+        const ROOTS = { app: app, editor: editor, ImageImport: typeof ImageImport !== 'undefined' ? ImageImport : null };
+        const EVENTS = { click: 'click', input: 'input', change: 'change', enter: 'mouseenter', leave: 'mouseleave' };
+        (root || document).querySelectorAll('[data-click],[data-input],[data-change],[data-enter],[data-leave]').forEach(el => {
+            for(const key in EVENTS) {
+                const spec = el.dataset[key];
+                if(!spec || el['_bound_' + key]) continue;
+                el['_bound_' + key] = true;
+                const parts = spec.split('|');
+                const [rootName, fnName] = parts[0].split('.');
+                el.addEventListener(EVENTS[key], ev => {
+                    const target = ROOTS[rootName];
+                    const fn = target && target[fnName];
+                    if(typeof fn !== 'function') { console.warn('no such action:', spec); return; }
+                    const args = parts.slice(1).map(a =>
+                        a === '@value' ? el.value :
+                        a === '@checked' ? el.checked :
+                        a === '@el' ? el :
+                        a === '@event' ? ev : a);
+                    fn.apply(target, args);
+                });
+            }
+        });
+    },
+
+    toggleSettings: function() { document.getElementById('config-panel').classList.toggle('hidden'); },
+    closeCodeModal: function() { document.getElementById('code-modal').classList.add('hidden'); },
+    dismissBackdrop: function(el, ev) { if(ev.target === el) el.classList.add('hidden'); },
+    selectText: function(el) { el.select(); },
+    openSidebar: function() { openSidebar(); },
+    closeSidebar: function() { closeSidebar(); },
+    copyCode: function(btn) {
+        const text = document.getElementById('code-output').value;
+        navigator.clipboard.writeText(text).then(() => {
+            btn.textContent = '\u2713 Copied!';
+            setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+        });
+    },
+
     loadBrain: function(inp) {
         if(!inp.files[0]) return;
         const r = new FileReader();
@@ -676,7 +988,7 @@ const app = {
             this.state.isRunning=false; this.state.generation=1; this.state.stats=[];
             this.state.bestTimes={gen:null,all:null}; this.state.lapHistory=[]; this.state.spectateCarId=null;
             _ui_gen=-1; _ui_alive=-1; _ui_allBest=null;
-            if(this.chart) { this.chart.data.labels = []; this.chart.data.datasets.forEach(d => d.data = []); this.chart.update(); }
+            this.updateChart();
             this.initPopulation(json);
             this.updateUI();
         };
@@ -707,6 +1019,7 @@ const app = {
     switchTrack: function(i) {
         i = parseInt(i); if (i < 0 || i >= this.state.tracks.length) i = 0;
         this.state.currentTrackIndex = i; this.state.isRunning = false; this.state.generation = 1; this.state.globalBest = null; this.state.stats = []; this.state.spectateCarId = null; this.updateChart();
+        this._runToken++; this._needsDraw = true;
         const sel = document.getElementById('track-dropdown'); if(sel) sel.value = i;
         const t = this.state.tracks[i];
         
@@ -722,7 +1035,6 @@ const app = {
         const clsOff = "rounded-lg font-bold flex items-center justify-center gap-1.5 transition-all border text-sm px-3 py-2 bg-emerald-500/20 text-emerald-400 border-emerald-500/50 hover:bg-emerald-500/30";
         if(ui.btnPlay) { ui.btnPlay.innerHTML = `${SVG_PLAY} <span>Start</span>`; ui.btnPlay.className = clsOff + " flex-1 py-2"; }
         if(ui.btnPlayM) { ui.btnPlayM.innerHTML = `${SVG_PLAY} <span>Start</span>`; ui.btnPlayM.className = clsOff; }
-        // No lucide.createIcons() needed here
     },
 
     createNewTrack: function() { 
@@ -775,59 +1087,177 @@ const app = {
     },
 
     chart: null,
-    initChart: function() { 
-        const ctx = document.getElementById('fitness-chart').getContext('2d'); 
-        this.chart = new Chart(ctx, { 
-            type: 'line', 
-            data: { 
-                labels: [], 
-                datasets: [
-                    {label:'Best Fitness', data:[], borderColor:'#34d399', backgroundColor:'rgba(52, 211, 153, 0.1)', borderWidth:2, pointRadius:2, fill: true},
-                    {label:'Avg Fitness', data:[], borderColor:'#60a5fa', borderWidth:2, pointRadius:0}
-                ] 
-            }, 
-            options: { 
-                responsive: true, 
-                maintainAspectRatio: false, 
-                scales: { 
-                    x: { display:false }, 
-                    y: { grid: { color: '#334155' } } 
-                }, 
-                interaction: {
-                    mode: 'index',
-                    intersect: false,
-                },
-                plugins: { 
-                    legend: { 
-                        display:true, 
-                        labels: { color: '#cbd5e1', boxWidth: 10, font: { size: 10 } }
-                    },
-                    tooltip: {
-                        callbacks: {
-                            label: function(context) {
-                                let label = context.dataset.label || '';
-                                let val = Math.round(context.parsed.y);
-                                let time = app.state.stats[context.dataIndex]?.time;
-                                if(context.datasetIndex === 0 && time) return `${label}: ${val} (Lap: ${time}s)`;
-                                return `${label}: ${val}`;
-                            }
-                        }
-                    }
-                } 
-            } 
-        }); 
+    // --- fitness chart -----------------------------------------------------
+    // Drawn here rather than by Chart.js, which was 208KB — half the page's
+    // remaining weight — to plot two lines on a canvas this file was already
+    // drawing on. Same two series, same colours, same filled area under the
+    // best line, same legend and the same hover readout.
+    chart: null,
+
+    initChart: function() {
+        const canvas = document.getElementById('fitness-chart');
+        if(!canvas) return;
+        this.chart = {
+            canvas,
+            ctx: canvas.getContext('2d'),
+            best: [], avg: [], gens: [], times: [],
+            hover: -1
+        };
+        canvas.addEventListener('pointermove', e => {
+            const c = this.chart, rect = c.canvas.getBoundingClientRect();
+            const i = this._chartIndexAt(e.clientX - rect.left, rect.width);
+            if(i !== c.hover) { c.hover = i; this._drawChart(); }
+        });
+        canvas.addEventListener('pointerleave', () => {
+            if(this.chart.hover !== -1) { this.chart.hover = -1; this._drawChart(); }
+        });
+        window.addEventListener('resize', () => this._drawChart());
+        this._drawChart();
     },
-    updateChart: function() { 
-        if(!this.chart) return; 
-        this.chart.data.labels = this.state.stats.map(s => `Gen ${s.gen}`); 
-        this.chart.data.datasets[0].data = this.state.stats.map(s => s.best); 
-        this.chart.data.datasets[1].data = this.state.stats.map(s => s.avg); 
-        this.chart.update(); 
+
+    updateChart: function() {
+        const c = this.chart;
+        if(!c) return;
+        const st = this.state.stats;
+        c.best = st.map(s => s.best);
+        c.avg = st.map(s => s.avg);
+        c.gens = st.map(s => s.gen);
+        c.times = st.map(s => s.time);
+        this._drawChart();
+    },
+
+    // Plot area, in CSS pixels. Left gutter holds the y tick labels, the top
+    // strip holds the legend.
+    _chartBox: function() {
+        const c = this.chart, r = c.canvas.getBoundingClientRect();
+        return { x: 34, y: 20, w: Math.max(10, r.width - 44), h: Math.max(10, r.height - 30), W: r.width, H: r.height };
+    },
+
+    _chartIndexAt: function(px, width) {
+        const c = this.chart, n = c.best.length;
+        if(n === 0) return -1;
+        const b = this._chartBox();
+        if(px < b.x - 4 || px > b.x + b.w + 4) return -1;
+        const t = n === 1 ? 0 : (px - b.x) / b.w;
+        return Math.max(0, Math.min(n - 1, Math.round(t * (n - 1))));
+    },
+
+    // "Nice" round upper bound, so the gridlines land on readable numbers.
+    _niceCeil: function(v) {
+        if(!(v > 0)) return 1;
+        const mag = Math.pow(10, Math.floor(Math.log10(v)));
+        const f = v / mag;
+        const step = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10;
+        return step * mag;
+    },
+
+    _drawChart: function() {
+        const c = this.chart;
+        if(!c) return;
+        const ctx = c.ctx, rect = c.canvas.getBoundingClientRect();
+        if(rect.width < 2 || rect.height < 2) return;
+
+        // Back the canvas with device pixels so the text and 2px lines stay
+        // crisp on a scaled display, then work in CSS pixels throughout.
+        const dpr = window.devicePixelRatio || 1;
+        const pw = Math.round(rect.width * dpr), ph = Math.round(rect.height * dpr);
+        if(c.canvas.width !== pw || c.canvas.height !== ph) { c.canvas.width = pw; c.canvas.height = ph; }
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, rect.width, rect.height);
+
+        const b = this._chartBox();
+        const n = c.best.length;
+        let max = 0;
+        for(let i=0; i<n; i++) { if(c.best[i] > max) max = c.best[i]; if(c.avg[i] > max) max = c.avg[i]; }
+        const top = this._niceCeil(max) || 1;
+
+        const FONT = '10px "Helvetica Neue", Helvetica, Arial, sans-serif';
+        ctx.font = FONT;
+        ctx.textBaseline = 'middle';
+
+        // y gridlines and ticks
+        const TICKS = 4;
+        ctx.strokeStyle = '#334155';
+        ctx.lineWidth = 1;
+        ctx.fillStyle = '#94a3b8';
+        ctx.textAlign = 'right';
+        for(let t=0; t<=TICKS; t++) {
+            const v = top * t / TICKS;
+            const y = Math.round(b.y + b.h - (v / top) * b.h) + 0.5;
+            ctx.beginPath(); ctx.moveTo(b.x, y); ctx.lineTo(b.x + b.w, y); ctx.stroke();
+            ctx.fillText(v >= 1000 ? Math.round(v/1000) + 'k' : String(Math.round(v)), b.x - 6, y);
+        }
+
+        const xAt = i => n <= 1 ? b.x + b.w/2 : b.x + (i / (n - 1)) * b.w;
+        const yAt = v => b.y + b.h - (Math.max(0, v) / top) * b.h;
+
+        if(n > 0) {
+            // filled area under Best, then the two lines
+            ctx.beginPath();
+            ctx.moveTo(xAt(0), b.y + b.h);
+            for(let i=0; i<n; i++) ctx.lineTo(xAt(i), yAt(c.best[i]));
+            ctx.lineTo(xAt(n-1), b.y + b.h);
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(52, 211, 153, 0.1)';
+            ctx.fill();
+
+            const line = (data, color) => {
+                ctx.beginPath();
+                for(let i=0; i<n; i++) { const x = xAt(i), y = yAt(data[i]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+                ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+            };
+            line(c.avg, '#60a5fa');
+            line(c.best, '#34d399');
+
+            // Best keeps its 2px points, as it always has
+            ctx.fillStyle = '#34d399';
+            for(let i=0; i<n; i++) { ctx.beginPath(); ctx.arc(xAt(i), yAt(c.best[i]), 2, 0, Math.PI*2); ctx.fill(); }
+        }
+
+        // legend, centred along the top
+        const items = [['Best Fitness', '#34d399'], ['Avg Fitness', '#60a5fa']];
+        ctx.textAlign = 'left';
+        let wTotal = 0;
+        for(const [label] of items) wTotal += 10 + 4 + ctx.measureText(label).width + 14;
+        let lx = (b.W - wTotal) / 2, ly = 10;
+        for(const [label, color] of items) {
+            ctx.fillStyle = color; ctx.fillRect(lx, ly - 5, 10, 10);
+            lx += 14;
+            ctx.fillStyle = '#cbd5e1'; ctx.fillText(label, lx, ly);
+            lx += ctx.measureText(label).width + 14;
+        }
+
+        // hover readout
+        const hi = c.hover;
+        if(hi >= 0 && hi < n) {
+            const x = xAt(hi);
+            ctx.strokeStyle = 'rgba(203,213,225,0.35)'; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(Math.round(x)+0.5, b.y); ctx.lineTo(Math.round(x)+0.5, b.y + b.h); ctx.stroke();
+
+            const lapTime = c.times[hi];
+            const lines = [
+                `Gen ${c.gens[hi]}`,
+                `Best: ${Math.round(c.best[hi])}${lapTime ? ` (Lap: ${lapTime}s)` : ''}`,
+                `Avg: ${Math.round(c.avg[hi])}`
+            ];
+            let tw = 0;
+            for(const l of lines) tw = Math.max(tw, ctx.measureText(l).width);
+            const pad = 6, bw = tw + pad*2, bh = lines.length*13 + pad*2 - 3;
+            let bx = x + 8; if(bx + bw > b.W - 2) bx = x - 8 - bw;
+            let by = b.y + 4; if(by + bh > b.H) by = b.H - bh;
+            ctx.fillStyle = 'rgba(15,23,42,0.92)';
+            ctx.fillRect(bx, by, bw, bh);
+            ctx.strokeStyle = '#334155'; ctx.strokeRect(Math.round(bx)+0.5, Math.round(by)+0.5, bw, bh);
+            ctx.fillStyle = '#e2e8f0';
+            lines.forEach((l, i) => ctx.fillText(l, bx + pad, by + pad + 6 + i*13));
+
+            for(const [data, color] of [[c.best, '#34d399'], [c.avg, '#60a5fa']]) {
+                ctx.fillStyle = color;
+                ctx.beginPath(); ctx.arc(x, yAt(data[hi]), 3, 0, Math.PI*2); ctx.fill();
+            }
+        }
     }
 };
-
-// --- Mobile/Desktop Track Editor ---
-// --- Mobile/Desktop Track Editor ---
 
 // --- Mobile/Desktop Track Editor ---
 const editor = {

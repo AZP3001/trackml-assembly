@@ -29,14 +29,29 @@
 #define MAX_CARS     512
 #define MAX_HIDDEN   32
 #define SENS_N       7
-#define IN_N         (SENS_N + 2)
+// Sensors, speed, angle to the next gate, and the car's own two outputs from
+// the previous frame. That last pair is what gives an otherwise feedforward
+// network a memory: this frame's decision can depend on the last one, so the
+// chain out(t) -> out(t+1) -> ... carries state forward without the cost of a
+// full recurrent hidden layer (which would add h*h weights instead of 2*h).
+// In practice it is what lets a car hold a steady line through a corner
+// instead of rediscovering its steering angle from scratch every frame.
+#define IN_N         (SENS_N + 4)
 #define OUT_N        2
 #define BRAIN_MAX    (IN_N * MAX_HIDDEN + MAX_HIDDEN * OUT_N + MAX_HIDDEN + OUT_N)
 #define RENDER_STRIDE 18   // id,crashed,x,y,angle,speed,out0,out1,laps,fit,lap,7 sensors
 
 #define CAR_W        14.0f
 #define CAR_H        7.0f
-#define SENSOR_LEN   180.0f
+// Sensor reach is derived from top speed rather than fixed, because what a
+// driver actually needs is a constant amount of TIME to react, not a constant
+// number of pixels. At the old fixed 180px a car at Max Speed 25 covered the
+// whole sensor range in seven frames and physically could not see a corner
+// coming. The floor keeps the default (Max Speed 10) at exactly the 180px it
+// has always been, so nothing about the stock settings changes.
+#define SENSOR_LOOKAHEAD_FRAMES 18.0f
+#define SENSOR_LEN_MIN   180.0f
+#define SENSOR_LEN_MAX   500.0f
 
 #define TRACK_MAX_SEG      30.0f
 #define TRACK_CP_SPACING   34.0f
@@ -896,16 +911,24 @@ static void trimOutlineToWalls(OffList *raw, float dist, i32 *cpOfSample, WallLi
 // (SENSOR_LEN + half its length)^2 beyond which no ray from a car at that
 // distance can possibly reach it.
 // ---------------------------------------------------------------------------
+// Defined with the rest of the config, below; the bucket window needs it here.
+float sensor_len(void);
+
 static i32   *wbs_start;
 static float *b_x1, *b_y1, *b_dx, *b_dy, *b_mx, *b_my, *b_r2, *b_hl;
 
 static void buildWallBuckets(void) {
     i32 segs = tk_cp_n;
     if (segs <= 0) { wbs_start = 0; return; }
-    // How far back and forward a car must be able to see walls. A sensor reaches
-    // 180px; the rest is the car's own travel and slack.
-    #define WALL_BACK_PX 240.0f
-    #define WALL_FWD_PX  260.0f
+    // How far back and forward a car must be able to see walls: its sensor
+    // reach plus its own travel and some slack. Both follow sensor_len(), so
+    // raising Max Speed widens the window to match the longer rays — otherwise
+    // the extra reach would look straight through walls that were never put in
+    // the bucket. set_config is always called before track_build, and the JS
+    // side rebuilds the track when Max Speed changes, which is what keeps
+    // these in step.
+    const float WALL_BACK_PX = sensor_len() + 60.0f;
+    const float WALL_FWD_PX  = sensor_len() + 80.0f;
 
     // The window is measured in PIXELS OF TRACK, walked gate by gate, rather
     // than as a gate count derived from an assumed spacing.
@@ -1014,7 +1037,7 @@ static void buildWallBuckets(void) {
             b_my[k] = b_y1[k] + b_dy[k] * 0.5f;
             float hl = hypotf_(b_dx[k], b_dy[k]) * 0.5f;
             b_hl[k] = hl;
-            float r = SENSOR_LEN + hl;
+            float r = sensor_len() + hl;
             b_r2[k] = r * r;
         }
     }
@@ -1323,7 +1346,6 @@ __attribute__((export_name("track_centerline_ptr"))) i32 track_centerline_ptr(vo
 // One half-width per centreline sample — what the canvas needs to stroke a road
 // that changes width along its length.
 __attribute__((export_name("track_widths_ptr"))) i32 track_widths_ptr(void) { return (i32)(unsigned long)tk_w; }
-__attribute__((export_name("track_width_max"))) float track_width_max(void) { return tk_w_max; }
 __attribute__((export_name("track_centerline_count"))) i32 track_centerline_count(void) { return tk_center_n; }
 __attribute__((export_name("track_walls_ptr"))) i32 track_walls_ptr(void) { return (i32)(unsigned long)tk_walls; }
 __attribute__((export_name("track_wall_count"))) i32 track_wall_count(void) { return tk_wall_n; }
@@ -1350,6 +1372,17 @@ static i32   cfg_hidden = 5;
 // turning or braking below depends on a knob that never did anything.
 static const float CAR_LAT_GRIP = 0.93f;
 
+// Sensor reach for the current top speed. Everything that needs it — the
+// per-frame raycasts, the wall-bucket window the track is built with, and the
+// sensor overlay the UI draws — reads it from here so the three can never
+// disagree. Exported because script.js draws the rays and must use the same
+// number the simulation raycast used.
+__attribute__((export_name("sensor_len")))
+float sensor_len(void) {
+    float r = cfg_maxSpeed * SENSOR_LOOKAHEAD_FRAMES;
+    return r < SENSOR_LEN_MIN ? SENSOR_LEN_MIN : (r > SENSOR_LEN_MAX ? SENSOR_LEN_MAX : r);
+}
+
 __attribute__((export_name("set_config")))
 void set_config(float maxSpeed, float accel, float turnSpeed, float brakeStrength,
                 i32 initialTTL, i32 targetLaps, float mutationRate, i32 hidden) {
@@ -1368,7 +1401,6 @@ static i32   car_crashed[MAX_CARS], car_ttl[MAX_CARS], car_frames[MAX_CARS];
 static i32   car_nextCP[MAX_CARS], car_laps[MAX_CARS], car_cpReached[MAX_CARS];
 static float car_lastLap[MAX_CARS]; static i32 car_prevLapFrame[MAX_CARS];
 static i32   car_lastCpFrame[MAX_CARS];   // for scoring how fast each gate was reached
-static float car_sensors[MAX_CARS * SENS_N];
 static float car_out[MAX_CARS * OUT_N];
 static float car_in[MAX_CARS * IN_N];
 static float hidden_scratch[MAX_HIDDEN];
@@ -1381,7 +1413,10 @@ static float hidden_scratch[MAX_HIDDEN];
 // there so evolve() can clone from it without it being bred over, and "Load AI"
 // parks an imported brain there before seeding.
 #define STASH_SLOT MAX_CARS
-static float brains[(MAX_CARS + 1) * BRAIN_MAX];
+static float brains_bufA[(MAX_CARS + 1) * BRAIN_MAX];
+static float brains_bufB[(MAX_CARS + 1) * BRAIN_MAX];
+static float *brains = brains_bufA;
+static float *brains_next = brains_bufB;
 static float render_buf[MAX_CARS * RENDER_STRIDE];
 static float fitness_buf[MAX_CARS * 5];
 
@@ -1415,7 +1450,6 @@ static void reset_car(i32 i) {
     car_nextCP[i] = tk_cp_n > 0 ? (tk_start_cp + 1) % tk_cp_n : 0;
     car_laps[i] = 0; car_cpReached[i] = 0;
     car_lastLap[i] = 0.0f; car_prevLapFrame[i] = 0; car_lastCpFrame[i] = 0;
-    for (i32 k = 0; k < SENS_N; k++) car_sensors[i * SENS_N + k] = 0.0f;
     for (i32 k = 0; k < OUT_N; k++) car_out[i * OUT_N + k] = 0.0f;
     for (i32 k = 0; k < IN_N; k++) car_in[i * IN_N + k] = 0.0f;
 }
@@ -1435,17 +1469,27 @@ i32 pop_init(i32 count, i32 id_offset, i32 hidden, u32 seed) {
 }
 
 // Fill every brain with fresh uniform [-1,1] weights.
+// Fan-in scaled (Xavier) initialisation. Filling every weight from a flat
+// [-1,1] pushed a 9-input tanh unit straight into saturation, where it barely
+// responds to its inputs at all — so the first few dozen generations were
+// spent climbing back out of that rather than learning to drive.
 __attribute__((export_name("pop_randomize_brains")))
 void pop_randomize_brains(void) {
-    i32 total = pop_n * brain_stride_v;
-    for (i32 i = 0; i < total; i++) brains[i] = rnd11();
+    i32 h = cfg_hidden, stride = brain_stride_v;
+    i32 offHO = IN_N * h, offBH = offHO + h * OUT_N, offBO = offBH + h;
+    float aIH = sqrtf_(6.0f / (float)(IN_N + h));
+    float aHO = sqrtf_(6.0f / (float)(h + OUT_N));
+    for (i32 c = 0; c < pop_n; c++) {
+        float *b = &brains[c * stride];
+        for (i32 j = 0; j < offHO; j++) b[j] = rnd11() * aIH;
+        for (i32 j = offHO; j < offBH; j++) b[j] = rnd11() * aHO;
+        // Small rather than zero, so two cars never start out identical.
+        for (i32 j = offBH; j < offBO + OUT_N; j++) b[j] = rnd11() * 0.1f;
+    }
 }
 
 __attribute__((export_name("pop_reset")))
 void pop_reset(void) { for (i32 i = 0; i < pop_n; i++) reset_car(i); }
-
-__attribute__((export_name("car_count")))
-i32 car_count(void) { return pop_n; }
 
 // ---------------------------------------------------------------------------
 // The step. Everything below runs per car per frame, so it is the only code in
@@ -1464,7 +1508,14 @@ static inline i32 fastIntersect(float Ax, float Ay, float Bx, float By,
 // Per-car broad-phase scratch, refilled every step. `sc_` holds the walls a
 // sensor could reach; `nc_` the much smaller set the car could physically touch
 // this frame. Both are struct-of-arrays and padded to a multiple of four.
-#define MAX_SCRATCH 16384
+// Per-car broad-phase capacity. A bucket is a SUBSET of one track's walls,
+// and the densest track any test or import has produced has ~350 walls in
+// total, so this is an order of magnitude of headroom rather than the two
+// orders 16384 gave. That mattered because these are eight static arrays
+// living in every wasm instance: 512KB per instance x (one per worker plus
+// the master) was several megabytes of almost entirely untouched memory on a
+// machine with a few cores. The bounds checks below are unchanged.
+#define MAX_SCRATCH 4096
 static float sc_x1[MAX_SCRATCH], sc_y1[MAX_SCRATCH], sc_dx[MAX_SCRATCH], sc_dy[MAX_SCRATCH];
 static float nc_x1[MAX_SCRATCH], nc_y1[MAX_SCRATCH], nc_dx[MAX_SCRATCH], nc_dy[MAX_SCRATCH];
 static i32 sc_n, nc_n;
@@ -1573,6 +1624,11 @@ static const float STOPPED_SPEED = 0.05f;
 // to build measurable speed. Short enough that a car which never commands
 // throttle is gone almost immediately instead of idling out its whole TTL.
 static const i32 STOPPED_GRACE_FRAMES = 15;
+// How long after its last gate a car keeps earning the per-frame speed reward.
+// Generous — a car moving at any reasonable pace clears a gate far inside
+// this — so it never penalises going fast, it only stops paying a car that has
+// stopped making progress.
+static const i32 PROGRESS_WINDOW_FRAMES = 180;
 // See the steering block inside updateCar for the physics this implements.
 static const float TURN_GRIP_REF_SPEED = 3.0f;
 
@@ -1637,11 +1693,26 @@ static void updateCar(i32 i) {
     //
     // Speed only: spinning the heading on the spot is not momentum, and the
     // steering block above will not turn a stopped car anyway.
-    if (car_frames[i] > STOPPED_GRACE_FRAMES && speed < STOPPED_SPEED) { car_crashed[i] = 1; return; }
+    // Same cost as hitting a wall, deliberately. If stopping were free it
+    // would be the cheap way out of a corner a car could not make — brake to
+    // a standstill instead of crashing and keep the fitness. Neither is a
+    // way to score.
+    if (car_frames[i] > STOPPED_GRACE_FRAMES && speed < STOPPED_SPEED) {
+        car_crashed[i] = 1; car_fitness[i] -= 50.0f; return;
+    }
 
     float prevX = car_x[i], prevY = car_y[i];
     car_x[i] += vx; car_y[i] += vy;
-    car_fitness[i] += (speed / cfg_maxSpeed) * 0.1f;
+    // Going fast pays — that is the whole point of the project — but only
+    // while the car is actually getting somewhere. Paid unconditionally, this
+    // term also rewarded time spent alive, so a car circling a wide piece of
+    // track banked fitness forever without passing a single gate. Gating it on
+    // having reached a gate recently keeps every bit of the incentive to be
+    // quick (a fast car is always inside the window) while making the
+    // go-nowhere loop worth nothing.
+    if (car_frames[i] - car_lastCpFrame[i] < PROGRESS_WINDOW_FRAMES) {
+        car_fitness[i] += (speed / cfg_maxSpeed) * 0.1f;
+    }
 
     if (car_x[i] < -100.0f || car_x[i] > 1300.0f || car_y[i] < -100.0f || car_y[i] > 1000.0f) { car_crashed[i] = 1; return; }
     if (tk_cp_n <= 0 || !wbs_start) { car_crashed[i] = 1; return; }
@@ -1777,7 +1848,12 @@ static void updateCar(i32 i) {
             {
                 car_cpReached[i]++;
                 car_nextCP[i] = (car_nextCP[i] + 1) % tk_cp_n;
-                car_ttl[i] += 150; if (car_ttl[i] > 600) car_ttl[i] = 600;
+                // Reaching a gate resets the clock to the full Initial TTL.
+                // It used to add 150 and clamp to 600, which quietly made the
+                // slider a lie: set it to 10,000 and the very first gate cut
+                // the car back to 600 frames. Now the setting means what it
+                // says for the whole run.
+                car_ttl[i] = cfg_initialTTL;
 
                 // Scoring a gate purely on having reached it makes crawling the
                 // winning strategy: the reward is the same however long it took,
@@ -1823,20 +1899,27 @@ static void updateCar(i32 i) {
 
     // Sensors. The inner loop is the hot spot of the whole program: seven rays
     // against every wall in the window, for every living car, every frame.
-    float *sens = &car_sensors[i * SENS_N];
+    //
+    // The readings live in car_in and nowhere else. They used to be written
+    // twice — once here and once into a parallel car_sensors array that only
+    // the sensor overlay read — which was seven redundant stores per living
+    // car per frame for a copy that was always identical.
     float *in = &car_in[i * IN_N];
+    const float senLen = sensor_len();
     static const float SENSOR_ANGLES[SENS_N] = {
         -PI_F / 2.0f, -PI_F / 3.0f, -PI_F / 6.0f, 0.0f, PI_F / 6.0f, PI_F / 3.0f, PI_F / 2.0f
     };
     for (i32 k = 0; k < SENS_N; k++) {
         float rA = car_angle[i] + SENSOR_ANGLES[k];
         double rs, rc; sincos_d((double)rA, &rs, &rc);
-        float ex = cx_ + (float)rc * SENSOR_LEN, ey = cy_ + (float)rs * SENSOR_LEN;
+        float ex = cx_ + (float)rc * senLen, ey = cy_ + (float)rs * senLen;
         float minT = raycast(cx_, cy_, ex, ey, sc_x1, sc_y1, sc_dx, sc_dy, sc_n);
-        sens[k] = 1.0f - minT;
         in[k] = 1.0f - minT;
     }
 
+    // Speed and bearing to the next gate. Written unconditionally: leaving the
+    // previous frame's values in place when there is no gate to aim at fed the
+    // network stale numbers without ever saying so.
     if (relCP) {
         float tX = (relCP->p1x + relCP->p2x) * 0.5f, tY = (relCP->p1y + relCP->p2y) * 0.5f;
         float relAng = atan2f_(tY - cy_, tX - cx_) - car_angle[i];
@@ -1844,7 +1927,14 @@ static void updateCar(i32 i) {
         while (relAng < -PI_F) relAng += 2.0f * PI_F;
         in[SENS_N] = car_speed[i] / cfg_maxSpeed;
         in[SENS_N + 1] = relAng / PI_F;
+    } else {
+        in[SENS_N] = 0.0f;
+        in[SENS_N + 1] = 0.0f;
     }
+
+    // The car's own last decision, read before feedForward overwrites it.
+    in[SENS_N + 2] = car_out[i * OUT_N];
+    in[SENS_N + 3] = car_out[i * OUT_N + 1];
 
     feedForward(i);
 }
@@ -1893,7 +1983,7 @@ void write_render(void) {
         r[2] = car_x[i]; r[3] = car_y[i]; r[4] = car_angle[i]; r[5] = car_speed[i];
         r[6] = car_out[i * OUT_N]; r[7] = car_out[i * OUT_N + 1];
         r[8] = (float)car_laps[i]; r[9] = car_fitness[i]; r[10] = car_lastLap[i];
-        for (i32 k = 0; k < SENS_N; k++) r[11 + k] = car_sensors[i * SENS_N + k];
+        for (i32 k = 0; k < SENS_N; k++) r[11 + k] = car_in[i * IN_N + k];
     }
 }
 
@@ -1935,37 +2025,84 @@ i32 alive_count(void) {
 // ---------------------------------------------------------------------------
 static i32 order[MAX_CARS];
 static float ev_fitness[MAX_CARS];
-static float brains_next[MAX_CARS * BRAIN_MAX];
 
 // JS writes the gathered per-car fitness straight into this array rather than
 // making one call per car.
 __attribute__((export_name("ev_fitness_ptr")))
 i32 ev_fitness_ptr(void) { return (i32)(unsigned long)ev_fitness; }
 
-__attribute__((export_name("get_order")))
-i32 get_order(i32 rank) { return (rank >= 0 && rank < pop_n) ? order[rank] : 0; }
-
-// Descending insertion sort on the fitness index. The population tops out at
-// 500 and is nearly sorted generation to generation, so this beats the setup
-// cost of anything cleverer.
+// Descending sort of the fitness index, by heapsort: no recursion, no scratch
+// memory, O(n log n). The insertion sort this replaces was O(n^2) — at 500
+// cars that is up to ~125,000 comparisons sitting on the critical path between
+// every pair of generations, and it got worse with every car added.
+//
+// The heap is a MIN-heap on fitness, so repeatedly moving the smallest to the
+// back leaves the array ordered best-first, which is what everything below
+// expects.
+static void sift_down(i32 lo, i32 hi) {
+    i32 root = lo;
+    for (;;) {
+        i32 child = 2 * root + 1;
+        if (child > hi) break;
+        if (child + 1 <= hi && ev_fitness[order[child + 1]] < ev_fitness[order[child]]) child++;
+        if (ev_fitness[order[root]] <= ev_fitness[order[child]]) break;
+        i32 t = order[root]; order[root] = order[child]; order[child] = t;
+        root = child;
+    }
+}
 static void sort_by_fitness(void) {
     for (i32 i = 0; i < pop_n; i++) order[i] = i;
-    for (i32 i = 1; i < pop_n; i++) {
-        i32 k = order[i]; float f = ev_fitness[k];
-        i32 j = i - 1;
-        while (j >= 0 && ev_fitness[order[j]] < f) { order[j + 1] = order[j]; j--; }
-        order[j + 1] = k;
+    if (pop_n < 2) return;
+    for (i32 start = pop_n / 2 - 1; start >= 0; start--) sift_down(start, pop_n - 1);
+    for (i32 end = pop_n - 1; end > 0; end--) {
+        i32 t = order[0]; order[0] = order[end]; order[end] = t;
+        sift_down(0, end - 1);
     }
 }
 
-// Uniform crossover of two parents drawn from the top 20%, then per-weight
-// mutation — the same scheme as the JS edition, minus the object churn. The
-// elite clones come from the stash (the all-time best), not from this
-// generation's winner, which is what stops a bad generation regressing.
+// Rank-weighted draw from the top of the sorted order. Squaring a uniform
+// concentrates the pick near the front, so the generation's best car parents
+// several times more often than the weakest car in the pool. The old code drew
+// uniformly from the top 20%, which gave the 1st and the 100th car identical
+// odds and threw away most of the fitness signal it had just computed.
+static inline i32 pick_parent(i32 poolSize) {
+    float r = rnd01();
+    i32 idx = (i32)(r * r * (float)poolSize);
+    if (idx >= poolSize) idx = poolSize - 1;
+    if (idx < 0) idx = 0;
+    return order[idx];
+}
+
+// A rough standard normal: three uniforms summed is mean 0, variance 1, and
+// costs three cheap xorshift draws and no transcendentals. Good enough for a
+// mutation kernel, where the only thing that matters is that small nudges are
+// common and large ones are rare — which a flat uniform never gave us.
+static inline float gauss01(void) { return rnd11() + rnd11() + rnd11(); }
+
+// How hard mutation hits, as a function of how long the run has been going.
+// A perturbation sized for generation 1 is far too coarse by generation 500:
+// it keeps kicking a working solution apart instead of refining it. This
+// decays from START toward FLOOR with a half-life of about TAU generations,
+// so early training explores and late training polishes.
+#define MUT_SIGMA_START  0.5f
+#define MUT_SIGMA_FLOOR  0.05f
+#define MUT_SIGMA_TAU    150.0f
+
+// Node-level crossover, then annealed Gaussian mutation. The elite clones come
+// from the stash (the all-time best), not from this generation's winner, which
+// is what stops a bad generation regressing.
+//
+// Crossover works a hidden unit at a time — all of a unit's incoming weights,
+// its bias and its outgoing weights are taken from the SAME parent. Picking
+// each weight independently (what this used to do) splits up groups of weights
+// that only mean anything together, so two parents that both drive well
+// routinely produced a child that drove into a wall.
 __attribute__((export_name("evolve")))
-void evolve(i32 eliteClones, i32 hasGlobalBest) {
+void evolve(i32 eliteClones, i32 hasGlobalBest, i32 generation) {
     sort_by_fitness();
     i32 stride = brain_stride_v;
+    i32 h = cfg_hidden;
+    i32 offHO = IN_N * h, offBH = offHO + h * OUT_N, offBO = offBH + h;
     i32 written = 0;
 
     if (hasGlobalBest) {
@@ -1979,20 +2116,39 @@ void evolve(i32 eliteClones, i32 hasGlobalBest) {
         written = clones;
     }
 
+    float sigma = MUT_SIGMA_FLOOR + (MUT_SIGMA_START - MUT_SIGMA_FLOOR)
+                  * (float)exp_d(-(double)(generation < 0 ? 0 : generation) / (double)MUT_SIGMA_TAU);
+
     i32 poolSize = maxi(2, pop_n / 5);
     if (poolSize > pop_n) poolSize = pop_n;
     for (i32 i = written; i < pop_n; i++) {
-        const float *p1 = &brains[order[(i32)(rnd01() * (float)poolSize) % poolSize] * stride];
-        const float *p2 = &brains[order[(i32)(rnd01() * (float)poolSize) % poolSize] * stride];
+        const float *p1 = &brains[pick_parent(poolSize) * stride];
+        const float *p2 = &brains[pick_parent(poolSize) * stride];
         float *dst = &brains_next[i * stride];
+
+        for (i32 k = 0; k < h; k++) {
+            const float *src = rnd01() < 0.5f ? p1 : p2;
+            for (i32 j = 0; j < IN_N; j++) dst[j * h + k] = src[j * h + k];
+            for (i32 m = 0; m < OUT_N; m++) dst[offHO + k * OUT_N + m] = src[offHO + k * OUT_N + m];
+            dst[offBH + k] = src[offBH + k];
+        }
+        for (i32 m = 0; m < OUT_N; m++) {
+            const float *src = rnd01() < 0.5f ? p1 : p2;
+            dst[offBO + m] = src[offBO + m];
+        }
+
         for (i32 j = 0; j < stride; j++) {
-            float v = rnd01() < 0.5f ? p1[j] : p2[j];
-            if (rnd01() < cfg_mutationRate) v += rnd11() * 0.5f;
-            dst[j] = v;
+            if (rnd01() < cfg_mutationRate) dst[j] += gauss01() * sigma;
         }
     }
-    i32 total = pop_n * stride;
-    for (i32 i = 0; i < total; i++) brains[i] = brains_next[i];
+
+    // Swap the buffers rather than copying the whole population back. Only the
+    // stash has to travel, because it lives past the end of the live slots and
+    // the next generation still has to be able to clone from it.
+    float *tmp = brains; brains = brains_next; brains_next = tmp;
+    const float *stashSrc = &brains_next[STASH_SLOT * stride];
+    float *stashDst = &brains[STASH_SLOT * stride];
+    for (i32 j = 0; j < stride; j++) stashDst[j] = stashSrc[j];
 }
 
 // Copy a brain between slots — used to park this generation's winner in the
@@ -2023,8 +2179,6 @@ void seed_from_stash(void) {
     }
 }
 
-__attribute__((export_name("seed_rng")))
-void seed_rng(u32 s) { rng_seed(s); }
 
 // ---------------------------------------------------------------------------
 // Math self-test hooks — tools/mathtest.mjs drives these against JS Math so a

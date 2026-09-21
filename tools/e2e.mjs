@@ -157,8 +157,29 @@ const brain = await page.evaluate(() => {
     return { bad, ih: json.weightsIH.length, h: json.biasH.length, o: json.biasO.length,
              finite: json.weightsIH.every(r => r.every(Number.isFinite)) };
 });
-check(!brain.bad && brain.ih === 9 && brain.o === 2 && brain.finite,
-    'brain exports in the original JSON format', `9x${brain.h}x2${brain.bad ? ' — ' + brain.bad : ''}`);
+check(!brain.bad && brain.ih === 11 && brain.o === 2 && brain.finite,
+    'brain exports in the current JSON format', `11x${brain.h}x2${brain.bad ? ' — ' + brain.bad : ''}`);
+
+// A brain saved before the network gained its two recurrent inputs has 9 rows.
+// It still has to load — the missing rows are zero-filled, which means the old
+// brain simply ignores the new inputs and drives exactly as it did.
+const legacy = await page.evaluate(() => {
+    const json = Engine.brainToJSON(0);
+    json.weightsIH = json.weightsIH.slice(0, 9);      // pretend it is an old file
+    const bad = Engine.validateBrainJSON(json);
+    if (bad) return { bad };
+    Engine.writeBrainJSON(Engine.master.ex.stash_slot(), json);
+    const back = Engine.brainToJSON(Engine.master.ex.stash_slot());
+    return {
+        bad: null,
+        rows: back.weightsIH.length,
+        tailZeroed: back.weightsIH.slice(9).every(r => r.every(v => v === 0)),
+        headKept: back.weightsIH.slice(0, 9).every((r, i) => r.every((v, k) => v === json.weightsIH[i][k]))
+    };
+});
+check(!legacy.bad && legacy.rows === 11 && legacy.tailZeroed && legacy.headKept,
+    'a brain saved by an older build still loads',
+    legacy.bad || `9 rows in, ${legacy.rows} out, new inputs zeroed`);
 
 // Write a brain into a slot and read it back — the marshalling has to be an
 // exact inverse or a loaded AI drives like a different one.
@@ -266,6 +287,63 @@ check(!afterReload.ghost, 'storage planted by an older build is ignored');
 check(afterReload.tracks === boot.tracks, 'reload gives the built-in track list',
     `${afterReload.tracks} tracks`);
 check(afterReload.pop === 500, 'settings reset to defaults', `population ${afterReload.pop}`);
+
+// --- session round trip ---------------------------------------------------
+// Save the whole run, scramble the live state, load it back, and check the
+// population and the graph came back rather than being reseeded from one brain.
+const session = await page.evaluate(async () => {
+    // give the graph something to hold
+    app.state.stats = [{ gen: 1, best: 100, avg: 50, time: '9.99' }, { gen: 2, best: 200, avg: 90, time: '8.88' }];
+    app.state.generation = 7;
+    app.state.bestTimes = { gen: 8.88, all: 8.88 };
+    const before = Engine.exportPopulation();
+    const blob = {
+        format: 'trackml-session', version: 1, generation: app.state.generation,
+        settings: { populationSize: app.state.populationSize, hiddenLayers: app.state.hiddenLayers,
+                    physics: { ...app.state.physics } },
+        stats: app.state.stats, bestTimes: app.state.bestTimes, lapHistory: [8.88],
+        population: before
+    };
+    // wipe the live state, then load it back
+    app.state.generation = 1; app.state.stats = []; app.state.bestTimes = { gen: null, all: null };
+    const bad = Engine.importPopulation(blob.population);
+    const after = Engine.exportPopulation();
+    app.state.generation = blob.generation;
+    app.state.stats = blob.stats;
+    app.updateChart();
+    return {
+        bad,
+        brainsIdentical: before.brains === after.brains,
+        stashIdentical: before.stashBrain === after.stashBrain,
+        popSize: after.popSize,
+        gen: app.state.generation,
+        chartPoints: app.chart ? app.chart.best.length : -1
+    };
+});
+check(!session.bad, 'a saved population loads back', session.bad || 'accepted');
+check(session.brainsIdentical && session.stashIdentical,
+    'every brain survives the round trip byte for byte',
+    session.brainsIdentical ? 'population and all-time best both exact' : 'weights changed');
+check(session.gen === 7 && session.chartPoints === 2,
+    'the generation counter and the graph come back too',
+    `gen ${session.gen}, ${session.chartPoints} points on the chart`);
+
+// --- declarative event binding -------------------------------------------
+// The markup carries no inline on* handlers any more, so if bindActions ever
+// stopped running the whole UI would go dead silently.
+const bound = await page.evaluate(() => {
+    const inline = document.querySelectorAll('[onclick],[oninput],[onchange],[onmouseenter],[onmouseleave]').length;
+    const declared = document.querySelectorAll('[data-click],[data-input],[data-change],[data-enter],[data-leave]').length;
+    // exercise one for real: the settings panel toggle
+    const panel = document.getElementById('config-panel');
+    const wasHidden = panel.classList.contains('hidden');
+    document.querySelector('[data-click="app.toggleSettings"]').click();
+    const toggled = panel.classList.contains('hidden') !== wasHidden;
+    return { inline, declared, toggled };
+});
+check(bound.inline === 0, 'no inline event handlers left in the markup', `${bound.inline} found`);
+check(bound.declared > 50, 'handlers are declared as data attributes', `${bound.declared} bound`);
+check(bound.toggled, 'and a bound handler actually fires');
 
 // --- auto width ----------------------------------------------------------
 // A wedge corridor: the track runs back alongside itself 70px away, which at a

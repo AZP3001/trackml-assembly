@@ -133,7 +133,7 @@ function train({ track, halfWidth, startPos, gens, pop = 100, ttl = 750, targetL
         };
         const ev = f32(w.ev_fitness_ptr(), pop);
         for (let i = 0; i < pop; i++) ev[i] = fb[i * S];
-        w.evolve(10, 1);
+        w.evolve(10, 1, gen);
     }
     return { ...last, escapes, liveSamples, worstOvershoot, track: t };
 }

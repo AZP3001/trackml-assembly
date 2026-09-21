@@ -20,8 +20,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Pinned. The committed wasm has to rebuild byte-for-byte, and a runner
+      # image that quietly moves to a new clang changes codegen — which would
+      # surface as an unexplained binary diff rather than as "the compiler
+      # changed". Bump this deliberately and recommit the wasm when you do.
       - name: Install clang and lld
-        run: sudo apt-get update && sudo apt-get install -y clang lld
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/wasm-ld wasm-ld /usr/bin/wasm-ld-18 100
+          clang --version
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -31,6 +40,16 @@ jobs:
       - name: Build both wasm variants
         run: ./wasm/build.sh
 
+      # external/tailwind.css is generated from the classes used in the markup
+      # and committed, because Pages serves this repo as-is. Same contract the
+      # wasm has: rebuild it and fail if the committed bytes drift.
+      - name: Stylesheet matches the markup
+        run: |
+          cp external/tailwind.css /tmp/committed.css
+          ./tools/build-css.sh
+          diff -q /tmp/committed.css external/tailwind.css \
+            || { echo '::error::external/tailwind.css is stale — run ./tools/build-css.sh and commit the result'; exit 1; }
+
       # There is no libm in a freestanding wasm build, so sin/cos/atan2/tanh/
       # acos/exp are hand-written in sim.c. A wrong polynomial coefficient there
       # doesn't throw — it just makes cars steer slightly wrong. Both variants
@@ -39,13 +58,6 @@ jobs:
         run: |
           node tools/mathtest.mjs wasm/sim.wasm
           node tools/mathtest.mjs wasm/sim-simd.wasm
-
-      # Runs the wasm backend and the JavaScript edition's worker side by side
-      # on the same tracks and the same brains, and compares the driving.
-      - name: Parity against the JavaScript edition
-        run: |
-          node tools/paritytest.mjs wasm/sim.wasm
-          node tools/paritytest.mjs wasm/sim-simd.wasm
 
       # The auto-width solver: does a pinched track narrow, does a normal one
       # stay untouched, and does a self-crossing one survive.
@@ -85,8 +97,21 @@ jobs:
       - name: Version scheme
         run: node tools/versioncheck.mjs
 
+      - name: Cache the Playwright browser
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-1.56.1-${{ runner.os }}
+
       - name: Install Playwright
-        run: npm install --no-save playwright@1.56.1 && npx playwright install --with-deps chromium
+        run: |
+          npm install --no-save playwright@1.56.1
+          if [ "${{ steps.pw-cache.outputs.cache-hit }}" = "true" ]; then
+            npx playwright install-deps chromium
+          else
+            npx playwright install --with-deps chromium
+          fi
 
       # Loads the real page in a real browser: module compiles, worker pool
       # comes up, tracks generate, cars drive, generations advance, editor edits.

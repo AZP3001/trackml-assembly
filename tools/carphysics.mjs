@@ -55,7 +55,9 @@ if (!w.track_build(w.path_in_ptr(), path.length, 60, 0, 0, 0, 0, 0, w.zone_in_pt
     throw new Error('track_build failed');
 }
 
-const IN_N = 9, H = 1, OUT_N = 2;
+// Must track IN_N in sim.c: 7 sensors, speed, gate bearing, and the previous
+// frame's two outputs.
+const IN_N = 11, H = 1, OUT_N = 2;
 
 // Writes a brain with every input/hidden weight zeroed, so its two outputs
 // are exactly tanh(steerBias) and tanh(throttleBias) every frame regardless
@@ -64,7 +66,7 @@ function setBiasBrain(carIndex, steerBias, throttleBias) {
     const stride = w.brain_stride();
     const b = f32(w.brains_ptr() + carIndex * stride * 4, stride);
     b.fill(0);
-    const offBiasO = IN_N * H + H * OUT_N + H;   // 9*1 + 1*2 + 1 = 12
+    const offBiasO = IN_N * H + H * OUT_N + H;   // 11*1 + 1*2 + 1 = 14
     b[offBiasO] = steerBias;
     b[offBiasO + 1] = throttleBias;
 }

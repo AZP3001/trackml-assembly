@@ -3,36 +3,42 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <!-- Nothing here is meant to be cached. Reloading the page reloads the
-         actual page, not whatever the browser kept from last time. script.js
-         also clears local/session storage, Cache Storage and any service
-         worker on startup. -->
+    <!-- THE PAGE is never cached: it is the thing that names which version of
+         everything else to load, so it has to be current. The assets it points
+         at are cached normally and busted by the ?v= stamp below, which the
+         deploy rewrites to the build version. That way a reload costs one
+         small HTML fetch instead of re-downloading (and re-compiling) the
+         whole app every time.
+
+         This is NOT session persistence: nothing the app does — settings,
+         custom tracks, the trained population — is written to storage at all,
+         so every open still starts from a clean slate. -->
     <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
+    <!-- Rewritten at deploy time; "dev" locally. -->
+    <meta name="asset-version" content="dev">
     <title>TrackML Assembly: Evolution Racing</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='18' fill='%230f172a'/%3E%3Cpath d='M20 65 Q20 25 50 25 Q80 25 80 55 Q80 75 55 75 L55 60 Q68 60 68 52 Q68 38 50 38 Q34 38 34 60 L34 75 Z' fill='%2334d399'/%3E%3C/svg%3E">
-    <script src="./external/tailwind.js"></script>
-    <script src="./external/lucide.min.js"></script>
-    <script src="./external/chart.js"></script>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="./external/tailwind.css?v=dev">
+    <link rel="stylesheet" href="styles.css?v=dev">
 </head>
 <body class="flex flex-col xl:flex-row h-screen w-screen relative" style="height:100dvh">
 
-    <div id="sidebar-overlay" onclick="closeSidebar()"></div>
+    <div id="sidebar-overlay" data-click="app.closeSidebar"></div>
 
     <div class="xl:hidden bg-slate-800 px-4 py-3 flex justify-between items-center border-b border-slate-700 z-40 relative shrink-0">
         <h1 class="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent leading-none">TrackML&nbsp;Assembly<span class="text-[9px] text-slate-500 font-normal block leading-tight">WASM backend<span class="version-tag-compact"></span></span></h1>
-        <button onclick="openSidebar()" class="text-slate-300 hover:text-white bg-slate-700 rounded-lg px-3 py-2 flex items-center gap-2 text-sm font-bold">
-            <i data-lucide="settings" class="w-4 h-4"></i> Settings
+        <button data-click="app.openSidebar" class="text-slate-300 hover:text-white bg-slate-700 rounded-lg px-3 py-2 flex items-center gap-2 text-sm font-bold">
+            <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"></path><circle cx="12" cy="12" r="3"></circle></svg> Settings
         </button>
     </div>
 
     <div id="sidebar" class="w-full xl:w-80 bg-slate-800 p-4 flex flex-col border-r border-slate-700 overflow-y-auto shrink-0 custom-scrollbar shadow-xl">
         <div class="xl:hidden flex justify-between items-center mb-4 pb-3 border-b border-slate-700">
             <h1 class="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent leading-none">TrackML&nbsp;Assembly<span class="text-[9px] text-slate-500 font-normal block leading-tight">WASM backend<span class="version-tag-compact"></span></span></h1>
-            <button id="sidebar-close-btn" onclick="closeSidebar()" class="text-slate-400 hover:text-white bg-slate-700 rounded-lg p-2 flex items-center gap-1 text-sm font-bold">
-                <i data-lucide="x" class="w-4 h-4"></i> Close
+            <button id="sidebar-close-btn" data-click="app.closeSidebar" class="text-slate-400 hover:text-white bg-slate-700 rounded-lg p-2 flex items-center gap-1 text-sm font-bold">
+                <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg> Close
             </button>
         </div>
         <div class="hidden xl:flex justify-between items-center mb-4">
@@ -44,28 +50,28 @@
         <div class="mb-4">
             <div class="flex justify-between items-center mb-2">
                 <h3 class="text-xs font-bold text-slate-400 flex items-center gap-2 uppercase tracking-wide">
-                    <i data-lucide="map" class="w-3 h-3"></i> Track Selection
+                    <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.106 5.553a2 2 0 0 0 1.788 0l3.659-1.83A1 1 0 0 1 21 4.619v12.764a1 1 0 0 1-.553.894l-4.553 2.277a2 2 0 0 1-1.788 0l-4.212-2.106a2 2 0 0 0-1.788 0l-3.659 1.83A1 1 0 0 1 3 19.381V6.618a1 1 0 0 1 .553-.894l4.553-2.277a2 2 0 0 1 1.788 0z"></path><path d="M15 5.764v15"></path><path d="M9 3.236v15"></path></svg> Track Selection
                 </h3>
                 </div>
-            <input id="track-search" type="text" oninput="app.filterTrackList(this.value)" placeholder="Search tracks..." class="w-full bg-slate-700 text-white text-xs p-2 rounded border border-slate-600 focus:outline-none focus:border-emerald-500 mb-2 placeholder:text-slate-500">
-            <select id="track-dropdown" onchange="app.switchTrack(this.value)" class="w-full bg-slate-700 text-white text-xs p-2 rounded border border-slate-600 focus:outline-none focus:border-emerald-500 mb-2">
+            <input id="track-search" type="text" data-input="app.filterTrackList|@value" placeholder="Search tracks..." class="w-full bg-slate-700 text-white text-xs p-2 rounded border border-slate-600 focus:outline-none focus:border-emerald-500 mb-2 placeholder:text-slate-500">
+            <select id="track-dropdown" data-change="app.switchTrack|@value" class="w-full bg-slate-700 text-white text-xs p-2 rounded border border-slate-600 focus:outline-none focus:border-emerald-500 mb-2">
             </select>
             <div class="flex gap-2">
-                <button onclick="app.createNewTrack()" class="flex-1 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 rounded text-xs">+  New</button>
-                <button onclick="app.editTrack()" class="flex-1 py-1.5 bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 rounded text-xs">Edit Track</button>
-                <button onclick="app.duplicateTrack()" title="Duplicate the current track" class="py-1.5 px-2.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded text-xs"><i data-lucide="copy" class="w-3.5 h-3.5"></i></button>
+                <button data-click="app.createNewTrack" class="flex-1 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 rounded text-xs">+  New</button>
+                <button data-click="app.editTrack" class="flex-1 py-1.5 bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 rounded text-xs">Edit Track</button>
+                <button data-click="app.duplicateTrack" title="Duplicate the current track" class="py-1.5 px-2.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded text-xs"><svg class="w-3.5 h-3.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg></button>
             </div>
             <label class="mt-2 flex items-center justify-center gap-1.5 py-1.5 bg-purple-500/10 text-purple-300 border border-purple-500/20 hover:bg-purple-500/20 rounded text-xs cursor-pointer" title="Analyze a PNG/JPG drawing or photo of a track loop and build a track from it">
-                <i data-lucide="image-plus" class="w-3 h-3"></i> Import from Image
-                <input type="file" accept="image/png,image/jpeg,image/webp" onchange="ImageImport.handleFile(this)" class="hidden">
+                <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 5h6"></path><path d="M19 2v6"></path><path d="M21 11.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7.5"></path><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"></path><circle cx="9" cy="9" r="2"></circle></svg> Import from Image
+                <input type="file" accept="image/png,image/jpeg,image/webp" data-change="ImageImport.handleFile|@el" class="hidden">
             </label>
         </div>
 
         <div class="mb-4 bg-slate-700/30 p-3 rounded-lg border border-slate-600">
              <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-2 flex justify-between items-center gap-1">
                 <span id="telemetry-label" class="truncate">Live Telemetry (Auto — Fastest)</span>
-                <button id="btn-release-spectate" onclick="app.releaseSpectate()" class="hidden shrink-0 text-cyan-300 hover:text-cyan-200 normal-case font-normal text-[9px] bg-cyan-500/10 border border-cyan-500/30 rounded px-1.5 py-0.5" title="Stop following this car and return to auto-follow fastest">Release</button>
-                <i data-lucide="activity" class="w-3 h-3 shrink-0"></i>
+                <button id="btn-release-spectate" data-click="app.releaseSpectate" class="hidden shrink-0 text-cyan-300 hover:text-cyan-200 normal-case font-normal text-[9px] bg-cyan-500/10 border border-cyan-500/30 rounded px-1.5 py-0.5" title="Stop following this car and return to auto-follow fastest">Release</button>
+                <svg class="w-3 h-3 shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"></path></svg>
             </h3>
             <p class="text-[9px] text-slate-500 italic -mt-1 mb-2">Click any car on track to spectate it.</p>
             <div class="space-y-2">
@@ -114,92 +120,106 @@
 
         <div class="space-y-2 mb-4">
             <div class="flex gap-2">
-                <button onclick="app.evolve()" class="flex-1 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/30 rounded text-xs">Skip Gen</button>
-                <button onclick="app.reset()" class="flex-1 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-xs">Reset</button>
+                <button data-click="app.evolve" class="flex-1 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/30 rounded text-xs">Skip Gen</button>
+                <button data-click="app.reset" class="flex-1 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-xs">Reset</button>
             </div>
             <div class="flex gap-2 pt-2 border-t border-slate-700">
-                <button onclick="app.saveBrain()" class="flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded text-xs flex items-center justify-center gap-1">
-                    <i data-lucide="download" class="w-3 h-3"></i> Save AI
+                <button data-click="app.saveBrain" class="flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded text-xs flex items-center justify-center gap-1">
+                    <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"></path><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><path d="m7 10 5 5 5-5"></path></svg> Save AI
                 </button>
                 <label class="flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded text-xs flex items-center justify-center gap-1 cursor-pointer">
-                    <i data-lucide="upload" class="w-3 h-3"></i> Load AI
-                    <input type="file" onchange="app.loadBrain(this)" class="hidden" accept=".json">
+                    <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"></path><path d="m17 8-5-5-5 5"></path><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path></svg> Load AI
+                    <input type="file" data-change="app.loadBrain|@el" class="hidden" accept=".json">
+                </label>
+            </div>
+            <div class="flex gap-2 pt-2">
+                <button data-click="app.saveSession" title="Save the whole run — every brain, the generation counter, best times and the graph" class="flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded text-xs flex items-center justify-center gap-1">
+                    <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"></path><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><path d="m7 10 5 5 5-5"></path></svg> Save Session
+                </button>
+                <label title="Resume a saved run exactly where it left off" class="flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded text-xs flex items-center justify-center gap-1 cursor-pointer">
+                    <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"></path><path d="m17 8-5-5-5 5"></path><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path></svg> Load Session
+                    <input type="file" data-change="app.loadSession|@el" class="hidden" accept=".json">
                 </label>
             </div>
         </div>
 
         <!-- Desktop Start/Hyper — hidden on mobile (they live in the control bar on mobile) -->
         <div class="hidden xl:flex gap-2 mb-3">
-            <button id="btn-play" onclick="app.toggleRun()" class="flex-1 py-2 rounded-lg font-bold flex items-center justify-center gap-2 transition-all border text-sm bg-emerald-500/20 text-emerald-400 border-emerald-500/50 hover:bg-emerald-500/30">
-                <i data-lucide="play" class="w-4 h-4"></i> <span>Start</span>
+            <button id="btn-play" data-click="app.toggleRun" class="flex-1 py-2 rounded-lg font-bold flex items-center justify-center gap-2 transition-all border text-sm bg-emerald-500/20 text-emerald-400 border-emerald-500/50 hover:bg-emerald-500/30">
+                <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> <span>Start</span>
             </button>
-            <button id="btn-hyper" onclick="app.toggleHyper()" class="py-2 px-3 rounded-lg flex items-center justify-center transition-all border bg-slate-700 text-slate-400 border-slate-600 hover:text-yellow-400" title="Hyper Mode (No Render)">
-                <i data-lucide="zap" class="w-4 h-4"></i>
+            <button id="btn-hyper" data-click="app.toggleHyper" class="py-2 px-3 rounded-lg flex items-center justify-center transition-all border bg-slate-700 text-slate-400 border-slate-600 hover:text-yellow-400" title="Hyper Mode (No Render)">
+                <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"></path></svg>
             </button>
         </div>
 
         <div class="pt-2 pb-6">
-            <button onclick="document.getElementById('config-panel').classList.toggle('hidden')" class="flex items-center justify-between w-full p-2 text-xs font-bold text-slate-400 hover:text-slate-200">
+            <button data-click="app.toggleSettings" class="flex items-center justify-between w-full p-2 text-xs font-bold text-slate-400 hover:text-slate-200">
                 <span>Sim Settings & Engine</span>
-                <i data-lucide="settings" class="w-3 h-3"></i>
+                <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"></path><circle cx="12" cy="12" r="3"></circle></svg>
             </button>
             <div id="config-panel" class="hidden space-y-3 p-2 bg-slate-750 rounded border border-slate-700 mt-2">
                 
                 <div class="flex justify-between items-center border-b border-slate-600 pb-1">
                     <h4 class="text-[10px] font-bold text-blue-400 uppercase tracking-wide">Compute Engine</h4>
                     <span class="text-[10px] py-1 px-2 rounded bg-blue-600/20 text-blue-400 font-bold flex items-center gap-1 border border-blue-500/30" id="core-count">
-                        <i data-lucide="cpu" class="w-3 h-3"></i> Multi-Threading
+                        <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v2"></path><path d="M12 2v2"></path><path d="M17 20v2"></path><path d="M17 2v2"></path><path d="M2 12h2"></path><path d="M2 17h2"></path><path d="M2 7h2"></path><path d="M20 12h2"></path><path d="M20 17h2"></path><path d="M20 7h2"></path><path d="M7 20v2"></path><path d="M7 2v2"></path><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="8" y="8" width="8" height="8" rx="1"></rect></svg> Multi-Threading
                     </span>
                 </div>
 
                 <h4 class="text-[10px] font-bold text-slate-400 uppercase tracking-wide border-b border-slate-600 pb-1 mt-2">Simulation</h4>
-                <div onmouseenter="app.showInfo('speedMultiplier')" onmouseleave="app.showInfo(null)">
+                <div data-enter="app.showInfo|speedMultiplier" data-leave="app.showInfo">
                      <label class="text-[10px] text-slate-500 flex justify-between"><span>Speed</span><span id="val-speed">1x</span></label>
-                     <input id="cfg-speedMultiplier" type="range" min="1" max="10" step="1" value="1" oninput="app.updateConfig('speedMultiplier', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                     <input id="cfg-speedMultiplier" type="range" min="1" max="10" step="1" value="1" data-input="app.updateConfig|speedMultiplier|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
 
                 <h4 class="text-[10px] font-bold text-slate-400 uppercase tracking-wide border-b border-slate-600 pb-1 mt-2">Evolution & Brain</h4>
-                <div onmouseenter="app.showInfo('populationSize')" onmouseleave="app.showInfo(null)">
+                <div data-enter="app.showInfo|populationSize" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Pop Size</span><span id="val-pop">500</span></label>
-                    <input id="cfg-populationSize" type="range" min="20" max="500" step="20" value="500" oninput="app.updateConfig('populationSize', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-populationSize" type="range" min="20" max="500" step="20" value="500" data-input="app.updateConfig|populationSize|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
-                <div onmouseenter="app.showInfo('eliteClones')" onmouseleave="app.showInfo(null)">
+                <div data-enter="app.showInfo|eliteClones" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Elite Clones</span><span id="val-elite">30</span></label>
-                    <input id="cfg-eliteClones" type="range" min="0" max="50" step="1" value="30" oninput="app.updateConfig('eliteClones', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-eliteClones" type="range" min="0" max="50" step="1" value="30" data-input="app.updateConfig|eliteClones|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
-                 <div onmouseenter="app.showInfo('mutationRate')" onmouseleave="app.showInfo(null)">
+                 <div data-enter="app.showInfo|mutationRate" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Mutation Rate</span><span id="val-mut">30%</span></label>
-                    <input id="cfg-mutationRate" type="range" min="0.00" max="1.0" step="0.05" value="0.30" oninput="app.updateConfig('mutationRate', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-mutationRate" type="range" min="0.00" max="1.0" step="0.05" value="0.30" data-input="app.updateConfig|mutationRate|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
-                 <div onmouseenter="app.showInfo('hiddenLayers')" onmouseleave="app.showInfo(null)">
+                 <div data-enter="app.showInfo|hiddenLayers" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Hidden Layers</span><span id="val-hidden">5</span></label>
-                    <input id="cfg-hiddenLayers" type="range" min="1" max="25" step="1" value="5" onchange="app.reset()" oninput="app.updateConfig('hiddenLayers', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-hiddenLayers" type="range" min="1" max="25" step="1" value="5" data-change="app.reset" data-input="app.updateConfig|hiddenLayers|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
-                 <div onmouseenter="app.showInfo('initialTTL')" onmouseleave="app.showInfo(null)">
+                 <div data-enter="app.showInfo|initialTTL" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Initial TTL</span><span id="val-ttl">750</span></label>
-                    <input id="cfg-initialTTL" type="range" min="250" max="10000" step="250" value="750" oninput="app.updateConfig('initialTTL', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-initialTTL" type="range" min="250" max="10000" step="250" value="750" data-input="app.updateConfig|initialTTL|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
-                <div onmouseenter="app.showInfo('targetLaps')" onmouseleave="app.showInfo(null)">
+                <div data-enter="app.showInfo|targetLaps" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Target Laps</span><span id="val-laps">3</span></label>
-                    <input id="cfg-targetLaps" type="range" min="1" max="10" step="1" value="3" oninput="app.updateConfig('targetLaps', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-targetLaps" type="range" min="1" max="10" step="1" value="3" data-input="app.updateConfig|targetLaps|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
 
                 <h4 class="text-[10px] font-bold text-slate-400 uppercase tracking-wide border-b border-slate-600 pb-1 mt-2">Physics</h4>
-                <div onmouseenter="app.showInfo('maxSpeed')" onmouseleave="app.showInfo(null)">
+                <div data-enter="app.showInfo|maxSpeed" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Max Speed</span><span id="val-maxSpeed">10</span></label>
-                    <input id="cfg-maxSpeed" type="range" min="8" max="25" value="10" oninput="app.updatePhysics('maxSpeed', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-maxSpeed" type="range" min="8" max="25" value="10" data-input="app.updatePhysics|maxSpeed|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
-                <div onmouseenter="app.showInfo('acceleration')" onmouseleave="app.showInfo(null)">
+                <div data-enter="app.showInfo|acceleration" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Acceleration</span><span id="val-accel">0.05</span></label>
-                    <input id="cfg-acceleration" type="range" min="0.05" max="1.0" step="0.05" value="0.05" oninput="app.updatePhysics('acceleration', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-acceleration" type="range" min="0.05" max="1.0" step="0.05" value="0.05" data-input="app.updatePhysics|acceleration|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
-                <div onmouseenter="app.showInfo('turnSpeed')" onmouseleave="app.showInfo(null)">
+                <div data-enter="app.showInfo|turnSpeed" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Turn Speed</span><span id="val-turn">0.04</span></label>
-                    <input id="cfg-turnSpeed" type="range" min="0.02" max="0.4" step="0.01" value="0.04" oninput="app.updatePhysics('turnSpeed', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-turnSpeed" type="range" min="0.02" max="0.4" step="0.01" value="0.04" data-input="app.updatePhysics|turnSpeed|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
-                <div onmouseenter="app.showInfo('brakeStrength')" onmouseleave="app.showInfo(null)">
+                <div data-enter="app.showInfo|brakeStrength" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Brake Strength</span><span id="val-brakeStrength">0.2</span></label>
-                    <input id="cfg-brakeStrength" type="range" min="0.05" max="1.0" step="0.05" value="0.2" oninput="app.updatePhysics('brakeStrength', this.value)" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-brakeStrength" type="range" min="0.05" max="1.0" step="0.05" value="0.2" data-input="app.updatePhysics|brakeStrength|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                </div>
+
+                <div class="border-t border-slate-600 pt-2 mt-2">
+                    <button data-click="app.wipeEverything" class="w-full py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/40 rounded text-[10px]">Wipe All Data &amp; Reload</button>
+                    <p class="text-[9px] text-slate-500 mt-1 leading-tight">Nothing is saved between visits anyway — this also clears the browser's cached copy of the app.</p>
                 </div>
 
                 <div id="setting-info" class="text-[10px] text-slate-500 italic min-h-[50px] border-t border-slate-600 pt-2 mt-2 transition-colors">
@@ -215,14 +235,14 @@
         <div class="flex items-center gap-3 bg-slate-800 p-2 md:p-3 rounded-xl border border-slate-700 shrink-0 shadow-lg z-10">
             <!-- Start/Hyper/Reset: mobile only (desktop has them in sidebar) -->
             <div class="flex items-center gap-2 xl:hidden">
-                <button id="btn-play-m" onclick="app.toggleRun()" class="px-3 py-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-all border text-sm bg-emerald-500/20 text-emerald-400 border-emerald-500/50 hover:bg-emerald-500/30">
-                    <i data-lucide="play" class="w-4 h-4"></i> <span>Start</span>
+                <button id="btn-play-m" data-click="app.toggleRun" class="px-3 py-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-all border text-sm bg-emerald-500/20 text-emerald-400 border-emerald-500/50 hover:bg-emerald-500/30">
+                    <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> <span>Start</span>
                 </button>
-                <button id="btn-hyper-m" onclick="app.toggleHyper()" class="p-2 rounded-lg flex items-center justify-center transition-all border bg-slate-700 text-slate-400 border-slate-600 hover:text-yellow-400" title="Hyper Mode">
-                    <i data-lucide="zap" class="w-4 h-4"></i>
+                <button id="btn-hyper-m" data-click="app.toggleHyper" class="p-2 rounded-lg flex items-center justify-center transition-all border bg-slate-700 text-slate-400 border-slate-600 hover:text-yellow-400" title="Hyper Mode">
+                    <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"></path></svg>
                 </button>
-                <button onclick="app.reset()" class="p-2 rounded-lg flex items-center justify-center transition-all border bg-slate-700 text-slate-400 border-slate-600 hover:text-white" title="Reset">
-                    <i data-lucide="rotate-ccw" class="w-4 h-4"></i>
+                <button data-click="app.reset" class="p-2 rounded-lg flex items-center justify-center transition-all border bg-slate-700 text-slate-400 border-slate-600 hover:text-white" title="Reset">
+                    <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>
                 </button>
                 <div class="w-px h-8 bg-slate-700"></div>
             </div>
@@ -256,60 +276,60 @@
             <div class="flex items-center gap-4 flex-wrap">
                 <input id="edit-name" type="text" class="bg-slate-700 border border-slate-600 rounded px-3 py-1 text-sm md:text-lg font-bold text-white w-32 md:w-48" placeholder="Track Name">
                 <div class="flex bg-slate-700 rounded p-1 gap-1">
-                    <button onclick="editor.setMode('path')" id="btn-mode-path" class="px-2 py-1 text-xs rounded flex items-center gap-1 bg-blue-600 text-white">
-                        <i data-lucide="move" class="w-3 h-3"></i> Path
+                    <button data-click="editor.setMode|path" id="btn-mode-path" class="px-2 py-1 text-xs rounded flex items-center gap-1 bg-blue-600 text-white">
+                        <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20"></path><path d="m15 19-3 3-3-3"></path><path d="m19 9 3 3-3 3"></path><path d="M2 12h20"></path><path d="m5 9-3 3 3 3"></path><path d="m9 5 3-3 3 3"></path></svg> Path
                     </button>
-                    <button onclick="editor.setMode('draw')" id="btn-mode-draw" class="px-2 py-1 text-xs rounded flex items-center gap-1 text-slate-400">
-                        <i data-lucide="pencil" class="w-3 h-3"></i> Draw
+                    <button data-click="editor.setMode|draw" id="btn-mode-draw" class="px-2 py-1 text-xs rounded flex items-center gap-1 text-slate-400">
+                        <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path><path d="m15 5 4 4"></path></svg> Draw
                     </button>
-                    <button onclick="editor.setMode('zones')" id="btn-mode-zones" class="px-2 py-1 text-xs rounded flex items-center gap-1 text-slate-400">
-                        <i data-lucide="target" class="w-3 h-3"></i> Zones/Areas
+                    <button data-click="editor.setMode|zones" id="btn-mode-zones" class="px-2 py-1 text-xs rounded flex items-center gap-1 text-slate-400">
+                        <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg> Zones/Areas
                     </button>
                 </div>
 
                 <div id="draw-tools" class="hidden items-center gap-2 flex-wrap">
                     <span class="text-[10px] md:text-xs text-cyan-300">Click &amp; drag on the track to draw a loop — release to build it, then switch to Path to fine-tune.</span>
-                    <button onclick="editor.clearDrawing()" class="px-2 py-1 bg-red-500/20 text-red-400 border border-red-500/50 rounded text-[10px] md:text-xs flex items-center gap-1">
-                        <i data-lucide="eraser" class="w-3 h-3"></i> Clear
+                    <button data-click="editor.clearDrawing" class="px-2 py-1 bg-red-500/20 text-red-400 border border-red-500/50 rounded text-[10px] md:text-xs flex items-center gap-1">
+                        <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 21H8a2 2 0 0 1-1.42-.587l-3.994-3.999a2 2 0 0 1 0-2.828l10-10a2 2 0 0 1 2.829 0l5.999 6a2 2 0 0 1 0 2.828L12.834 21"></path><path d="m5.082 11.09 8.828 8.828"></path></svg> Clear
                     </button>
                 </div>
 
                 <div id="zones-tools" class="hidden flex items-center gap-2 flex-wrap">
-                    <button onclick="editor.addZone('speed')" class="bg-red-500/20 text-red-400 border border-red-500/50 px-2 py-1 rounded text-[10px] md:text-xs font-bold uppercase tracking-wide">Speed Boost</button>
-                    <button onclick="editor.addZone('precision')" class="bg-blue-500/20 text-blue-400 border border-blue-500/50 px-2 py-1 rounded text-[10px] md:text-xs font-bold uppercase tracking-wide">Points Area</button>
-                    <button onclick="editor.addZone('spawnkill')" class="bg-orange-500/20 text-orange-400 border border-orange-500/50 px-2 py-1 rounded text-[10px] md:text-xs font-bold uppercase tracking-wide">☠ Spawn Kill</button>
-                    <button onclick="editor.deleteZone()" class="text-red-400 px-1"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                    <button data-click="editor.addZone|speed" class="bg-red-500/20 text-red-400 border border-red-500/50 px-2 py-1 rounded text-[10px] md:text-xs font-bold uppercase tracking-wide">Speed Boost</button>
+                    <button data-click="editor.addZone|precision" class="bg-blue-500/20 text-blue-400 border border-blue-500/50 px-2 py-1 rounded text-[10px] md:text-xs font-bold uppercase tracking-wide">Points Area</button>
+                    <button data-click="editor.addZone|spawnkill" class="bg-orange-500/20 text-orange-400 border border-orange-500/50 px-2 py-1 rounded text-[10px] md:text-xs font-bold uppercase tracking-wide">☠ Spawn Kill</button>
+                    <button data-click="editor.deleteZone" class="text-red-400 px-1"><svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"></path><path d="M3 6h18"></path><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg></button>
                     <!-- Kill Timer: only visible when a spawnkill zone is selected -->
                     <div id="kill-timer-container" style="display:none" class="flex items-center gap-1.5 border-l border-slate-600 pl-2">
                         <span class="text-[10px] text-orange-300 font-bold uppercase tracking-wide">Kill Timer</span>
                         <span id="kill-timer-val" class="text-[10px] font-mono text-orange-400 w-6 text-right">150</span>
                         <span class="text-[9px] text-slate-500">frames</span>
                         <input type="range" min="30" max="600" step="10" value="150" id="kill-timer-slider"
-                               oninput="editor.updateZoneKillTimer(this.value)"
+                               data-input="editor.updateZoneKillTimer|@value"
                                class="w-16 md:w-24 h-1 bg-slate-600 rounded cursor-pointer accent-orange-400">
                     </div>
                 </div>
 
                  <div id="path-tools" class="flex items-center gap-2 md:gap-4">
                     <!-- NEW: Select All Button -->
-                    <button onclick="editor.selectAllPoints()" id="btn-select-all" class="px-2 py-1 bg-blue-500/20 text-blue-400 border border-blue-500/50 rounded text-[10px] md:text-xs flex items-center gap-1 hover:bg-blue-500/30 transition-colors">
+                    <button data-click="editor.selectAllPoints" id="btn-select-all" class="px-2 py-1 bg-blue-500/20 text-blue-400 border border-blue-500/50 rounded text-[10px] md:text-xs flex items-center gap-1 hover:bg-blue-500/30 transition-colors">
                         Select All
                     </button>
                     
-                    <button onclick="editor.deleteSelectedPoint()" id="btn-del-point" class="hidden px-2 py-1 bg-red-500/20 text-red-400 border border-red-500/50 rounded text-[10px] md:text-xs flex items-center gap-1">
+                    <button data-click="editor.deleteSelectedPoint" id="btn-del-point" class="hidden px-2 py-1 bg-red-500/20 text-red-400 border border-red-500/50 rounded text-[10px] md:text-xs flex items-center gap-1">
                         Del Point
                     </button>
                     
                     <div class="flex flex-col w-16 md:w-20">
                         <span class="text-[8px] md:text-[10px] text-slate-400">Width</span>
-                        <input type="range" min="20" max="150" id="edit-width" oninput="editor.updateWidth(this.value)" class="w-full">
+                        <input type="range" min="20" max="150" id="edit-width" data-input="editor.updateWidth|@value" class="w-full">
                     </div>
 
                     <!-- Auto width: pinch the road in where two passes of the
                          track run close enough to leave a paper-thin barrier. -->
                     <div class="flex flex-col gap-0.5 border-l border-slate-600 pl-2 md:pl-3">
                         <label class="flex items-center gap-1.5 cursor-pointer" title="Narrow the road where the track runs close to itself, instead of letting the two sides merge">
-                            <input type="checkbox" id="edit-autowidth" onchange="editor.updateAutoWidth(this.checked)" class="accent-emerald-500 w-3 h-3">
+                            <input type="checkbox" id="edit-autowidth" data-change="editor.updateAutoWidth|@checked" class="accent-emerald-500 w-3 h-3">
                             <span class="text-[8px] md:text-[10px] text-slate-300 font-bold">Auto Width</span>
                         </label>
                         <div id="autowidth-blend-wrap" class="flex flex-col w-20 md:w-28 opacity-40 pointer-events-none transition-opacity">
@@ -317,7 +337,7 @@
                                 <span id="autowidth-blend-label">Pinch only</span>
                             </div>
                             <input type="range" min="0" max="100" step="5" value="0" id="edit-autowidth-blend"
-                                   oninput="editor.updateAutoWidthBlend(this.value)" class="w-full"
+                                   data-input="editor.updateAutoWidthBlend|@value" class="w-full"
                                    title="Left: only the tight spots narrow. Right: the whole track takes the narrowest width, so it stays one even width.">
                             <div class="flex justify-between text-[7px] md:text-[9px] text-slate-500 -mt-0.5">
                                 <span>Local</span><span>Global</span>
@@ -327,42 +347,42 @@
 
                      <div class="flex flex-col w-16 md:w-20">
                         <span class="text-[8px] md:text-[10px] text-slate-400">Start Angle</span>
-                        <input type="range" min="0" max="360" id="edit-angle" oninput="editor.updateAngle(this.value)" class="w-full">
+                        <input type="range" min="0" max="360" id="edit-angle" data-input="editor.updateAngle|@value" class="w-full">
                     </div>
 
                     <!-- Point Settings -->
                     <div id="point-tools" class="hidden items-center gap-2 border-l border-slate-600 pl-2 md:pl-4">
                         <div class="flex bg-slate-900 rounded p-1 gap-1">
-                            <button id="btn-pt-corner" title="Tightest turn the track width still allows" onclick="editor.updatePointType('corner')" class="px-2 py-1 text-[10px] rounded text-slate-400 hover:bg-slate-700 transition-colors">Corner</button>
-                            <button id="btn-pt-rounded" title="Turn of the radius set below (never tighter than the track is wide)" onclick="editor.updatePointType('rounded')" class="px-2 py-1 text-[10px] rounded bg-blue-600 text-white transition-colors">Rounded</button>
+                            <button id="btn-pt-corner" title="Tightest turn the track width still allows" data-click="editor.updatePointType|corner" class="px-2 py-1 text-[10px] rounded text-slate-400 hover:bg-slate-700 transition-colors">Corner</button>
+                            <button id="btn-pt-rounded" title="Turn of the radius set below (never tighter than the track is wide)" data-click="editor.updatePointType|rounded" class="px-2 py-1 text-[10px] rounded bg-blue-600 text-white transition-colors">Rounded</button>
                         </div>
                         <div id="radius-container" class="flex flex-col w-16 md:w-20">
                             <div class="flex justify-between text-[8px] md:text-[10px] text-slate-400">
                                 <span>Radius:</span><span id="pt-radius-val">60</span>
                             </div>
-                            <input type="range" min="10" max="250" id="pt-radius-slider" oninput="editor.updatePointRadius(this.value)" class="w-full">
+                            <input type="range" min="10" max="250" id="pt-radius-slider" data-input="editor.updatePointRadius|@value" class="w-full">
                         </div>
                     </div>
                 </div>
             </div>
             <div class="flex gap-2">
-                <button onclick="editor.cancel()" class="px-2 py-1 md:px-4 md:py-2 bg-slate-700 hover:bg-slate-600 rounded text-xs md:text-sm">Cancel</button>
-                <button onclick="editor.save()" class="px-2 py-1 md:px-4 md:py-2 bg-emerald-600 hover:bg-emerald-500 rounded font-bold text-xs md:text-sm">Save Track</button>
+                <button data-click="editor.cancel" class="px-2 py-1 md:px-4 md:py-2 bg-slate-700 hover:bg-slate-600 rounded text-xs md:text-sm">Cancel</button>
+                <button data-click="editor.save" class="px-2 py-1 md:px-4 md:py-2 bg-emerald-600 hover:bg-emerald-500 rounded font-bold text-xs md:text-sm">Save Track</button>
             </div>
         </div>
 
         <!-- Code Export Modal -->
-        <div id="code-modal" class="hidden absolute inset-0 z-[100] bg-black/80 flex items-center justify-center p-4" onclick="if(event.target===this)this.classList.add('hidden')">
+        <div id="code-modal" class="hidden absolute inset-0 z-[100] bg-black/80 flex items-center justify-center p-4" data-click="app.dismissBackdrop|@el|@event">
             <div class="bg-slate-800 border border-slate-600 rounded-xl p-5 w-full max-w-2xl shadow-2xl flex flex-col gap-3">
                 <div class="flex justify-between items-center">
-                    <h2 class="text-base font-bold text-emerald-400 flex items-center gap-2"><i data-lucide="code" class="w-4 h-4"></i> Track Code — Paste into resetTracks()</h2>
-                    <button onclick="document.getElementById('code-modal').classList.add('hidden')" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button>
+                    <h2 class="text-base font-bold text-emerald-400 flex items-center gap-2"><svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 18 6-6-6-6"></path><path d="m8 6-6 6 6 6"></path></svg> Track Code — Paste into resetTracks()</h2>
+                    <button data-click="app.closeCodeModal" class="text-slate-400 hover:text-white"><svg class="w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg></button>
                 </div>
                 <p class="text-xs text-slate-400">Copy this line and paste it inside the <code class="text-yellow-300">this.state.tracks = [...]</code> array in <code class="text-yellow-300">resetTracks()</code>.</p>
-                <textarea id="code-output" readonly class="w-full bg-slate-950 text-emerald-300 text-xs font-mono p-3 rounded border border-slate-600 h-32 resize-none focus:outline-none focus:border-emerald-500" onclick="this.select()"></textarea>
+                <textarea id="code-output" readonly class="w-full bg-slate-950 text-emerald-300 text-xs font-mono p-3 rounded border border-slate-600 h-32 resize-none focus:outline-none focus:border-emerald-500" data-click="app.selectText|@el"></textarea>
                 <div class="flex gap-2 justify-end">
-                    <button onclick="navigator.clipboard.writeText(document.getElementById('code-output').value).then(()=>{this.textContent='✓ Copied!';setTimeout(()=>this.textContent='Copy',2000)})" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded text-sm font-bold flex items-center gap-2">Copy</button>
-                    <button onclick="document.getElementById('code-modal').classList.add('hidden')" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm">Close</button>
+                    <button data-click="app.copyCode|@el" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded text-sm font-bold flex items-center gap-2">Copy</button>
+                    <button data-click="app.closeCodeModal" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm">Close</button>
                 </div>
             </div>
         </div>
@@ -371,21 +391,21 @@
             <canvas id="sim-canvas" width="1200" height="900" class="w-full h-full object-contain shadow-2xl rounded"></canvas>
             
             <div id="hyper-banner" class="hidden absolute top-4 right-4 bg-yellow-500/20 border border-yellow-500/50 text-yellow-200 px-4 py-2 rounded-full flex items-center gap-2 backdrop-blur-sm animate-pulse pointer-events-none z-10">
-                <i data-lucide="zap" class="w-4 h-4 text-yellow-400"></i>
+                <svg class="w-4 h-4 text-yellow-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"></path></svg>
                 <span class="text-xs font-bold uppercase tracking-wider">Hyper Mode Active</span>
             </div>
         </div>
 
         <div class="h-28 md:h-36 bg-slate-800 rounded-xl p-2 border border-slate-700 shrink-0 relative hidden xl:block">
-            <canvas id="fitness-chart"></canvas>
+            <canvas id="fitness-chart" class="block w-full h-full"></canvas>
         </div>
     </div>
 <!-- engine.js owns the WebAssembly backend: it compiles wasm/sim.wasm, brings
      up the worker pool, and exposes generateTrackFromPath. It has to load
      before tracks.js, which calls that generator at startup. -->
-<script src="./engine.js"></script>
-<script src="tracks.js"></script>
-<script src="./script.js"></script>
-<script src="./image-import.js"></script>
+<script src="./engine.js?v=dev"></script>
+<script src="tracks.js?v=dev"></script>
+<script src="./script.js?v=dev"></script>
+<script src="./image-import.js?v=dev"></script>
 </body>
 </html>
