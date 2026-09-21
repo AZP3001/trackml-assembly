@@ -24,12 +24,6 @@ permissions:
   pages: write
   id-token: write
 
-# Only one deploy at a time; a queued run supersedes an older one rather than
-# racing it to the same environment.
-concurrency:
-  group: pages
-  cancel-in-progress: true
-
 jobs:
   # The site is served straight out of the repository, so the committed
   # wasm/*.wasm ARE the backend. This job rebuilds them from wasm/sim.c and
@@ -61,6 +55,17 @@ jobs:
   deploy:
     needs: verify-wasm
     if: github.ref_name == github.event.repository.default_branch
+    # Scoped to this job, NOT to the whole workflow.
+    #
+    # At workflow level the group is joined by every run, including one from a
+    # branch that only prints an explanation and publishes nothing — and with
+    # cancel-in-progress that run happily cancels the real deploy it raced. Two
+    # branches pushed together is enough to leave the site un-updated while both
+    # runs look accounted for. Only jobs that actually publish belong in the
+    # queue.
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: true
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
