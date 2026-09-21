@@ -208,7 +208,7 @@ const Engine = {
         return makeTrack(id, name, pathInput, width,
             { x: ex.track_start_x(), y: ex.track_start_y() }, ex.track_start_angle(),
             zones, centerF32, wallsF32, wallSeg, cpF32, cpApex,
-            widthF32, { enabled: !!autoOn, blend: autoBlend });
+            widthF32, { enabled: !!autoOn, blend: autoBlend }, ex.track_start_cp());
     },
 
     // ---- config --------------------------------------------------------
@@ -222,7 +222,7 @@ const Engine = {
     pushConfig: function(state) {
         const p = state.physics;
         const args = [p.maxSpeed, p.acceleration, p.turnSpeed, p.brakeStrength,
-                      state.initialTTL, state.targetLaps, state.mutationRate, state.hiddenLayers];
+                      state.initialTTL, state.targetLaps, state.focusPct, state.hiddenLayers];
         if (this.master) this.master.ex.set_config(...args);
         this.workers.forEach(w => w.postMessage({ type: 'config', args }));
     },
@@ -243,7 +243,7 @@ const Engine = {
         };
         const p = state.physics;
         const config = [p.maxSpeed, p.acceleration, p.turnSpeed, p.brakeStrength,
-                        state.initialTTL, state.targetLaps, state.mutationRate, state.hiddenLayers];
+                        state.initialTTL, state.targetLaps, state.focusPct, state.hiddenLayers];
         if (this.master) this.master.ex.set_config(...config);
         this.workers.forEach(w => w.postMessage({ type: 'track', def, config }));
     },
@@ -257,6 +257,7 @@ const Engine = {
         this._hidden = hiddenLayers;
         this._hasGlobalBest = false;
         this._globalBestFitness = -Infinity;
+        this._lastGateRatio = null;
 
         ex.pop_init(this._popSize, 0, hiddenLayers, (Math.random() * 0xffffffff) >>> 0);
 
@@ -294,16 +295,24 @@ const Engine = {
         const ex = this.master.ex;
         const stride = ex.brain_stride();
         const all = this._f32(this.master, ex.brains_ptr(), (ex.max_cars() + 1) * stride);
+        // Which slots evolve() bred as focused clones, and the track window
+        // their reward is boosted inside — both computed on the master (the
+        // only instance holding the whole population and the only one that
+        // calls evolve()) and shipped out alongside the brains, exactly like
+        // config. Workers never breed, so they have no other way to know.
+        const allFocused = this._i32(this.master, ex.car_focused_ptr(), ex.max_cars());
+        const focusLo = ex.focus_lo(), focusHi = ex.focus_hi();
         this.workers.forEach((w, i) => {
             const s = this.slices[i];
             const blob = all.slice(s.start * stride, (s.start + s.count) * stride);
+            const focused = allFocused.slice(s.start, s.start + s.count);
             w.postMessage({
                 type: 'pop',
                 start: s.start, count: s.count,
                 hidden: this._hidden,
                 seed: (Math.random() * 0xffffffff) >>> 0,
-                brains: blob
-            }, [blob.buffer]);
+                brains: blob, focused, focusLo, focusHi
+            }, [blob.buffer, focused.buffer]);
         });
     },
 
@@ -347,6 +356,7 @@ const Engine = {
         if (!st || data.type !== 'done') return;
         if (data.maxLaps > st.maxLaps) st.maxLaps = data.maxLaps;
         if (!data.allCrashed) st.allCrashed = false;
+        if (data.gateRatio) this._lastGateRatio = data.gateRatio;
         st.rows.push(data);
         if (++st.completed === st.total) {
             this._runState = null;
@@ -357,6 +367,13 @@ const Engine = {
     // ---- evolution -----------------------------------------------------
     // Selection is global, so it happens here on the master, which is the one
     // instance holding every brain. Workers never breed.
+    // Set from worker 0's last 'done' message (see _handleWorkerMessage) —
+    // that worker owns global car 0, and car 0 mirrors the stash exactly
+    // whenever one exists, so its per-gate pace this generation is exactly
+    // the telemetry evolve() needs to find the stash's weakest stretch. The
+    // master itself never simulates a car, so it has no other way to see it.
+    _lastGateRatio: null,
+
     evolve: function(fitness, eliteClones, generation) {
         const ex = this.master.ex;
         const ev = this._f32(this.master, ex.ev_fitness_ptr(), ex.max_cars());
@@ -372,6 +389,9 @@ const Engine = {
             ex.copy_brain(bestIdx, ex.stash_slot());
             this._globalBestFitness = bestFit;
             this._hasGlobalBest = true;
+        }
+        if (this._lastGateRatio) {
+            this._f32(this.master, ex.gate_ratio_ptr(), ex.max_gates()).set(this._lastGateRatio);
         }
         ex.evolve(eliteClones, this._hasGlobalBest ? 1 : 0, generation | 0);
         this._shipBrains();
@@ -511,6 +531,7 @@ const Engine = {
         }
         this._hasGlobalBest = !!p.hasGlobalBest;
         this._globalBestFitness = typeof p.globalBestFitness === 'number' ? p.globalBestFitness : -Infinity;
+        this._lastGateRatio = null;
 
         this._sliceUp();
         this._shipBrains();
@@ -555,7 +576,7 @@ const CP_STRIDE = 7;
 // {p1:{x,y}} objects. `walls` and `checkpoints` are still here as lazy getters
 // for anything that wants the old object shape; nothing on a hot path does.
 function makeTrack(id, name, path, trackWidth, startPos, startAngle, zones,
-                   centerF32, wallsF32, wallSeg, cpF32, cpApex, widthF32, auto) {
+                   centerF32, wallsF32, wallSeg, cpF32, cpApex, widthF32, auto, startCp) {
     const t = {
         id, name, path, trackWidth, startPos, startAngle, zones,
         centerF32, wallsF32, wallSeg, cpF32, cpApex, widthF32,
@@ -563,6 +584,11 @@ function makeTrack(id, name, path, trackWidth, startPos, startAngle, zones,
         autoWidthBlend: (auto && typeof auto.blend === 'number') ? auto.blend : 0,
         wallCount: wallsF32.length / 4,
         cpCount: cpF32.length / CP_STRIDE,
+        // The gate whose crossing actually completes a lap (see sim.c's
+        // updateCar) — not necessarily checkpoint 0, on a track whose start
+        // has been dragged elsewhere. This is which one to draw as the
+        // finish line.
+        startCp: startCp || 0,
         segStep: 34
     };
     let _walls = null, _cps = null;

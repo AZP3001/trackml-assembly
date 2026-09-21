@@ -47,8 +47,8 @@ That produces two modules and no JavaScript glue at all:
 
 | file | size | notes |
 | --- | --- | --- |
-| `wasm/sim.wasm` | ~44 KB | scalar |
-| `wasm/sim-simd.wasm` | ~49 KB | adds 128-bit SIMD (`-msimd128`) |
+| `wasm/sim.wasm` | ~46 KB | scalar |
+| `wasm/sim-simd.wasm` | ~53 KB | adds 128-bit SIMD (`-msimd128`) |
 
 `engine.js` probes the browser for SIMD support and loads whichever it can run. There is no libc in
 the build, so `sin`, `cos`, `atan2`, `tanh`, `acos` and `exp` are implemented in `sim.c` too. They
@@ -72,9 +72,9 @@ it scales across cores the same way, and it needs no special headers.
 Fine-tune the simulation and the learning process using the built-in settings.
 
 ### AI & Evolutionary Parameters
-* **Pop Size** (default 500)**:** The number of agents generated per generation.
-* **Elite Clones** (default 30)**:** Number of top-performing agents preserved exactly for the next generation (prevents regression).
-* **Mutation Rate** (default 30%)**:** How much of each brain is randomly nudged per generation. The size of each nudge is a Gaussian that **shrinks as the run goes on**, so a high rate explores hard early and still settles down later instead of permanently kicking a working solution apart.
+* **Pop Size** (default 500, up to 2000)**:** The number of agents generated per generation.
+* **Elite Clones** (default 30)**:** Number of top-performing agents preserved exactly for the next generation (prevents regression). Fewer than a handful and a generation can occasionally lose ground it had already made — around 30 is enough that the population doesn't "forget" a solution it found.
+* **Focus %** (default 20%)**:** Fraction of the population spent each generation as mutated clones of the current best, with their reward specifically boosted through whichever stretch of track that brain is currently slowest on (roughly ±1 second either side). Going fast where it's *already* near top speed has little room left to improve; the slow stretch is where the gains are. This is what stops a run getting stuck on one badly-taken corner instead of generally improving.
 * **Hidden Layers:** Adjust the complexity of the AI's "brain" by changing the number of internal neurons.
 * **Initial TTL (Time-To-Live):** A countdown for each agent, **reset in full every time it reaches a checkpoint**. It used to top the clock up by 150 frames and clamp it to 600, which quietly made the slider a lie — set it to 10,000 and the very first gate cut the car back to 600.
 * **Target Laps:** Defines the goalpost for a successful generation before moving to the next stage of evolution.
@@ -88,11 +88,21 @@ produced a child that drove into a wall. New populations start with fan-in scale
 a flat `[-1,1]`, which stopped the first few dozen generations being spent climbing back out of tanh
 saturation.
 
+There used to be a separate **Mutation Rate** slider controlling how much of each brain got nudged.
+It's gone: every weight is mutated on every generation now, and the *size* of the nudge is a Gaussian
+that **shrinks as the run goes on** (annealing from wide exploration early to fine polishing later).
+Once that curve already controls how big a mutation is, gating *whether* a weight gets one at all on a
+coin flip was a second knob doing overlapping work — dropping it is one less setting to tune, not a
+missing feature.
+
+Every setting's slider is centred on its own default — nudge it either direction from there rather
+than starting near one end of the range.
+
 ### Physics Engine
 * **Max Speed:** Maximum Speed of the Cars.
-* **Acceleration:** Acceleration to the Max Speed.
-* **Turn Speed:** How quickly the cars can turn — but only up to what grip allows. Below about 3 px/frame of speed a car turns at full Turn Speed; past that, available turn rate falls off roughly as `3 / speed`, the same tradeoff a real driver feels: carrying too much speed into a corner costs you the turn, so the fast line is to slow down first, not to out-steer the corner. A car with essentially no speed gets no turn authority at all — turning the wheel does nothing until it's rolling, just like a parked car.
-* **Brake Strength** (default 0.2)**:** How hard the brake pedal bites when the AI's throttle output goes negative. Braking now scales with how hard it's pressed — a throttle of -0.05 barely touches the speedometer, -1.0 hauls the car down hard — rather than the old behaviour, where ANY negative throttle snapped speed down by the same flat 5% regardless of how lightly it was pressed, so brakes looked "instant" no matter what the AI actually asked for.
+* **Acceleration** (default 0.05)**:** Acceleration to the Max Speed.
+* **Turn Speed** (default 0.02)**:** How quickly the cars can turn — but only up to what grip allows. Below about 3 px/frame of speed a car turns at full Turn Speed; past that, available turn rate falls off roughly as `3 / speed`, the same tradeoff a real driver feels: carrying too much speed into a corner costs you the turn, so the fast line is to slow down first, not to out-steer the corner. A car with essentially no speed gets no turn authority at all — turning the wheel does nothing until it's rolling, just like a parked car.
+* **Brake Strength** (default 0.05)**:** How hard the brake pedal bites when the AI's throttle output goes negative. Braking now scales with how hard it's pressed — a throttle of -0.05 barely touches the speedometer, -1.0 hauls the car down hard — rather than the old behaviour, where ANY negative throttle snapped speed down by the same flat 5% regardless of how lightly it was pressed, so brakes looked "instant" no matter what the AI actually asked for.
 * **No momentum, no race.** A car that isn't moving is eliminated on the spot — whether it never commanded throttle at all or braked to a standstill mid-track. Only speed counts; spinning the heading on the spot isn't momentum (and a stopped car can't steer anyway, so it has no way back out of that state). There's a short grace window at the start line so a car gets a chance to launch. This is worth real time: with 500 random brains, generation 1 used to spend most of itself simulating cars parked on the line until their TTL expired — killing them immediately cuts the generation's live car-frames by about 73% and runs it roughly 2.8x faster.
 * Lateral grip (the friction that keeps a car's velocity tracking its heading instead of drifting sideways) used to be a slider here too. It's fixed internally now: its usable range only ever canceled 80-99% of sideways slip every frame, so the two ends of that slider left a car in the same place after a couple of frames. Removed rather than kept as a knob that did effectively nothing.
 
@@ -105,10 +115,19 @@ simulation still steps on every animation frame, only the painting is throttled.
 from a cached sprite per livery instead of half a dozen canvas state changes each, which at 500 cars
 was most of the main thread's paint cost.
 
-The fitness chart keeps a rolling window of the last 300 generations rather than the whole session's
-history. Unbounded, it re-fed and redrew the entire history every single generation — cheap for the
-first few hundred, then a stall that grew as the run went on, which is why a long session used to
-feel like it was gradually slowing down even though the simulation never changed pace.
+The fitness chart shows the **whole run**, not a truncated recent window — every generation is
+represented somewhere on it for as long as the session lasts. It stays fast anyway: once it has 300
+points, each new generation first tries to merge into the newest one, and once that one is as full as
+the rest, the whole array halves its resolution by merging consecutive pairs. So the far past gets
+coarser instead of disappearing, exactly like a real monitoring graph — the cost per generation stays
+constant no matter how long the run has been going, which is the actual fix for the "gets slower the
+longer I leave it running" problem: redrawing the *entire* unbounded history every generation was an
+O(n²) stall over a session, and simply throwing away everything past a fixed window (an earlier,
+cruder fix) traded "total" away to get the same constant cost.
+
+Next to the graph is a small table of average fitness improvement per generation — for the top 1%,
+the top 10%, and the whole population — over the last 1, 10 and 100 generations, so you can see at a
+glance whether a run is still climbing or has plateaued at each of those timescales.
 
 ### Saving a run
 
@@ -125,6 +144,14 @@ escape hatch — it clears storage and the browser's cached copy of the app and 
 
 ## Spectator Mode
 Click any car on the track to pin the telemetry panel and sensor overlay to it — it stays highlighted until it crashes or you click empty space / hit "Release". With nothing selected, the panel auto-follows whichever car currently has the best fitness.
+
+## Zoom & Pan
+Scroll to zoom in and out of the map (centred on the cursor), or use the +/−/1:1 buttons over the
+bottom-right corner of the canvas. Right-click and drag to pan around while zoomed in. This works the
+same way in the race view and the editor — it's one shared view, so switching between them never
+resets what you were looking at. Zooming in doesn't just make things bigger: car-selection and
+point-editing precision scale with it too, since a fixed distance in track units covers fewer screen
+pixels the further in you are.
 
 ## Track Editor
 ### How a track is built
@@ -163,6 +190,20 @@ The slider next to the checkbox decides how the narrowing is applied:
 Narrowing tapers over a couple of track widths rather than stepping, and never goes below the width
 a car can physically get through. It's on by default for drawn and image-imported tracks, which are
 the ones where you can't judge the clearances by eye, and off for tracks you place by hand.
+
+### Finish line
+The finish line drawn on the map is the actual gate that completes a lap — the same one `updateCar`
+in `sim.c` checks — not just the first checkpoint the generator happened to lay down. On a track whose
+start line has been dragged away from where the centreline generation began, those used to be two
+different gates, so the drawn line and the one cars were actually scored on could be nowhere near each
+other. It's rendered as a real checkered banner spanning the road's actual width at that point (the
+same auto-width-aware coordinates the lap check itself uses), in both the normal view and the editor.
+
+### Resizing a track to fit the map
+Click **Select All** in the Path tab, then **Fit to Map**, and the whole track — every point, its
+corner radii, and any zones — is rescaled and re-centred to fill the canvas with a sensible margin.
+Useful for a loop that was drawn (or imported) too small, or dragged off to one side, to make good use
+of the space.
 
 Besides placing points by hand, the editor has three ways to build a track:
 * **Draw:** switch to the Draw tab and drag a loop directly on the canvas — it's simplified into an editable path automatically.

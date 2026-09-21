@@ -176,45 +176,45 @@
                 <h4 class="text-[10px] font-bold text-slate-400 uppercase tracking-wide border-b border-slate-600 pb-1 mt-2">Evolution & Brain</h4>
                 <div data-enter="app.showInfo|populationSize" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Pop Size</span><span id="val-pop">500</span></label>
-                    <input id="cfg-populationSize" type="range" min="20" max="500" step="20" value="500" data-input="app.updateConfig|populationSize|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-populationSize" type="range" min="20" max="2000" step="20" value="500" data-input="app.updateConfig|populationSize|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                 <div data-enter="app.showInfo|eliteClones" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Elite Clones</span><span id="val-elite">30</span></label>
-                    <input id="cfg-eliteClones" type="range" min="0" max="50" step="1" value="30" data-input="app.updateConfig|eliteClones|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-eliteClones" type="range" min="0" max="60" step="1" value="30" data-input="app.updateConfig|eliteClones|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
-                 <div data-enter="app.showInfo|mutationRate" data-leave="app.showInfo">
-                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Mutation Rate</span><span id="val-mut">30%</span></label>
-                    <input id="cfg-mutationRate" type="range" min="0.00" max="1.0" step="0.05" value="0.30" data-input="app.updateConfig|mutationRate|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                 <div data-enter="app.showInfo|focusPct" data-leave="app.showInfo">
+                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Focus %</span><span id="val-focus">20%</span></label>
+                    <input id="cfg-focusPct" type="range" min="0.00" max="0.40" step="0.01" value="0.20" data-input="app.updateConfig|focusPct|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                  <div data-enter="app.showInfo|hiddenLayers" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Hidden Layers</span><span id="val-hidden">5</span></label>
-                    <input id="cfg-hiddenLayers" type="range" min="1" max="25" step="1" value="5" data-change="app.reset" data-input="app.updateConfig|hiddenLayers|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-hiddenLayers" type="range" min="1" max="9" step="1" value="5" data-change="app.reset" data-input="app.updateConfig|hiddenLayers|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                  <div data-enter="app.showInfo|initialTTL" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Initial TTL</span><span id="val-ttl">750</span></label>
-                    <input id="cfg-initialTTL" type="range" min="250" max="10000" step="250" value="750" data-input="app.updateConfig|initialTTL|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-initialTTL" type="range" min="100" max="1400" step="50" value="750" data-input="app.updateConfig|initialTTL|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                 <div data-enter="app.showInfo|targetLaps" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Target Laps</span><span id="val-laps">3</span></label>
-                    <input id="cfg-targetLaps" type="range" min="1" max="10" step="1" value="3" data-input="app.updateConfig|targetLaps|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-targetLaps" type="range" min="1" max="5" step="1" value="3" data-input="app.updateConfig|targetLaps|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
 
                 <h4 class="text-[10px] font-bold text-slate-400 uppercase tracking-wide border-b border-slate-600 pb-1 mt-2">Physics</h4>
                 <div data-enter="app.showInfo|maxSpeed" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Max Speed</span><span id="val-maxSpeed">10</span></label>
-                    <input id="cfg-maxSpeed" type="range" min="8" max="25" value="10" data-input="app.updatePhysics|maxSpeed|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-maxSpeed" type="range" min="4" max="16" value="10" data-input="app.updatePhysics|maxSpeed|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                 <div data-enter="app.showInfo|acceleration" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Acceleration</span><span id="val-accel">0.05</span></label>
-                    <input id="cfg-acceleration" type="range" min="0.05" max="1.0" step="0.05" value="0.05" data-input="app.updatePhysics|acceleration|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <input id="cfg-acceleration" type="range" min="0.01" max="0.25" step="0.01" value="0.05" data-input="app.updatePhysics|acceleration|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                 <div data-enter="app.showInfo|turnSpeed" data-leave="app.showInfo">
-                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Turn Speed</span><span id="val-turn">0.04</span></label>
-                    <input id="cfg-turnSpeed" type="range" min="0.02" max="0.4" step="0.01" value="0.04" data-input="app.updatePhysics|turnSpeed|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Turn Speed</span><span id="val-turn">0.02</span></label>
+                    <input id="cfg-turnSpeed" type="range" min="0.004" max="0.1" step="0.002" value="0.02" data-input="app.updatePhysics|turnSpeed|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                 <div data-enter="app.showInfo|brakeStrength" data-leave="app.showInfo">
-                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Brake Strength</span><span id="val-brakeStrength">0.2</span></label>
-                    <input id="cfg-brakeStrength" type="range" min="0.05" max="1.0" step="0.05" value="0.2" data-input="app.updatePhysics|brakeStrength|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Brake Strength</span><span id="val-brakeStrength">0.05</span></label>
+                    <input id="cfg-brakeStrength" type="range" min="0.01" max="0.25" step="0.01" value="0.05" data-input="app.updatePhysics|brakeStrength|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
 
                 <div class="border-t border-slate-600 pt-2 mt-2">
@@ -319,7 +319,11 @@
                     <button data-click="editor.deleteSelectedPoint" id="btn-del-point" class="hidden px-2 py-1 bg-red-500/20 text-red-400 border border-red-500/50 rounded text-[10px] md:text-xs flex items-center gap-1">
                         Del Point
                     </button>
-                    
+
+                    <button data-click="editor.fitToMap" id="btn-fit-map" title="Scale and re-centre the whole track to fill the map" class="hidden px-2 py-1 bg-emerald-500/20 text-emerald-400 border border-emerald-500/50 rounded text-[10px] md:text-xs flex items-center gap-1 hover:bg-emerald-500/30 transition-colors">
+                        Fit to Map
+                    </button>
+
                     <div class="flex flex-col w-16 md:w-20">
                         <span class="text-[8px] md:text-[10px] text-slate-400">Width</span>
                         <input type="range" min="20" max="150" id="edit-width" data-input="editor.updateWidth|@value" class="w-full">
@@ -394,10 +398,34 @@
                 <svg class="w-4 h-4 text-yellow-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"></path></svg>
                 <span class="text-xs font-bold uppercase tracking-wider">Hyper Mode Active</span>
             </div>
+
+            <!-- Zoom: scroll-wheel and right-drag-to-pan both work directly on
+                 the canvas (in both the race view and the editor); these are
+                 just a touch-friendly equivalent. -->
+            <div class="absolute bottom-3 right-3 z-10 flex flex-col gap-1 bg-slate-800/85 backdrop-blur-sm rounded-lg border border-slate-700 p-1">
+                <button data-click="app.zoomStep|1.3" title="Zoom in" class="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-700 rounded text-base leading-none">+</button>
+                <button data-click="app.zoomStep|0.77" title="Zoom out" class="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-700 rounded text-base leading-none">&minus;</button>
+                <button data-click="app.resetView" title="Reset zoom (scroll to zoom, right-drag to pan)" class="w-7 h-7 flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-700 rounded text-[9px] font-bold">1:1</button>
+            </div>
         </div>
 
-        <div class="h-28 md:h-36 bg-slate-800 rounded-xl p-2 border border-slate-700 shrink-0 relative hidden xl:block">
-            <canvas id="fitness-chart" class="block w-full h-full"></canvas>
+        <div class="h-28 md:h-36 bg-slate-800 rounded-xl p-2 border border-slate-700 shrink-0 relative hidden xl:flex gap-2">
+            <canvas id="fitness-chart" class="block flex-1 h-full min-w-0"></canvas>
+            <div class="w-44 shrink-0 h-full overflow-y-auto border-l border-slate-700 pl-2" title="Average fitness change per generation, over the last 1/10/100 generations">
+                <table class="w-full text-[9px] leading-tight">
+                    <thead>
+                        <tr class="text-slate-500">
+                            <th class="text-left font-normal pb-1">&Delta; fit/gen</th>
+                            <th class="font-normal pb-1">1g</th>
+                            <th class="font-normal pb-1">10g</th>
+                            <th class="font-normal pb-1">100g</th>
+                        </tr>
+                    </thead>
+                    <tbody id="stats-table-body">
+                        <tr><td colspan="4" class="text-center text-slate-600 italic py-2">No data yet</td></tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
 <!-- engine.js owns the WebAssembly backend: it compiles wasm/sim.wasm, brings

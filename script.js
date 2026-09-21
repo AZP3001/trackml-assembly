@@ -20,7 +20,7 @@ const SETTING_DESCRIPTIONS = {
     speedMultiplier: "Simulation cycles per frame. High values train extremely fast.",
     populationSize: "Number of cars per generation. Scales perfectly via multi-threading.",
     eliteClones: "Top performers copied to the next generation without mutation. Prevents regression.",
-    mutationRate: "How much of each brain is randomly nudged per generation. The size of each nudge shrinks as the run goes on, so a high rate explores early and still settles later.",
+    focusPct: "Fraction of the population spent as mutated clones of the current best, reward-boosted specifically through whichever stretch of track it's currently slowest on (roughly ±1 second either side). Helps it stop getting stuck taking one corner badly instead of spreading every mutation evenly over a lap that mostly already works.",
     hiddenLayers: "Brain complexity. More layers = smarter but heavier computation.",
     initialTTL: "Time to Live. Frames allowed before death if no checkpoint is reached.",
     targetLaps: "Laps needed to trigger the next generation automatically.",
@@ -115,6 +115,42 @@ function strokeWalls(ctx, t) {
     ctx.stroke();
 }
 
+// A real checkered finish line, spanning the gate exactly (p1->p2 already
+// span the road's actual width at that point, auto-narrowed sections
+// included — same coordinates the car's own lap-completion test uses, see
+// track.startCp). Shared by the normal view and the editor so what you see
+// while building a track is what you race on.
+function drawFinishLine(ctx, x1, y1, x2, y2) {
+    const dx = x2 - x1, dy = y2 - y1;
+    const len = Math.hypot(dx, dy);
+    if (len < 4) return;
+    const CHECK = 9;   // one checker square, px
+    const cols = Math.max(2, Math.round(len / CHECK));
+    const cell = len / cols, rows = 2, thick = cell * rows;
+    ctx.save();
+    ctx.translate(x1, y1);
+    ctx.rotate(Math.atan2(dy, dx));
+    for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+            ctx.fillStyle = (r + c) % 2 === 0 ? '#f8fafc' : '#0f172a';
+            ctx.fillRect(c * cell, -thick / 2 + r * cell, cell + 0.5, cell + 0.5);
+        }
+    }
+    ctx.strokeStyle = '#0f172a'; ctx.lineWidth = 1.5;
+    ctx.strokeRect(0, -thick / 2, len, thick);
+    ctx.restore();
+}
+
+// Same gate the car's own lap counter uses (track.startCp — not necessarily
+// checkpoint 0; see the comment on it in engine.js), for whichever drawing
+// pass wants to show the finish line.
+function finishLineOf(t) {
+    if (!t || t.cpCount <= 0) return null;
+    const i = Math.min(t.startCp || 0, t.cpCount - 1) * CP_STRIDE;
+    const cp = t.cpF32;
+    return { x1: cp[i], y1: cp[i + 1], x2: cp[i + 2], y2: cp[i + 3] };
+}
+
 // --- No persistence, by design -----------------------------------------
 //
 // Nothing this app does survives a reload. Custom tracks, slider settings and
@@ -153,11 +189,14 @@ function wipeStorage() {
 // --- Main Application ---
 const app = {
     state: {
-        populationSize: 500, eliteClones: 30, targetLaps: 3, mutationRate: 0.30, hiddenLayers: 5, initialTTL: 750,
-        physics: { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.04, brakeStrength: 0.2 },
+        populationSize: 500, eliteClones: 30, targetLaps: 3, focusPct: 0.20, hiddenLayers: 5, initialTTL: 750,
+        physics: { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.02, brakeStrength: 0.05 },
         tracks: [], currentTrackIndex: 1, cars: [], generation: 1, isRunning: false, speedMultiplier: 1, hyperMode: false,
         stats: [], globalBest: null, bestTimes: { gen: null, all: null }, isEditing: false, trackToEdit: null,
-        bgCanvas: null, lapHistory: [], spectateCarId: null, aliveCount: 0
+        bgCanvas: null, lapHistory: [], spectateCarId: null, aliveCount: 0,
+        // Shared by both the normal view and the editor — one canvas, one
+        // pan/zoom state, so switching between them never surprises you.
+        view: { zoom: 1, panX: CANVAS_WIDTH / 2, panY: CANVAS_HEIGHT / 2 }
     },
 
     _initUICache: function() {
@@ -188,8 +227,105 @@ const app = {
         // Apply the pending Engine core label now that the element is cached
         if(ui.coreCount && Engine._pendingCoreLabel) ui.coreCount.innerHTML = Engine._pendingCoreLabel;
         // Click/tap a car to spectate it (independent of the editor's own
-        // pointer handlers, which only attach while editing).
+        // pointer handlers, which only attach while editing). Right-button
+        // drag pans instead, in both the normal view and the editor — it's
+        // deliberately a different button than the editor's own left-click
+        // point dragging, so the two gestures can never fight over the same
+        // click.
         ui.canvas.addEventListener('pointerdown', e => this.handleCanvasClick(e));
+        ui.canvas.addEventListener('pointermove', e => this.movePan(e));
+        ui.canvas.addEventListener('pointerup', e => this.endPan(e));
+        ui.canvas.addEventListener('pointercancel', e => this.endPan(e));
+        ui.canvas.addEventListener('contextmenu', e => e.preventDefault());
+        ui.canvas.addEventListener('wheel', e => {
+            e.preventDefault();
+            const p = this._toBackingPx(e);
+            this._zoomAt(p, Math.exp(-e.deltaY * 0.0015));
+        }, { passive: false });
+    },
+
+    // ---- pan / zoom -----------------------------------------------------
+    // The canvas backing store is always a fixed 1200x900 (CSS scales it to
+    // fit via object-contain) and everything already draws in that space, so
+    // zoom/pan is one extra transform applied once at the top of each draw
+    // pass rather than a change to any drawing code: screen = view * world,
+    // a uniform scale plus a translate, no rotation.
+    _viewMatrix: function() {
+        const v = this.state.view;
+        return { z: v.zoom, e: CANVAS_WIDTH / 2 - v.panX * v.zoom, f: CANVAS_HEIGHT / 2 - v.panY * v.zoom };
+    },
+
+    // CSS pixels (from a pointer event) -> canvas backing-store pixels. The
+    // one step every coordinate conversion below shares.
+    _toBackingPx: function(e) {
+        const r = ui.canvas.getBoundingClientRect();
+        const scale = Math.min(r.width / CANVAS_WIDTH, r.height / CANVAS_HEIGHT);
+        const offsetX = (r.width - CANVAS_WIDTH * scale) / 2, offsetY = (r.height - CANVAS_HEIGHT * scale) / 2;
+        return { x: (e.clientX - r.left - offsetX) / scale, y: (e.clientY - r.top - offsetY) / scale };
+    },
+
+    // Backing-store pixels -> world coordinates, inverting the view matrix.
+    // Every place that used to treat backing-store pixels AS world
+    // coordinates (before zoom/pan existed, the two were the same thing)
+    // calls this now.
+    screenToWorld: function(bx, by) {
+        const v = this._viewMatrix();
+        return { x: (bx - v.e) / v.z, y: (by - v.f) / v.z };
+    },
+
+    _zoomAt: function(backingPt, factor) {
+        const v = this.state.view;
+        const z = Math.max(1, Math.min(8, v.zoom * factor));
+        if(z === v.zoom) return;
+        const w = this.screenToWorld(backingPt.x, backingPt.y);
+        v.zoom = z;
+        // Keep the same world point under the cursor after the zoom changes.
+        v.panX = w.x - (backingPt.x - CANVAS_WIDTH / 2) / z;
+        v.panY = w.y - (backingPt.y - CANVAS_HEIGHT / 2) / z;
+        this._clampView();
+        this._needsDraw = true;
+    },
+
+    // Keeps the visible viewport inside the map instead of panning off into
+    // empty space beyond it. At zoom 1 (minimum) the two bounds coincide, so
+    // the centre is pinned to the canvas centre — exactly the old, un-zoomed
+    // behaviour.
+    _clampView: function() {
+        const v = this.state.view;
+        const halfW = CANVAS_WIDTH / (2 * v.zoom), halfH = CANVAS_HEIGHT / (2 * v.zoom);
+        v.panX = Math.max(halfW, Math.min(CANVAS_WIDTH - halfW, v.panX));
+        v.panY = Math.max(halfH, Math.min(CANVAS_HEIGHT - halfH, v.panY));
+    },
+
+    resetView: function() {
+        this.state.view.zoom = 1;
+        this.state.view.panX = CANVAS_WIDTH / 2;
+        this.state.view.panY = CANVAS_HEIGHT / 2;
+        this._needsDraw = true;
+    },
+
+    zoomStep: function(factor) {
+        this._zoomAt({ x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT / 2 }, factor);
+    },
+
+    _panState: null,
+    startPan: function(e) {
+        e.preventDefault();
+        ui.canvas.setPointerCapture(e.pointerId);
+        const p = this._toBackingPx(e);
+        this._panState = { pointerId: e.pointerId, startBX: p.x, startBY: p.y, panX0: this.state.view.panX, panY0: this.state.view.panY };
+    },
+    movePan: function(e) {
+        const ps = this._panState;
+        if(!ps || e.pointerId !== ps.pointerId) return;
+        const p = this._toBackingPx(e), v = this.state.view;
+        v.panX = ps.panX0 - (p.x - ps.startBX) / v.zoom;
+        v.panY = ps.panY0 - (p.y - ps.startBY) / v.zoom;
+        this._clampView();
+        this._needsDraw = true;
+    },
+    endPan: function(e) {
+        if(this._panState && e.pointerId === this._panState.pointerId) this._panState = null;
     },
 
     // Resolves which car telemetry/highlight follows: a manually-clicked car
@@ -228,13 +364,16 @@ const app = {
     },
 
     handleCanvasClick: function(e) {
+        if(e.button === 2) { this.startPan(e); return; }
+        if(e.button !== undefined && e.button !== 0) return;
         if (this.state.isEditing || this.state.hyperMode || !this.state.cars.length) return;
-        const rect = ui.canvas.getBoundingClientRect();
-        const scale = Math.min(rect.width / CANVAS_WIDTH, rect.height / CANVAS_HEIGHT);
-        const offsetX = (rect.width - CANVAS_WIDTH*scale) / 2, offsetY = (rect.height - CANVAS_HEIGHT*scale) / 2;
-        const x = (e.clientX - rect.left - offsetX) / scale, y = (e.clientY - rect.top - offsetY) / scale;
+        const p = this._toBackingPx(e);
+        const { x, y } = this.screenToWorld(p.x, p.y);
 
-        let closest = null, closestDist = 22; // hit radius, canvas units
+        // Hit radius in world units — the same 22 it always was at zoom=1,
+        // shrinking on screen as you zoom in, which is exactly what makes
+        // zooming in give more precise car selection.
+        let closest = null, closestDist = 22;
         for (const c of this.state.cars) {
             if (c.crashed) continue;
             const d = Math.hypot(c.x - x, c.y - y);
@@ -256,6 +395,7 @@ const app = {
             if(ui.coreCount && Engine._pendingCoreLabel) ui.coreCount.innerHTML = Engine._pendingCoreLabel;
             this.resetTracks();
             this.initChart();
+            this._updateStatsTable();
 
             this.loop();
         } catch (e) {
@@ -402,21 +542,29 @@ const app = {
             if(cars[i].fitness > best) best = cars[i].fitness;
         }
 
+        // Percentile snapshot for the improvement table — cheap next to
+        // breeding a whole generation, and this is the only place that ever
+        // sees every car's fitness at once.
+        const sorted = Array.from(fitness).sort((a, b) => b - a);
+        const n1 = Math.max(1, Math.round(sorted.length * 0.01));
+        const n10 = Math.max(1, Math.round(sorted.length * 0.10));
+        let s1 = 0; for(let i=0; i<n1; i++) s1 += sorted[i];
+        let s10 = 0; for(let i=0; i<n10; i++) s10 += sorted[i];
+        const top1 = s1 / n1, top10 = s10 / n10;
+
         const res = Engine.evolve(fitness, this.state.eliteClones, this.state.generation);
         this.state.globalBest = { fitness: res.globalBest };
 
-        this.state.stats.push({
-            gen: this.state.generation, best, avg: sum / cars.length,
+        const avg = sum / cars.length;
+        this._pushStat({
+            gen: this.state.generation, best, avg, top1, top10,
             time: this.state.bestTimes.gen ? this.state.bestTimes.gen.toFixed(2) : null
         });
-        // Unbounded here used to mean the chart re-fed and redrew its ENTIRE
-        // history on every single generation — cheap for the first few
-        // hundred, then a growing stall that made a long-running session look
-        // like it was "getting slower" the longer it was left going, even
-        // though the simulation itself never changed pace. Capped exactly
-        // like lapHistory below: a rolling window costs the same every time.
-        if(this.state.stats.length > 300) this.state.stats.shift();
         this.updateChart();
+
+        this._recent.push({ gen: this.state.generation, best, avg, top1, top10 });
+        if(this._recent.length > 101) this._recent.shift();
+        this._updateStatsTable();
 
         // Elite clones keep the green/lime livery so you can pick the carried-
         // forward brains out of the pack on screen.
@@ -424,6 +572,86 @@ const app = {
         this.state.generation++;
         this.state.bestTimes.gen = null;
         this.updateUI();
+    },
+
+    // The chart's backing store. Every generation is represented somewhere in
+    // here for the whole life of the run ("total", not a truncated recent
+    // window) while staying capped at _statCap entries: once full, each new
+    // point first tries to merge into the newest bucket, and once THAT bucket
+    // is as full as every other (n === _statRes), the whole array halves its
+    // resolution by merging consecutive pairs. That is the same trick a
+    // real-time monitoring graph uses — the far past gets coarser instead of
+    // disappearing — and it is what keeps this at a bounded, CONSTANT cost per
+    // generation no matter how long the run has been going. The flat 300-point
+    // window this replaced showed the same constant cost by throwing the old
+    // 3/4 of the run away outright; the unbounded array it replaced (every
+    // point, remapped in full on every single generation) was the actual O(n²)
+    // stall that made a long session feel like it was "getting slower".
+    _statCap: 300,
+    _statRes: 1,
+    _pushStat: function(entry) {
+        entry.n = 1;
+        const st = this.state.stats;
+        if(st.length > 0) {
+            const last = st[st.length - 1];
+            if(last.n < this._statRes) {
+                last.gen = entry.gen;
+                last.best = Math.max(last.best, entry.best);
+                last.avg = (last.avg * last.n + entry.avg) / (last.n + 1);
+                if(entry.top1 !== undefined) last.top1 = (last.top1 * last.n + entry.top1) / (last.n + 1);
+                if(entry.top10 !== undefined) last.top10 = (last.top10 * last.n + entry.top10) / (last.n + 1);
+                if(entry.time) last.time = entry.time;
+                last.n++;
+                return;
+            }
+        }
+        if(st.length >= this._statCap) {
+            const merged = [];
+            for(let i=0; i<st.length; i+=2) {
+                const a = st[i], b = st[i+1];
+                if(!b) { merged.push(a); continue; }
+                const an = a.n || 1, bn = b.n || 1;
+                merged.push({
+                    gen: b.gen, n: an + bn,
+                    best: Math.max(a.best, b.best),
+                    avg: (a.avg * an + b.avg * bn) / (an + bn),
+                    top1: a.top1 !== undefined ? (a.top1 * an + b.top1 * bn) / (an + bn) : undefined,
+                    top10: a.top10 !== undefined ? (a.top10 * an + b.top10 * bn) / (an + bn) : undefined,
+                    time: b.time || a.time
+                });
+            }
+            this.state.stats = merged;
+            this._statRes *= 2;
+        }
+        this.state.stats.push(entry);
+    },
+
+    // Raw, unaggregated per-generation snapshots — the last 101 only, so the
+    // "improvement over the last N generations" table can read an exact value
+    // N back for N up to 100. Deliberately separate from state.stats above:
+    // that one coarsens on purpose to stay bounded over a whole run, which
+    // would make "10 generations ago" a lie once it starts merging buckets.
+    _recent: [],
+
+    _updateStatsTable: function() {
+        const el = document.getElementById('stats-table-body');
+        if(!el) return;
+        const r = this._recent, n = r.length;
+        if(n < 2) { el.innerHTML = '<tr><td colspan="4" class="text-center text-slate-600 italic py-2">Not enough data yet</td></tr>'; return; }
+        const cur = r[n - 1];
+        const rows = [['Top 1%','top1'], ['Top 10%','top10'], ['Total','avg']];
+        const windows = [1, 10, 100];
+        el.innerHTML = rows.map(([label, key]) => {
+            const cells = windows.map(w => {
+                if(n <= w) return '<td class="text-slate-600 text-center">–</td>';
+                const past = r[n - 1 - w][key];
+                const delta = (cur[key] - past) / w;
+                const cls = delta > 0 ? 'text-emerald-400' : delta < 0 ? 'text-red-400' : 'text-slate-500';
+                const sign = delta > 0 ? '+' : '';
+                return `<td class="text-center ${cls} font-mono">${sign}${delta.toFixed(1)}</td>`;
+            }).join('');
+            return `<tr><td class="text-slate-400 pr-2">${label}</td>${cells}</tr>`;
+        }).join('');
     },
 
     // Fold one round of worker results back into the render records. In normal
@@ -559,21 +787,31 @@ const app = {
         ctx.strokeStyle='#e2e8f0'; ctx.lineWidth=4; strokeWalls(ctx, t);
         ctx.strokeStyle='#ef4444'; ctx.lineWidth=4; ctx.setLineDash([15,15]); strokeWalls(ctx, t); ctx.setLineDash([]);
 
-        if(t.cpCount > 0) {
-            const cp = t.cpF32;
-            ctx.strokeStyle='#ffffff'; ctx.lineWidth=6; ctx.beginPath(); ctx.moveTo(cp[0], cp[1]); ctx.lineTo(cp[2], cp[3]); ctx.stroke();
-            ctx.setLineDash([6,6]); ctx.strokeStyle='#000'; ctx.stroke(); ctx.setLineDash([]);
-        }
+        // The gate that actually completes a lap — track.startCp, not
+        // checkpoint 0 — so a track whose start was dragged away from where
+        // the generator happened to begin the centreline still shows the
+        // finish line where cars are actually scored on it.
+        const fl = finishLineOf(t);
+        if(fl) drawFinishLine(ctx, fl.x1, fl.y1, fl.x2, fl.y2);
     },
 
     draw: function() {
         const ctx = ui.ctx; // cached — no getElementById every frame
-        
-        if(this.state.isEditing && this.state.trackToEdit) { 
+
+        if(this.state.isEditing && this.state.trackToEdit) {
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.fillStyle = '#3a5a40'; ctx.fillRect(0,0,CANVAS_WIDTH,CANVAS_HEIGHT);
-            editor.draw(ctx); 
-            return; 
+            editor.draw(ctx);
+            return;
         }
+
+        // The one extra transform zoom/pan needs: everything below already
+        // draws in world (1200x900) coordinates, so composing it in here once
+        // is the whole change. Minimum zoom is 1 and pan is clamped to the
+        // map (_clampView), so at rest this is exactly the identity transform
+        // it always was.
+        const v = this._viewMatrix();
+        ctx.setTransform(v.z, 0, 0, v.z, v.e, v.f);
 
         if(this.state.bgCanvas) ctx.drawImage(this.state.bgCanvas, 0, 0);
 
@@ -589,17 +827,20 @@ const app = {
         // fillRects and a restore — roughly 3,000 canvas state changes a frame
         // at 500 cars, which was the bulk of the main thread's paint cost.
         // setTransform composes the rotation and position in one call; the
-        // sprite for each livery is drawn once and cached.
+        // sprite for each livery is drawn once and cached. Composed with the
+        // view matrix by hand (both are similarity transforms — no rotation
+        // in the view — so this is just the product of the two), since
+        // setTransform REPLACES the CTM rather than composing with it.
         const cars = this.state.cars;
         for(let i=0; i<cars.length; i++) {
             const c = cars[i];
             if(c.crashed) continue;
             const sprite = this._carSprite(c.color);
             const cs = Math.cos(c.angle), sn = Math.sin(c.angle);
-            ctx.setTransform(cs, sn, -sn, cs, c.x, c.y);
+            ctx.setTransform(v.z*cs, v.z*sn, -v.z*sn, v.z*cs, v.e + v.z*c.x, v.f + v.z*c.y);
             ctx.drawImage(sprite, -SPRITE_CX, -SPRITE_CY);
         }
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.setTransform(v.z, 0, 0, v.z, v.e, v.f);
 
         if(spectated && !spectated.crashed) {
             const c = spectated;
@@ -717,11 +958,13 @@ const app = {
     reset: function() {
         this.state.isRunning=false; this.state.generation=1; this.state.stats=[];
         this.state.bestTimes={gen:null,all:null}; this.state.lapHistory=[]; this.state.spectateCarId=null;
+        this._statRes = 1; this._recent = [];
         _ui_gen=-1; _ui_alive=-1; _ui_allBest=null;
         if(ui.lapHistoryM) ui.lapHistoryM.innerHTML = '<span class="text-[10px] text-slate-600 italic">No laps yet</span>';
-        this.initPopulation(); 
+        this.initPopulation();
         this.updateChart();
-        this.updateUI(); this.toggleRun(); this.toggleRun(); 
+        this._updateStatsTable();
+        this.updateUI(); this.toggleRun(); this.toggleRun();
     },
     
     // Physics is pure config — pushing it doesn't need the track rebuilding.
@@ -743,8 +986,8 @@ const app = {
     },
     updateConfig: function(k, v) {
         this.state[k] = parseFloat(v);
-        let id = 'val-'+(k==='populationSize'?'pop':k==='targetLaps'?'laps':k==='speedMultiplier'?'speed':k==='eliteClones'?'elite':k==='mutationRate'?'mut':k==='hiddenLayers'?'hidden':'ttl');
-        let d = v; if(k==='speedMultiplier') d+='x'; if(k==='mutationRate') d=Math.round(v*100)+'%';
+        let id = 'val-'+(k==='populationSize'?'pop':k==='targetLaps'?'laps':k==='speedMultiplier'?'speed':k==='eliteClones'?'elite':k==='focusPct'?'focus':k==='hiddenLayers'?'hidden':'ttl');
+        let d = v; if(k==='speedMultiplier') d+='x'; if(k==='focusPct') d=Math.round(v*100)+'%';
         const el = document.getElementById(id); if(el) el.innerText = d;
         // TTL, target laps and mutation rate are read inside the wasm step, so
         // they have to reach every instance. Population and hidden-layer size
@@ -761,7 +1004,7 @@ const app = {
         apply('cfg-speedMultiplier', st.speedMultiplier, 'val-speed', v => v+'x');
         apply('cfg-populationSize', st.populationSize, 'val-pop');
         apply('cfg-eliteClones', st.eliteClones, 'val-elite');
-        apply('cfg-mutationRate', st.mutationRate, 'val-mut', v => Math.round(v*100)+'%');
+        apply('cfg-focusPct', st.focusPct, 'val-focus', v => Math.round(v*100)+'%');
         apply('cfg-hiddenLayers', st.hiddenLayers, 'val-hidden');
         apply('cfg-initialTTL', st.initialTTL, 'val-ttl');
         apply('cfg-targetLaps', st.targetLaps, 'val-laps');
@@ -840,7 +1083,7 @@ const app = {
             generation: st.generation,
             settings: {
                 populationSize: st.populationSize, eliteClones: st.eliteClones,
-                targetLaps: st.targetLaps, mutationRate: st.mutationRate,
+                targetLaps: st.targetLaps, focusPct: st.focusPct,
                 hiddenLayers: st.hiddenLayers, initialTTL: st.initialTTL,
                 speedMultiplier: st.speedMultiplier,
                 physics: { ...st.physics }
@@ -872,7 +1115,7 @@ const app = {
             const st = this.state;
             st.isRunning = false;
             const cfg = j.settings || {};
-            for(const k of ['populationSize','eliteClones','targetLaps','mutationRate','hiddenLayers','initialTTL','speedMultiplier']) {
+            for(const k of ['populationSize','eliteClones','targetLaps','focusPct','hiddenLayers','initialTTL','speedMultiplier']) {
                 if(typeof cfg[k] === 'number') st[k] = cfg[k];
             }
             if(cfg.physics) for(const k in cfg.physics) {
@@ -890,12 +1133,20 @@ const app = {
             st.lapHistory = Array.isArray(j.lapHistory) ? j.lapHistory : [];
             st.globalBest = null;
             st.spectateCarId = null;
+            // A loaded session's coarse chart buckets don't carry the exact
+            // per-generation values the improvement table needs, so it starts
+            // empty and rebuilds itself from here rather than show something
+            // wrong. _statRes resets too: it'll re-derive naturally as new
+            // generations are pushed, self-correcting via the same cap logic
+            // even if that runs a little fine-grained for a while first.
+            this._statRes = 1; this._recent = [];
             _ui_gen = -1; _ui_alive = -1; _ui_allBest = null;
 
             this._resetCars();
             this._runToken++;
             this._needsDraw = true;
             this.updateChart();
+            this._updateStatsTable();
             this.updateLapHistory();
             this.updateUI();
             if(j.trackName && this.currentTrack && j.trackName !== this.currentTrack.name) {
@@ -1470,14 +1721,17 @@ const editor = {
             let radius = 60;
 
             if (this.selectedIndex === 'all') {
-                // If "all" is selected, hide the delete button
+                // If "all" is selected, hide the delete button and show the
+                // whole-track resize button instead.
                 if(document.getElementById('btn-del-point')) document.getElementById('btn-del-point').classList.add('hidden');
+                if(document.getElementById('btn-fit-map')) document.getElementById('btn-fit-map').classList.remove('hidden');
             } else {
                 // If a single point is selected, grab its specific data
                 const p = this.track.path[this.selectedIndex];
                 type = p.type || 'rounded';
                 radius = p.radius !== undefined ? p.radius : 60;
                 if(document.getElementById('btn-del-point')) document.getElementById('btn-del-point').classList.remove('hidden');
+                if(document.getElementById('btn-fit-map')) document.getElementById('btn-fit-map').classList.add('hidden');
             }
             
             document.getElementById('btn-pt-corner').className = type === 'corner' ? 'px-2 py-1 text-[10px] rounded bg-blue-600 text-white' : 'px-2 py-1 text-[10px] rounded text-slate-400 hover:bg-slate-700 transition-colors';
@@ -1490,7 +1744,48 @@ const editor = {
             pt.classList.add('hidden');
             pt.classList.remove('flex');
             if(document.getElementById('btn-del-point')) document.getElementById('btn-del-point').classList.add('hidden');
+            if(document.getElementById('btn-fit-map')) document.getElementById('btn-fit-map').classList.add('hidden');
         }
+    },
+
+    // "Select All" + this: scales and re-centres the whole path to fill the
+    // canvas, for a loop that was drawn too small (or too big) to use the map
+    // well. Radii and zones scale with it, and the start position/angle are
+    // re-derived from the new path rather than carried over, the same way
+    // finishDrawing() already does after a freehand stroke — the old ones
+    // belonged to a shape that no longer exists at this size or position.
+    fitToMap: function() {
+        const path = this.track.path;
+        if (!path || path.length < 3) return;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const p of path) {
+            if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+        }
+        const spanX = Math.max(1, maxX - minX), spanY = Math.max(1, maxY - minY);
+        // Leave room for the road's own width plus barriers either side, not
+        // just the bare centreline, so a fit track doesn't fit its LINE to
+        // the canvas and then run its asphalt off the edge.
+        const margin = Math.max(50, this.track.trackWidth * 1.5);
+        const scale = Math.min((CANVAS_WIDTH - margin * 2) / spanX, (CANVAS_HEIGHT - margin * 2) / spanY);
+        if (!isFinite(scale) || scale <= 0) return;
+        const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+        const tx = CANVAS_WIDTH / 2, ty = CANVAS_HEIGHT / 2;
+        for (const p of path) {
+            p.x = Math.round(tx + (p.x - cx) * scale);
+            p.y = Math.round(ty + (p.y - cy) * scale);
+            if (p.radius !== undefined) p.radius = Math.max(10, Math.round(p.radius * scale));
+        }
+        (this.track.zones || []).forEach(z => {
+            z.x = tx + (z.x - cx) * scale;
+            z.y = ty + (z.y - cy) * scale;
+            z.radius = Math.max(20, z.radius * scale);
+        });
+        const derived = generateTrackFromPath(this.track.id, this.track.name, path, this.track.trackWidth, null, null, [], this.autoOpts());
+        this.track.startPos = derived.startPos;
+        this.track.startAngle = derived.startAngle;
+        const angleEl = document.getElementById('edit-angle');
+        if (angleEl) angleEl.value = Math.round((derived.startAngle || 0) * (180 / Math.PI));
     },
 
     save: function() { 
@@ -1575,15 +1870,15 @@ const editor = {
         }
     },
 
-    getPos: function(e) { 
-        const r = document.getElementById('sim-canvas').getBoundingClientRect(); 
-        const scale = Math.min(r.width / CANVAS_WIDTH, r.height / CANVAS_HEIGHT);
-        const offsetX = (r.width - (CANVAS_WIDTH * scale)) / 2;
-        const offsetY = (r.height - (CANVAS_HEIGHT * scale)) / 2;
-        return { x: (e.clientX - r.left - offsetX) / scale, y: (e.clientY - r.top - offsetY) / scale }; 
+    getPos: function(e) {
+        const p = app._toBackingPx(e);
+        return app.screenToWorld(p.x, p.y);
     },
 
     onDown: function(e) {
+        // Right-button is pan (app-level, see startPan) in the editor too —
+        // never a new path point.
+        if (e.button === 2) return;
         const {x,y} = this.getPos(e);
 
         if (this.mode === 'draw') {
@@ -1652,6 +1947,12 @@ const editor = {
     },
 
     draw: function(ctx) {
+        // Same view transform the normal race view uses — zoom/pan is one
+        // shared state, so switching between racing and editing never resets
+        // what you were looking at.
+        const v = app._viewMatrix();
+        ctx.setTransform(v.z, 0, 0, v.z, v.e, v.f);
+
         const p = generateTrackFromPath(this.track.id, this.track.name, this.track.path, this.track.trackWidth, this.track.startPos, this.track.startAngle, this.track.zones, this.autoOpts());
         drawRoadSurface(ctx, p, '#343a40');
         // Light, not slate: the barrier now sits exactly on the edge of the
@@ -1672,6 +1973,10 @@ const editor = {
             }
             ctx.stroke();
         }
+
+        // Same finish line the race actually uses — see finishLineOf.
+        const fl = finishLineOf(p);
+        if(fl) drawFinishLine(ctx, fl.x1, fl.y1, fl.x2, fl.y2);
 
         p.zones.forEach(z => {
             ctx.beginPath(); ctx.arc(z.x, z.y, z.radius, 0, Math.PI*2);

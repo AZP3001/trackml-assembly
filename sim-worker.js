@@ -17,6 +17,7 @@ let popStart = 0;
 // A wasm memory can be detached and replaced when it grows, so views are
 // derived per use rather than cached.
 const f32 = (ptr, len) => new Float32Array(memory.buffer, ptr, len);
+const i32 = (ptr, len) => new Int32Array(memory.buffer, ptr, len);
 
 self.onmessage = async (e) => {
     const msg = e.data;
@@ -79,6 +80,12 @@ self.onmessage = async (e) => {
             ex.pop_init(popCount, popStart, msg.hidden, msg.seed);
             const stride = ex.brain_stride();
             f32(ex.brains_ptr(), popCount * stride).set(msg.brains.subarray(0, popCount * stride));
+            // Which of this slice's cars evolve() bred as focused clones, and
+            // the checkpoint window their reward is boosted inside. Bred and
+            // computed on the master; this worker never breeds, so it has no
+            // other way to know either one.
+            if (msg.focused) i32(ex.car_focused_ptr(), popCount).set(msg.focused);
+            ex.set_focus_window(msg.focusLo === undefined ? -1 : msg.focusLo, msg.focusHi === undefined ? -1 : msg.focusHi);
             ex.pop_reset();
             break;
         }
@@ -114,14 +121,20 @@ self.onmessage = async (e) => {
             } else {
                 buffer = src.slice();
             }
+            // Only the worker holding global car 0 has anything worth
+            // reporting here — car 0 mirrors the stash exactly whenever one
+            // exists, so this is evolve()'s only window onto where the
+            // all-time-best brain is currently slowest. A small, fixed-size
+            // copy (MAX_GATES floats) regardless of population size.
+            const gateRatio = popStart === 0 ? f32(ex.gate_ratio_ptr(), ex.max_gates()).slice() : null;
             // alive_count travels separately from the buffer: in hyper mode the
             // crashed flags never cross at all, so the main thread has no way to
             // count them itself.
             self.postMessage({
                 type: 'done', index, start: popStart, count: popCount,
                 maxLaps, allCrashed, alive: ex.alive_count(),
-                render: !!msg.wantRender, stride: ex.fitness_stride(), buffer
-            }, [buffer.buffer]);
+                render: !!msg.wantRender, stride: ex.fitness_stride(), buffer, gateRatio
+            }, gateRatio ? [buffer.buffer, gateRatio.buffer] : [buffer.buffer]);
             break;
         }
     }

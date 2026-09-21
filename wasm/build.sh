@@ -34,7 +34,7 @@ build() {
         -Wall -Wextra \
         -Wno-unused-parameter \
         -Wl,--no-entry \
-        -Wl,--initial-memory=4194304 \
+        -Wl,--initial-memory=16777216 \
         -Wl,-z,stack-size=262144 \
         -Wl,--strip-all \
         "$@" \
