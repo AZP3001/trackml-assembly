@@ -133,7 +133,14 @@ function train({ track, halfWidth, startPos, gens, pop = 100, ttl = 750, targetL
         };
         const ev = f32(w.ev_fitness_ptr(), pop);
         for (let i = 0; i < pop; i++) ev[i] = fb[i * S];
-        w.evolve(10, 1, gen);
+        // sigmaGen=gen and lapCompletions=3 (FEW_LAPS_THRESHOLD in sim.c)
+        // reproduce evolve()'s old single-generation-argument behaviour
+        // exactly: sigma decays from generation 1 with no settle wait, and
+        // the focus window aims at the slowest gate rather than the deadliest
+        // one. This file is about the scoring rule and pace, not about the
+        // settle-delay or failure-focus behaviour, which have their own
+        // dedicated coverage — see mutationsettle.mjs.
+        w.evolve(10, 1, gen, 3);
     }
     return { ...last, escapes, liveSamples, worstOvershoot, track: t };
 }

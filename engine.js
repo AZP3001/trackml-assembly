@@ -284,6 +284,7 @@ const Engine = {
         this._hasGlobalBest = false;
         this._globalBestFitness = -Infinity;
         this._lastGateRatio = null;
+        this._crashCountByWorker = [];
         // _rate is deliberately NOT cleared here: it describes the machine,
         // not the population, and a Reset would otherwise throw away the one
         // measurement that takes several generations to settle.
@@ -434,6 +435,12 @@ const Engine = {
         if (data.maxLaps > st.maxLaps) st.maxLaps = data.maxLaps;
         if (!data.allCrashed) st.allCrashed = false;
         if (data.gateRatio) this._lastGateRatio = data.gateRatio;
+        // Overwritten, not accumulated: each worker's array is already the
+        // running total of ITS crashes so far this generation (sim.c only
+        // resets it once per generation, at pop_reset), so the latest message
+        // from a given worker is already its correct cumulative count. evolve()
+        // sums across the per-worker entries once, at generation boundary.
+        if (data.crashCount) this._crashCountByWorker[data.index] = data.crashCount;
         st.rows.push(data);
         if (++st.completed === st.total) {
             this._runState = null;
@@ -450,8 +457,18 @@ const Engine = {
     // the telemetry evolve() needs to find the stash's weakest stretch. The
     // master itself never simulates a car, so it has no other way to see it.
     _lastGateRatio: null,
+    // One entry per worker, each that worker's own crash_count array (see
+    // sim.c) as of its last report. Unlike gate_ratio this is population-wide
+    // — every worker's every car, not one worker's car 0 — so evolve() sums
+    // ACROSS entries rather than taking the newest one.
+    _crashCountByWorker: [],
 
-    evolve: function(fitness, eliteClones, generation) {
+    // sigmaGen and lapCompletions are computed by the caller (app.evolve in
+    // script.js), not here: they both need the whole run's history (has a lap
+    // EVER completed, how many separate generations has it happened in), and
+    // this object only ever sees one generation at a time. See the comment on
+    // MUT_SIGMA_* and FEW_LAPS_THRESHOLD in sim.c for what each one controls.
+    evolve: function(fitness, eliteClones, sigmaGen, lapCompletions) {
         const ex = this.master.ex;
         const ev = this._f32(this.master, ex.ev_fitness_ptr(), ex.max_cars());
         let bestIdx = 0, bestFit = -Infinity;
@@ -470,7 +487,16 @@ const Engine = {
         if (this._lastGateRatio) {
             this._f32(this.master, ex.gate_ratio_ptr(), ex.max_gates()).set(this._lastGateRatio);
         }
-        ex.evolve(eliteClones, this._hasGlobalBest ? 1 : 0, generation | 0);
+        {
+            const maxGates = ex.max_gates();
+            const sum = this._i32(this.master, ex.crash_count_ptr(), maxGates);
+            sum.fill(0);
+            for (const wc of this._crashCountByWorker) {
+                if (!wc) continue;
+                for (let g = 0; g < maxGates; g++) sum[g] += wc[g];
+            }
+        }
+        ex.evolve(eliteClones, this._hasGlobalBest ? 1 : 0, sigmaGen | 0, lapCompletions | 0);
         // A generation boundary is the one moment the partition can move: every
         // worker is idle and about to be handed a fresh slice anyway, so
         // resizing them here costs nothing beyond the arithmetic.
@@ -613,6 +639,7 @@ const Engine = {
         this._hasGlobalBest = !!p.hasGlobalBest;
         this._globalBestFitness = typeof p.globalBestFitness === 'number' ? p.globalBestFitness : -Infinity;
         this._lastGateRatio = null;
+        this._crashCountByWorker = [];
 
         this._sliceUp();
         this._shipBrains();

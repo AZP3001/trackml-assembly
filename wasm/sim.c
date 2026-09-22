@@ -1507,6 +1507,22 @@ __attribute__((export_name("gate_ratio_ptr"))) i32 gate_ratio_ptr(void) { return
 __attribute__((export_name("max_gates"))) i32 max_gates(void) { return MAX_GATES; }
 static void reset_gate_ratio(void) { for (i32 g = 0; g < MAX_GATES; g++) gate_ratio[g] = -1.0f; }
 
+// How many cars, THIS GENERATION, died while heading for gate g — the other
+// half of what evolve() needs to aim the focus window, and the half
+// gate_ratio structurally cannot provide: a gate a car never reaches leaves
+// no ratio behind (it stays at its -1 reset value), so a corner the whole
+// population dies at is invisible to gate_ratio no matter how often it kills
+// them. This is population-wide (every worker's every car, not just car 0 —
+// there is no "the stash" worth mirroring yet in the phase this is for) and
+// summed across workers by engine.js before evolve() reads it, the same way
+// gate_ratio is refreshed into master memory first, just added instead of
+// copied. Reset with gate_ratio, once per generation.
+static i32 crash_count[MAX_GATES];
+__attribute__((export_name("crash_count_ptr"))) i32 crash_count_ptr(void) { return (i32)(unsigned long)crash_count; }
+static void reset_crash_count(void) { for (i32 g = 0; g < MAX_GATES; g++) crash_count[g] = 0; }
+// recordCrash() itself lives further down, by run() — it reads car_nextCP,
+// which is not declared until the population arrays below.
+
 static inline i32 inFocusWindow(i32 g) {
     if (focus_lo < 0) return 0;
     if (focus_lo <= focus_hi) return g >= focus_lo && g <= focus_hi;
@@ -1619,6 +1635,7 @@ i32 pop_init(i32 count, i32 id_offset, i32 hidden, u32 seed) {
     for (i32 i = 0; i < pop_n; i++) { reset_car(i); car_focused[i] = 0; }
     rebuild_active();
     reset_gate_ratio();
+    reset_crash_count();
     focus_lo = -1; focus_hi = -1;
     return pop_n;
 }
@@ -1649,8 +1666,10 @@ void pop_reset(void) {
     rebuild_active();
     // A fresh run per generation, so last generation's per-gate pace can't
     // leak into this one's — car 0 might crash early and never overwrite the
-    // entries a slower or luckier previous run left behind.
+    // entries a slower or luckier previous run left behind. crash_count needs
+    // the same fresh start, for the same reason.
     reset_gate_ratio();
+    reset_crash_count();
 }
 
 // ---------------------------------------------------------------------------
@@ -2000,16 +2019,31 @@ static void updateCar(i32 i) {
 
     float prevX = car_x[i], prevY = car_y[i];
     car_x[i] += vx; car_y[i] += vy;
-    // Going fast pays — that is the whole point of the project — but only
-    // while the car is actually getting somewhere. Paid unconditionally, this
-    // term also rewarded time spent alive, so a car circling a wide piece of
-    // track banked fitness forever without passing a single gate. Gating it on
-    // having reached a gate recently keeps every bit of the incentive to be
-    // quick (a fast car is always inside the window) while making the
-    // go-nowhere loop worth nothing.
-    if (car_frames[i] - car_lastCpFrame[i] < PROGRESS_WINDOW_FRAMES) {
+    // Being alive and still making progress pays — but flatly, not by how
+    // fast. This used to scale with (speed/maxSpeed), which reads as
+    // "rewarding going fast" but actually rewards "never slowing down for any
+    // reason" — including the reason that's correct racing technique: braking
+    // INTO a corner to carry more speed OUT of it. Every frame that trade
+    // costs a bit of this term even when it wins the corner, so evolution had
+    // a standing bias against the brake pedal that had nothing to do with lap
+    // time. The checkpoint and lap bonuses below are the term that actually
+    // measures lap time — real elapsed frames to get somewhere, brakes and
+    // all — so they are where "fast" should be judged, and this one has no
+    // business re-judging it a second, cruder way.
+    //
+    // What this term is actually FOR is the gating around it, not its size:
+    // paid unconditionally, it used to reward time spent alive full stop, so
+    // a car circling a wide piece of track banked fitness forever without
+    // passing a single gate. Gating it on having reached a gate recently is
+    // what makes the go-nowhere loop worth nothing (a moving car is always
+    // inside the window; a looping one falls out of it after
+    // PROGRESS_WINDOW_FRAMES and is worth nothing per frame from then on) —
+    // that gate does the whole job by itself, whether the per-frame amount
+    // tracks speed or not. Still requires actual motion (STOPPED_SPEED), so a
+    // parked car earns nothing just for sitting inside the window.
+    if (car_frames[i] - car_lastCpFrame[i] < PROGRESS_WINDOW_FRAMES && speed > STOPPED_SPEED) {
         float progressMult = (car_focused[i] && inFocusWindow(car_nextCP[i])) ? FOCUS_BOOST : 1.0f;
-        car_fitness[i] += (speed / cfg_maxSpeed) * 0.1f * progressMult;
+        car_fitness[i] += 0.1f * progressMult;
     }
 
     if (car_x[i] < -100.0f || car_x[i] > 1300.0f || car_y[i] < -100.0f || car_y[i] > 1000.0f) { car_crashed[i] = 1; return; }
@@ -2371,6 +2405,15 @@ static i32 last_car_steps = 0;
 __attribute__((export_name("car_steps")))
 i32 car_steps(void) { return last_car_steps; }
 
+// See crash_count above — this is where every car's crash becomes visible
+// exactly once, whichever of updateCar's several crash sites caused it, so it
+// is the one place that needs to know about all of them rather than each of
+// them needing to know about this.
+static inline void recordCrash(i32 i) {
+    i32 g = car_nextCP[i];
+    if (g >= 0 && g < MAX_GATES) crash_count[g]++;
+}
+
 __attribute__((export_name("run")))
 i32 run(i32 iters) {
     i32 maxLaps = 0;
@@ -2388,7 +2431,7 @@ i32 run(i32 iters) {
             i32 c = active[a];
             updateCar(c);
             if (car_laps[c] > maxLaps) maxLaps = car_laps[c];
-            if (!car_crashed[c]) active[keep++] = c;
+            if (car_crashed[c]) recordCrash(c); else active[keep++] = c;
         }
         active_n = keep;
         if (maxLaps >= cfg_targetLaps) break;
@@ -2509,6 +2552,23 @@ static inline float gauss01(void) { return rnd11() + rnd11() + rnd11(); }
 // it keeps kicking a working solution apart instead of refining it. This
 // decays from START toward FLOOR with a half-life of about TAU generations,
 // so early training explores and late training polishes.
+//
+// "How long the run has been going" is NOT the raw generation counter —
+// that's `sigmaGen` below, not `generation`, and the two can differ a lot.
+// A track the population hasn't finished even once yet has learned nothing
+// this curve should be polishing, and the raw generation count decays sigma
+// toward FLOOR regardless: a hard track can sit at zero laps for hundreds of
+// generations, by which point exploration has been ground down to almost
+// nothing exactly when the population most needs to keep trying new things
+// to break through. sigmaGen instead holds at 0 (so sigma sits at
+// MUT_SIGMA_START, full exploration) until the population has completed a
+// lap for the first time AND then settled for a further stretch of
+// generations past that — engine.js/script.js track both and do the actual
+// arithmetic, since only they see every generation's result across the whole
+// run; this file only ever sees whatever they hand it. Once past that point
+// sigmaGen counts up from 0 the same way the old raw generation count did, so
+// a run that finds its feet quickly anneals on close to the same schedule as
+// before.
 #define MUT_SIGMA_START  0.5f
 #define MUT_SIGMA_FLOOR  0.05f
 #define MUT_SIGMA_TAU    150.0f
@@ -2532,8 +2592,17 @@ static inline float gauss01(void) { return rnd11() + rnd11() + rnd11(); }
 // random 30% of them with the same tiny nudge land in essentially the same
 // place, so the extra knob was a second control for the one job sigma
 // already does alone. Dropping it also means one less setting to tune.
+// A run "reliably" finishes once it has completed a lap this many separate
+// generations, not just once — one lucky lap is easy to get from a fluke
+// line through one easy corner and says nothing about the rest of the track.
+// Below this, evolve() points the focus window at wherever cars are actually
+// dying (crash_count); at and above it, survival is no longer the
+// bottleneck and it goes back to pointing at wherever the current best is
+// slowest (gate_ratio) — see the branch below.
+#define FEW_LAPS_THRESHOLD 3
+
 __attribute__((export_name("evolve")))
-void evolve(i32 eliteClones, i32 hasGlobalBest, i32 generation) {
+void evolve(i32 eliteClones, i32 hasGlobalBest, i32 sigmaGen, i32 lapCompletions) {
     sort_by_fitness();
     i32 stride = brain_stride_v;
     i32 h = cfg_hidden;
@@ -2542,16 +2611,37 @@ void evolve(i32 eliteClones, i32 hasGlobalBest, i32 generation) {
 
     for (i32 c = 0; c < pop_n; c++) car_focused[c] = 0;
 
-    // Where the stash is currently weakest, so a slice of the population can
-    // spend its mutations there instead of spread evenly over a lap that
-    // mostly already works. gate_ratio is car 0's per-gate pace THIS
-    // generation, refreshed from worker 0 by engine.js right before this
-    // call — car 0 mirrors the stash exactly whenever there is one, since the
-    // track and the starting state are both deterministic.
-    i32 worst = -1; float worstRatio = 1.0e30f;
+    // Where to aim the focus window — one of two different questions
+    // depending on how far the run has actually gotten.
+    //
+    // Below FEW_LAPS_THRESHOLD: "where does it keep dying?" gate_ratio
+    // cannot answer this — a gate the population never reaches leaves no
+    // ratio behind at all, so the corner actually killing every run is
+    // invisible to it no matter how lethal it is. crash_count answers the
+    // right question instead: population-wide (every car that crashed this
+    // generation, not just car 0), summed across every worker by engine.js
+    // and written into this instance's copy right before this call, exactly
+    // like gate_ratio is — just added instead of copied, since this one has
+    // no single car worth mirroring.
+    //
+    // At or above FEW_LAPS_THRESHOLD: survival is no longer the problem, so
+    // this goes back to the original question — where is the current best
+    // slowest? — using car 0's per-gate pace this generation (gate_ratio),
+    // refreshed from worker 0 the same way. Car 0 mirrors the stash exactly
+    // whenever there is one, since the track and the starting state are both
+    // deterministic.
+    i32 worst = -1;
     i32 gateLimit = mini(tk_cp_n, MAX_GATES);
-    for (i32 g = 0; g < gateLimit; g++) {
-        if (gate_ratio[g] >= 0.0f && gate_ratio[g] < worstRatio) { worstRatio = gate_ratio[g]; worst = g; }
+    if (lapCompletions < FEW_LAPS_THRESHOLD) {
+        i32 worstCount = 0;
+        for (i32 g = 0; g < gateLimit; g++) {
+            if (crash_count[g] > worstCount) { worstCount = crash_count[g]; worst = g; }
+        }
+    } else {
+        float worstRatio = 1.0e30f;
+        for (i32 g = 0; g < gateLimit; g++) {
+            if (gate_ratio[g] >= 0.0f && gate_ratio[g] < worstRatio) { worstRatio = gate_ratio[g]; worst = g; }
+        }
     }
     focus_lo = -1; focus_hi = -1;
     if (hasGlobalBest && worst >= 0 && tk_cp_n > 2) {
@@ -2583,7 +2673,7 @@ void evolve(i32 eliteClones, i32 hasGlobalBest, i32 generation) {
     }
 
     float sigma = MUT_SIGMA_FLOOR + (MUT_SIGMA_START - MUT_SIGMA_FLOOR)
-                  * (float)exp_d(-(double)(generation < 0 ? 0 : generation) / (double)MUT_SIGMA_TAU);
+                  * (float)exp_d(-(double)(sigmaGen < 0 ? 0 : sigmaGen) / (double)MUT_SIGMA_TAU);
 
     // The focused sub-population: mutated clones of the stash, same sigma as
     // everything else, flagged so updateCar can boost their reward through

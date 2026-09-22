@@ -134,14 +134,21 @@ self.onmessage = async (e) => {
             // all-time-best brain is currently slowest. A small, fixed-size
             // copy (MAX_GATES floats) regardless of population size.
             const gateRatio = popStart === 0 ? f32(ex.gate_ratio_ptr(), ex.max_gates()).slice() : null;
+            // Unlike gateRatio, every worker sends this one — it's where THIS
+            // SLICE's cars died this generation, and the master wants the sum
+            // over every slice, not just one car's. Still small and fixed-size
+            // (MAX_GATES ints) regardless of population.
+            const crashCount = i32(ex.crash_count_ptr(), ex.max_gates()).slice();
             // alive_count travels separately from the buffer: in hyper mode the
             // crashed flags never cross at all, so the main thread has no way to
             // count them itself.
+            const transfer = [buffer.buffer, crashCount.buffer];
+            if (gateRatio) transfer.push(gateRatio.buffer);
             self.postMessage({
                 type: 'done', index, start: popStart, count: popCount,
-                maxLaps, allCrashed, alive: ex.alive_count(), busyMs, carSteps,
+                maxLaps, allCrashed, alive: ex.alive_count(), busyMs, carSteps, crashCount,
                 render: !!msg.wantRender, stride: ex.fitness_stride(), buffer, gateRatio
-            }, gateRatio ? [buffer.buffer, gateRatio.buffer] : [buffer.buffer]);
+            }, transfer);
             break;
         }
     }

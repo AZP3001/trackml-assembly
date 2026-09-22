@@ -102,6 +102,18 @@ jobs:
           node tools/carphysics.mjs wasm/sim.wasm
           node tools/carphysics.mjs wasm/sim-simd.wasm
 
+      # Mutation sigma follows sigmaGen against the exp(-sigmaGen/TAU) curve
+      # in sim.c, evolve()'s focus window aims at crash_count (where the
+      # population is dying) below FEW_LAPS_THRESHOLD completed-lap
+      # generations and at gate_ratio (the slowest reached gate) at or above
+      # it, and the per-frame progress reward is flat rather than
+      # speed-proportional — a car that brakes partway through the window
+      # scores exactly the same as one that never lifts.
+      - name: Evolution tuning (mutation settle, focus targeting, braking)
+        run: |
+          node tools/mutationsettle.mjs wasm/sim.wasm
+          node tools/mutationsettle.mjs wasm/sim-simd.wasm
+
       # The sidebar version number ("V21.9 · build ...") is computed from git
       # history in deploy.yml, never typed by hand — this proves the formula
       # is sound and stays monotonic walking the branch forward.

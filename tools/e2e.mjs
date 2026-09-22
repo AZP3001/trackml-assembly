@@ -127,6 +127,36 @@ check(afterGen.gen > genStart, 'generation advanced', `gen ${genStart} -> ${afte
 check(afterGen.stats > 0 && Number.isFinite(afterGen.best), 'fitness recorded', `best=${Math.round(afterGen.best)}`);
 check(afterGen.cars === boot.cars, 'population size held', `${afterGen.cars} cars`);
 
+// The mutation-settle/focus-mode bookkeeping (see script.js: app.evolve) ran
+// at least once as part of the generation above with no page error, which is
+// most of what matters — a wrong argument order into the new 4-arg
+// Engine.evolve/ex.evolve would throw or silently misbehave, and the whole
+// suite runs with page-error capture on. This adds the structural check that
+// bare "no errors" can't: the fields exist, have sane types, and agree with
+// each other and with whether a lap has actually been recorded yet — not
+// whether one specifically HAS on this random population within one
+// generation, which is exactly the kind of thing that's fine on one seed and
+// flaky on the next.
+const settle = await page.evaluate(() => ({
+    firstLapGen: app._firstLapGen,
+    lapCompletionCount: app._lapCompletionCount,
+    settleGenerations: app.SETTLE_GENERATIONS,
+    bestLapEver: app.state.bestTimes.all
+}));
+check(settle.firstLapGen === null || (Number.isInteger(settle.firstLapGen) && settle.firstLapGen >= 1),
+    'firstLapGen is null or a real generation number', `firstLapGen=${settle.firstLapGen}`);
+check(Number.isInteger(settle.lapCompletionCount) && settle.lapCompletionCount >= 0,
+    'lapCompletionCount is a non-negative integer', `lapCompletionCount=${settle.lapCompletionCount}`);
+check(Number.isInteger(settle.settleGenerations) && settle.settleGenerations > 0,
+    'SETTLE_GENERATIONS is configured', `${settle.settleGenerations}`);
+// If a lap has ever been recorded, the bookkeeping MUST agree it has —
+// firstLapGen set, count at least 1 — rather than the display (bestTimes)
+// and the mutation-schedule tracking (firstLapGen) disagreeing about
+// whether this run has ever actually finished a lap.
+check(!settle.bestLapEver || (settle.firstLapGen !== null && settle.lapCompletionCount >= 1),
+    'if a lap time is on record, the settle tracking agrees a lap happened',
+    `bestLapEver=${settle.bestLapEver}, firstLapGen=${settle.firstLapGen}, count=${settle.lapCompletionCount}`);
+
 // --- hyper mode ---------------------------------------------------------
 // Different code path: no render rows cross the boundary, only fitness.
 const beforeHyper = await page.evaluate(() => { app.toggleHyper(); return app.state.generation; });

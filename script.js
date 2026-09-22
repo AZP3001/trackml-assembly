@@ -844,6 +844,40 @@ const app = {
     // time was garbage created at exactly the rate that hurts most.
     _fitBuf: null,
     _sortBuf: null,
+
+    // ---- mutation annealing: don't start the clock until it's settled ----
+    // sim.c's mutation-sigma curve anneals from wide exploration toward fine
+    // polishing over MUT_SIGMA_TAU generations — but counted from the raw
+    // generation number, a hard track that hasn't completed a single lap by
+    // generation 300 gets a sigma ground down to almost nothing anyway, right
+    // when it most needs to keep trying new things. `sigmaGen`, computed
+    // here, is what actually drives that curve instead (see the comment on
+    // MUT_SIGMA_* in sim.c): it holds at 0 — full exploration — until the
+    // population completes a lap for the first time, waits a further
+    // SETTLE_GENERATIONS past that so an early fluke lap doesn't start the
+    // clock on its own, and only then counts up the way the raw generation
+    // number used to.
+    //
+    // 15 splits the difference of "10 or 20" — enough generations that one
+    // lucky lap from a not-yet-reliable population doesn't immediately start
+    // shrinking the mutations that got it there, short enough that a
+    // genuinely capable population isn't left exploring far longer than it
+    // needs to.
+    SETTLE_GENERATIONS: 15,
+    // Generation of the first lap this run ever completed, or null before
+    // that happens. Reset alongside `state.generation` everywhere that resets
+    // to 1 — see reset(), loadBrain(), switchTrack() — and re-derived from
+    // the loaded run's own history on loadSession().
+    _firstLapGen: null,
+    // How many SEPARATE generations have completed at least one lap, not how
+    // many laps in total — also what decides evolve()'s focus target in
+    // sim.c (see FEW_LAPS_THRESHOLD there): below it, the focus window aims
+    // at wherever the population is actually dying; at and above it, survival
+    // is no longer the bottleneck and it goes back to aiming at wherever the
+    // current best is slowest. One lucky lap says nothing about the rest of
+    // the track, which is exactly why this counts generations, not laps.
+    _lapCompletionCount: 0,
+
     evolve: function() {
         if(this.state.cars.length === 0) return;
         const cars = this.state.cars, n = cars.length;
@@ -852,13 +886,24 @@ const app = {
             this._sortBuf = new Float32Array(n);
         }
         const fitness = this._fitBuf;
-        let best = -Infinity, sum = 0;
+        let best = -Infinity, sum = 0, maxLapsThisGen = 0;
         for(let i=0; i<n; i++) {
             const f = cars[i].fitness;
             fitness[i] = f;
             sum += f;
             if(f > best) best = f;
+            if(cars[i].completedLaps > maxLapsThisGen) maxLapsThisGen = cars[i].completedLaps;
         }
+        // Read from state.cars rather than from whatever run() just finished,
+        // so this works identically whether evolve() got here through the
+        // normal run loop or through the "Skip Gen" button, which calls
+        // straight in without a fresh run() behind it.
+        if(maxLapsThisGen >= 1) {
+            if(this._firstLapGen === null) this._firstLapGen = this.state.generation;
+            this._lapCompletionCount++;
+        }
+        const sigmaGen = this._firstLapGen === null ? 0
+            : Math.max(0, this.state.generation - this._firstLapGen - this.SETTLE_GENERATIONS);
 
         // Percentile snapshot for the improvement table — cheap next to
         // breeding a whole generation, and this is the only place that ever
@@ -875,7 +920,7 @@ const app = {
         let s10 = 0; for(let i=0; i<n10; i++) s10 += sorted[n - 1 - i];
         const top1 = s1 / n1, top10 = s10 / n10;
 
-        const res = Engine.evolve(fitness, this.state.eliteClones, this.state.generation);
+        const res = Engine.evolve(fitness, this.state.eliteClones, sigmaGen, this._lapCompletionCount);
         this.state.globalBest = { fitness: res.globalBest };
 
         const avg = sum / cars.length;
@@ -1341,6 +1386,7 @@ const app = {
         this.state.isRunning=false; this.state.generation=1; this.state.stats=[];
         this.state.bestTimes={gen:null,all:null}; this.state.lapHistory=[]; this.state.spectateCarId=null;
         this._statRes = 1; this._recent = [];
+        this._firstLapGen = null; this._lapCompletionCount = 0;
         _ui_gen=-1; _ui_alive=-1; _ui_allBest=null;
         if(ui.lapHistoryM) ui.lapHistoryM.innerHTML = '<span class="text-[10px] text-slate-600 italic">No laps yet</span>';
         this.initPopulation();
@@ -1515,6 +1561,25 @@ const app = {
             st.lapHistory = Array.isArray(j.lapHistory) ? j.lapHistory : [];
             st.globalBest = null;
             st.spectateCarId = null;
+            // Neither firstLapGen nor lapCompletionCount travels in the file
+            // (they're bookkeeping, not something worth a session-format
+            // field), so they're re-derived from whether a lap time was ever
+            // recorded. A session that has one has clearly been past the
+            // settle window for a while — setting firstLapGen to 1 makes the
+            // sigmaGen math (generation - firstLapGen - SETTLE_GENERATIONS)
+            // land wherever a run resumed at this generation naturally would,
+            // rather than restarting the settle wait on a resume. 3 mirrors
+            // FEW_LAPS_THRESHOLD in sim.c, so evolve() also picks up in
+            // slowest-bit focus mode rather than re-treating a mature run as
+            // still finding its feet. A session with no recorded lap gets the
+            // same fresh start a new run would.
+            if (st.bestTimes && st.bestTimes.all) {
+                this._firstLapGen = 1;
+                this._lapCompletionCount = 3;
+            } else {
+                this._firstLapGen = null;
+                this._lapCompletionCount = 0;
+            }
             // A loaded session's coarse chart buckets don't carry the exact
             // per-generation values the improvement table needs, so it starts
             // empty and rebuilds itself from here rather than show something
@@ -1620,6 +1685,7 @@ const app = {
             }
             this.state.isRunning=false; this.state.generation=1; this.state.stats=[];
             this.state.bestTimes={gen:null,all:null}; this.state.lapHistory=[]; this.state.spectateCarId=null;
+            this._firstLapGen = null; this._lapCompletionCount = 0;
             _ui_gen=-1; _ui_alive=-1; _ui_allBest=null;
             this.updateChart();
             this.initPopulation(json);
@@ -1652,6 +1718,10 @@ const app = {
     switchTrack: function(i) {
         i = parseInt(i); if (i < 0 || i >= this.state.tracks.length) i = 0;
         this.state.currentTrackIndex = i; this.state.isRunning = false; this.state.generation = 1; this.state.globalBest = null; this.state.stats = []; this.state.spectateCarId = null; this.updateChart();
+        // A different track means a different question of "has this been
+        // lapped yet" — the whole point of settling the mutation-rate decay
+        // on that is that it's per-TRACK, not per-run in the abstract.
+        this._firstLapGen = null; this._lapCompletionCount = 0;
         this._runToken++; this._needsDraw = true;
         const sel = document.getElementById('track-dropdown'); if(sel) sel.value = i;
         const t = this.state.tracks[i];

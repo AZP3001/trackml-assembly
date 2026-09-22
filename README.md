@@ -121,7 +121,7 @@ either way; only where the handle starts differs.
 ### AI & Evolutionary Parameters
 * **Pop Size** (default 500, up to 2000; **150** on mobile)**:** The number of agents generated per generation.
 * **Elite Clones** (default 30; **15** on mobile)**:** Number of top-performing agents preserved exactly for the next generation (prevents regression). Fewer than a handful and a generation can occasionally lose ground it had already made — around 30 is enough that the population doesn't "forget" a solution it found. It tracks the population rather than being an absolute: a sixth of a 150-car field is the same share of it that 30 is of 500.
-* **Focus %** (default 20%)**:** Fraction of the population spent each generation as mutated clones of the current best, with their reward specifically boosted through whichever stretch of track that brain is currently slowest on (roughly ±1 second either side). Going fast where it's *already* near top speed has little room left to improve; the slow stretch is where the gains are. This is what stops a run getting stuck on one badly-taken corner instead of generally improving.
+* **Focus %** (default 20%)**:** Fraction of the population spent each generation as mutated clones of the current best, with their reward specifically boosted through whichever stretch of track needs it most (roughly ±1 second either side). *Which* stretch depends on how the run is going: until the population has finished a lap in several separate generations, that's wherever cars are actually dying — one corner killing every run over and over is a far bigger problem than a corner it already gets through a bit slowly, and the old version, which only ever looked at gates the current best had actually reached, couldn't see a corner it never got past at all. Once finishing is no longer the bottleneck, it goes back to targeting the slowest stretch, same as before — going fast where it's *already* near top speed has little room left to improve.
 * **Hidden Layers** (default 5; **4** on mobile)**:** Adjust the complexity of the AI's "brain" by changing the number of internal neurons. The one fewer on mobile is not a rounding-down — the hidden layer is evaluated four units at a time on the SIMD build, so five units cost two passes and four cost one.
 * **Initial TTL (Time-To-Live):** A countdown for each agent, **reset in full every time it reaches a checkpoint**. It used to top the clock up by 150 frames and clamp it to 600, which quietly made the slider a lie — set it to 10,000 and the very first gate cut the car back to 600.
 * **Target Laps** (default 3; **2** on mobile)**:** Defines the goalpost for a successful generation before moving to the next stage of evolution.
@@ -142,6 +142,15 @@ Once that curve already controls how big a mutation is, gating *whether* a weigh
 coin flip was a second knob doing overlapping work — dropping it is one less setting to tune, not a
 missing feature.
 
+That shrinking curve doesn't start counting from generation 1 any more. It used to, which meant a
+genuinely hard track — one the population hadn't finished even once after hundreds of generations —
+had its mutations ground down toward fine-polishing size anyway, right when it most needed to keep
+trying new things to break through at all. Now the clock doesn't start until the population completes
+a lap for the first time, and then waits a further ~15 generations past that before it starts
+counting down, so one lucky early lap doesn't immediately start shrinking the exploration that found
+it. A track that clicks quickly anneals on close to the same schedule as before; a hard one keeps
+exploring for as long as it actually takes.
+
 Every setting's slider is centred on its own default — nudge it either direction from there rather
 than starting near one end of the range.
 
@@ -151,16 +160,17 @@ than starting near one end of the range.
 * **Turn Speed** (default 0.02)**:** How quickly the cars can turn — but only up to what grip allows. Below about 3 px/frame of speed a car turns at full Turn Speed; past that, available turn rate falls off roughly as `3 / speed`, the same tradeoff a real driver feels: carrying too much speed into a corner costs you the turn, so the fast line is to slow down first, not to out-steer the corner. A car with essentially no speed gets no turn authority at all — turning the wheel does nothing until it's rolling, just like a parked car.
 * **Brake Strength** (default 0.05)**:** How hard the brake pedal bites when the AI's throttle output goes negative. Braking now scales with how hard it's pressed — a throttle of -0.05 barely touches the speedometer, -1.0 hauls the car down hard — rather than the old behaviour, where ANY negative throttle snapped speed down by the same flat 5% regardless of how lightly it was pressed, so brakes looked "instant" no matter what the AI actually asked for.
 * **No momentum, no race.** A car that isn't moving is eliminated on the spot — whether it never commanded throttle at all or braked to a standstill mid-track. Only speed counts; spinning the heading on the spot isn't momentum (and a stopped car can't steer anyway, so it has no way back out of that state). There's a short grace window at the start line so a car gets a chance to launch. This is worth real time: with 500 random brains, generation 1 used to spend most of itself simulating cars parked on the line until their TTL expired — killing them immediately cuts the generation's live car-frames by about 73% and runs it roughly 2.8x faster.
+* **Braking is never punished on its own.** Being alive and making recent progress pays a flat reward every frame — it used to scale with how fast the car happened to be going that instant, which sounds like rewarding speed but actually rewards never lifting off the throttle for any reason, including the correct one: braking into a corner to carry more speed out of it. The AI is free to trade a slower entry for a faster exit whenever that produces the better actual lap time, because it's *actual lap time* — real elapsed frames to the next gate and to the finish — that the checkpoint and lap bonuses reward, not the speedometer reading at any given instant.
 * Lateral grip (the friction that keeps a car's velocity tracking its heading instead of drifting sideways) used to be a slider here too. It's fixed internally now: its usable range only ever canceled 80-99% of sideways slip every frame, so the two ends of that slider left a car in the same place after a couple of frames. Removed rather than kept as a knob that did effectively nothing.
 
 ### Simulation Control
 * **Simulation Speed:** Adjust the simulation speed.
 * **Hyper Mode:** Simulates as fast as your PC allows, and draws nothing at all while it does.
 
-The canvas repaints at most 30 times a second (20 on a phone), and not at all when nothing has
-changed — the simulation still steps on every animation frame, only the painting is throttled. Cars
-are blitted from a cached sprite per livery instead of half a dozen canvas state changes each, which
-at 500 cars was most of the main thread's paint cost.
+The canvas repaints at most 60 times a second by default (a button next to the zoom controls drops it
+to 30), and not at all when nothing has changed — the simulation still steps on every animation
+frame, only the painting is throttled. Cars are blitted from a cached sprite per livery instead of
+half a dozen canvas state changes each, which at 500 cars was most of the main thread's paint cost.
 
 On a phone, how many pixels that paint covers is decided at load rather than fixed. Everything draws
 in a 1200x900 world and always will, and on a desktop that is still exactly what gets rasterised —
