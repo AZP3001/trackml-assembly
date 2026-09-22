@@ -47,7 +47,7 @@ That produces two modules and no JavaScript glue at all:
 
 | file | size | notes |
 | --- | --- | --- |
-| `wasm/sim.wasm` | ~46 KB | scalar |
+| `wasm/sim.wasm` | ~49 KB | scalar |
 | `wasm/sim-simd.wasm` | ~53 KB | adds 128-bit SIMD (`-msimd128`) |
 
 `engine.js` probes the browser for SIMD support and loads whichever it can run. There is no libc in
@@ -55,9 +55,43 @@ the build, so `sin`, `cos`, `atan2`, `tanh`, `acos` and `exp` are implemented in
 are checked against the `Math.*` they replace over millions of samples by `tools/mathtest.mjs`; run
 `npm test` for that and the rest of the suite.
 
+Each module reserves **6 MB** of linear memory, not the round 16 MB it used to. That number is
+multiplied by one instance per core plus the master, so on an eight-core machine it was a hundred
+and forty megabytes of address space — nearly all of it two brain buffers sized for a hidden layer
+three times larger than the slider can ask for. Tracks that need more arena than the 6 MB covers
+grow the memory themselves; nothing on either side of the boundary holds a view across a call that
+can grow it.
+
 Both files are committed, because GitHub Pages serves this repository as-is and they *are* the
 backend. CI rebuilds them from source on every push and fails if the bytes differ, so they can't
 drift from `sim.c`.
+
+### What a step costs
+
+Everything below runs per living car per frame, so it is the only code in the project where the
+shape of the data matters more than the algorithm. Two changes moved more than the rest put
+together:
+
+* **The seven sensor rays no longer call `sin`/`cos`.** Their angles are fixed offsets from the
+  car's own heading, which the step already has a sine and cosine for, so the whole fan comes out of
+  the angle-addition identities in four multiplies — and the ±90° pair for free. That was seven
+  argument reductions and fourteen polynomial evaluations per car per frame, which made
+  trigonometry, not raycasting, the largest single line item in the step.
+* **Walls behind the car are dropped before the rays are cast, not during.** The fan spans ±90°
+  about the heading, so every point of every ray has a forward projection of at least zero and a
+  wall lying entirely behind the car cannot be hit by any of them. One dot product in the broad
+  phase — which runs once — halves the work of the seven raycasts that follow it. The readings are
+  bit-for-bit the ones the full set produced; `tools/e2e.mjs` and the unit suite both ran against
+  the culled and unculled builds to confirm it.
+
+The rest is the same story at a smaller scale: the intersection tests range-check against the
+denominator instead of dividing by it (a miss, which is almost every test, now costs no division at
+all), the network's weights are walked in the order they are stored rather than across it and four
+hidden units at a time, the activation is an f32 series instead of an f64 one, the road test starts
+from the centreline segment that claimed the car last frame, the bearing to the next gate is
+unwrapped with one `floor` instead of a `while` loop that got longer the further a car had driven,
+and `run` keeps a compacted list of the cars still driving rather than reading the whole population
+to find them. Together, on the same work: **2.0x** on the SIMD module, **1.8x** on the scalar one.
 
 ### Why not shared-memory threads
 
@@ -66,18 +100,31 @@ headers, which GitHub Pages cannot send. So instead each worker gets its **own**
 own memory and a contiguous slice of the population. Cars never interact, so the partition is exact,
 it scales across cores the same way, and it needs no special headers.
 
+The slices are **not equal**. Every round ends at a barrier — nothing is drawn or bred until the
+last worker reports — so on cores of different speeds an equal split means everyone waits for the
+slowest, and a phone's little cores are a third the speed of its big ones. Each worker times its own
+`run` and reports the exact number of car-steps it did, which gives a real throughput figure rather
+than one distorted by how many of its cars happened to still be alive; the master keeps a rolling
+average of it and resizes the slices at each generation boundary, where every worker is idle and
+about to be handed a fresh slice anyway. Before any timings exist this is exactly the old even
+split.
+
 ---
 
 ## Configuration & Settings
 Fine-tune the simulation and the learning process using the built-in settings.
 
+Four of them start in a different place on a phone or a tablet — see
+[On a phone or tablet](#on-a-phone-or-tablet) below. They are the same sliders with the same range
+either way; only where the handle starts differs.
+
 ### AI & Evolutionary Parameters
-* **Pop Size** (default 500, up to 2000)**:** The number of agents generated per generation.
-* **Elite Clones** (default 30)**:** Number of top-performing agents preserved exactly for the next generation (prevents regression). Fewer than a handful and a generation can occasionally lose ground it had already made — around 30 is enough that the population doesn't "forget" a solution it found.
+* **Pop Size** (default 500, up to 2000; **150** on mobile)**:** The number of agents generated per generation.
+* **Elite Clones** (default 30; **15** on mobile)**:** Number of top-performing agents preserved exactly for the next generation (prevents regression). Fewer than a handful and a generation can occasionally lose ground it had already made — around 30 is enough that the population doesn't "forget" a solution it found. It tracks the population rather than being an absolute: a sixth of a 150-car field is the same share of it that 30 is of 500.
 * **Focus %** (default 20%)**:** Fraction of the population spent each generation as mutated clones of the current best, with their reward specifically boosted through whichever stretch of track that brain is currently slowest on (roughly ±1 second either side). Going fast where it's *already* near top speed has little room left to improve; the slow stretch is where the gains are. This is what stops a run getting stuck on one badly-taken corner instead of generally improving.
-* **Hidden Layers:** Adjust the complexity of the AI's "brain" by changing the number of internal neurons.
+* **Hidden Layers** (default 5; **4** on mobile)**:** Adjust the complexity of the AI's "brain" by changing the number of internal neurons. The one fewer on mobile is not a rounding-down — the hidden layer is evaluated four units at a time on the SIMD build, so five units cost two passes and four cost one.
 * **Initial TTL (Time-To-Live):** A countdown for each agent, **reset in full every time it reaches a checkpoint**. It used to top the clock up by 150 frames and clamp it to 600, which quietly made the slider a lie — set it to 10,000 and the very first gate cut the car back to 600.
-* **Target Laps:** Defines the goalpost for a successful generation before moving to the next stage of evolution.
+* **Target Laps** (default 3; **2** on mobile)**:** Defines the goalpost for a successful generation before moving to the next stage of evolution.
 
 How a generation is bred, for the curious: parents are drawn from the top fifth of the field
 **rank-weighted**, so the leader parents far more often than the hundredth car rather than equally.
@@ -110,10 +157,29 @@ than starting near one end of the range.
 * **Simulation Speed:** Adjust the simulation speed.
 * **Hyper Mode:** Simulates as fast as your PC allows, and draws nothing at all while it does.
 
-The canvas repaints at most 30 times a second, and not at all when nothing has changed — the
-simulation still steps on every animation frame, only the painting is throttled. Cars are blitted
-from a cached sprite per livery instead of half a dozen canvas state changes each, which at 500 cars
-was most of the main thread's paint cost.
+The canvas repaints at most 30 times a second (20 on a phone), and not at all when nothing has
+changed — the simulation still steps on every animation frame, only the painting is throttled. Cars
+are blitted from a cached sprite per livery instead of half a dozen canvas state changes each, which
+at 500 cars was most of the main thread's paint cost.
+
+On a phone, how many pixels that paint covers is decided at load rather than fixed. Everything draws
+in a 1200x900 world and always will, and on a desktop that is still exactly what gets rasterised —
+the browser downsamples it to the window, which is free supersampling on a machine that will not
+miss the pixels. A phone shows the canvas in a box around 380px wide, so the same million pixels are
+painted to display about a tenth of that, on the thread that also has to keep the simulation fed;
+there the raster follows the display instead. The scale is a factor on the single view transform, so
+no drawing code knows it exists; `tools/e2e.mjs` holds the pointer maths to it, since a click has to
+land on the same world point at any raster size and any zoom.
+
+The two panels under the graph — the fitness chart and the improvement table — are coalesced rather
+than redrawn per generation. In hyper mode generations turn over several times a second, and a
+canvas repaint plus an `innerHTML` reparse at that rate is work done for nobody: the numbers are all
+still there on the next tick.
+
+Sensor readings cross from the workers for every car but are unpacked for one. Seven floats per car
+per frame were being copied into the render records to be read for the single car the overlay
+follows; that one car now takes them straight out of the buffer they arrived in, before it goes back
+to its worker.
 
 The fitness chart shows the **whole run**, not a truncated recent window — every generation is
 represented somewhere on it for as long as the session lasts. It stays fast anyway: once it has 300
@@ -139,6 +205,46 @@ from mutated copies of that one network, which throws away all the diversity the
 Nothing is written to browser storage: settings and custom tracks do not survive a reload, so every
 visit starts clean. **Wipe All Data & Reload**, at the bottom of the settings panel, is the explicit
 escape hatch — it clears storage and the browser's cached copy of the app and reloads.
+
+---
+
+## On a phone or tablet
+
+The page checks once, at load, whether it is running on a phone or a tablet, and if it is, four
+things start somewhere different. Nothing is taken away — every one of them is still the same
+slider with the same range, and every one can be pushed back up.
+
+| | desktop | phone / tablet |
+| --- | --- | --- |
+| Pop Size | 500 | **150** |
+| Elite Clones | 30 | **15** |
+| Target Laps | 3 | **2** |
+| Hidden Layers | 5 | **4** |
+
+Underneath those, three things the sliders don't show:
+
+* **The worker pool is capped**, at roughly the fast half of the reported cores and never more than
+  four. `navigator.hardwareConcurrency` counts logical cores, and on a phone that count is a lie
+  about what they are worth: eight cores usually means four fast and four slow, differing by a
+  factor of three. Every round ends at a barrier, so a slice handed to a slow core sets the pace for
+  the whole pool — past a point, *adding* cores makes it slower. Each worker also carries its own
+  wasm instance, which is memory a tab does not have to spare and heat a phone cannot shed. The core
+  readout in the sidebar shows both numbers ("4/8 Cores") when they differ.
+* **The canvas rasterises fewer pixels**, sized to the display rather than to the 1200x900 world —
+  see the rendering note under Simulation Control. Desktop is untouched.
+* **The repaint ceiling drops** from 30 frames a second to 20, which leaves a third more of the
+  frame budget for the half that is actually learning.
+
+Together, one generation on a phone-shaped workload: **143 ms before, 18 ms after** — about half of
+that from the settings and half from the module itself.
+
+How the check works, because getting this wrong in the other direction would be worse than not
+doing it: Chromium's `userAgentData.mobile` is the only honest answer and only exists for phones;
+iPadOS ships a desktop user-agent string and gives itself away by being a "Macintosh" with a
+touchscreen; anything else is asked whether its primary input is a finger and whether it has no
+hover, which a tablet on an unfamiliar browser still answers correctly. A desktop that somehow
+matched would get a smaller starting population and four sliders to put back, which is the mild
+failure of the two.
 
 ---
 

@@ -23,11 +23,21 @@
 
 // ---------------------------------------------------------------------------
 // Limits. These mirror the UI slider maxima in index.html — population tops out
-// at 2000 and the hidden layer at 25 — with headroom so a hand-edited setting
+// at 2000 and the hidden layer at 9 — with headroom so a hand-edited setting
 // can't walk off the end of a static array.
+//
+// MAX_HIDDEN is not free headroom: the two brain buffers are sized
+// MAX_CARS x BRAIN_MAX floats apiece and BRAIN_MAX is linear in it, so they
+// were 7.4MB of the module's 8MB of static data — reserved in EVERY instance,
+// and the app runs one per core plus the master. On an eight-core phone that
+// was over a hundred megabytes of address space set aside for hidden units the
+// slider cannot ask for. 16 is still most of a factor of two above the
+// slider's maximum, and engine.js validates an imported brain against
+// max_hidden() before writing a single weight, so a file from somewhere else
+// is refused with a message rather than silently truncated.
 // ---------------------------------------------------------------------------
 #define MAX_CARS     2048
-#define MAX_HIDDEN   32
+#define MAX_HIDDEN   16
 #define SENS_N       7
 // Absolute checkpoint-index ceiling for the per-gate speed telemetry used by
 // the focused-learning feature below. Real tracks stay far under this — at
@@ -238,6 +248,51 @@ static float tanhf_(float x) {
     double e = exp_d(2.0 * (double)x);
     return (float)((e - 1.0) / (e + 1.0));
 }
+
+// The activation again, but in f32 and without exp_d's f64 argument reduction,
+// its branches or its degree-9 polynomial. This is what feedForward calls —
+// (hidden + 2) times per car per frame, which makes it the most-executed
+// transcendental in the project by an order of magnitude — while tanhf_ above
+// stays exactly as it was for the t_tanh export and its 2e-7 bar.
+//
+//   tanh(x) = (e^2x - 1) / (e^2x + 1),  e^y = 2^(y * log2e)
+//
+// The 2^n is built by writing the exponent field of a float directly, and the
+// fractional part is a degree-7 Taylor of 2^f on |f| <= 1/2 (truncation
+// ~5e-9 relative, an order below what an f32 can hold). The error of the whole
+// thing is dominated by the quotient, whose sensitivity to a relative error in
+// e is 2e/(e+1)^2 — maximal at e = 1, where it is half an f32 epsilon. So the
+// result is good to ~1e-7 ABSOLUTE across the whole line, which is the bar
+// that matters for a number feeding a [-1,1] control output. tools/mathtest
+// checks it against Math.tanh on every build, same as the rest.
+#define NN_LOG2E_X2 2.885390081777926814f   // 2 * log2(e)
+static inline float exp2_poly(float f) {
+    // 2^f = e^(f ln2), Taylor to f^7.
+    float p = 1.5252733804059840e-5f;
+    p = p * f + 1.5403530393381609e-4f;
+    p = p * f + 1.3333558146428443e-3f;
+    p = p * f + 9.6181291076284772e-3f;
+    p = p * f + 5.5504108664821580e-2f;
+    p = p * f + 2.4022650695910071e-1f;
+    p = p * f + 6.9314718055994531e-1f;
+    return p * f + 1.0f;
+}
+static inline float pow2_fast(float n) {
+    union { u32 u; float f; } v;
+    v.u = (u32)(((i32)n + 127) << 23);
+    return v.f;
+}
+static float nn_tanh(float x) {
+    // Past this the f32 result is exactly +-1 anyway, and clamping here is
+    // what keeps the exponent write below inside the float range.
+    if (x > 9.011f)  return 1.0f;
+    if (x < -9.011f) return -1.0f;
+    float y = x * NN_LOG2E_X2;
+    float n = __builtin_nearbyintf(y);          // one wasm instruction: f32.nearest
+    float e = exp2_poly(y - n) * pow2_fast(n);
+    return (e - 1.0f) / (e + 1.0f);
+}
+
 static float acosf_(float x) {
     if (x >= 1.0f) return 0.0f;
     if (x <= -1.0f) return PI_F;
@@ -469,22 +524,43 @@ static float roadDepth(float px, float py, float *rOut) {
 
 // Is this point on the asphalt at all? Same union-of-discs question as
 // roadDepth, but it only needs a yes or no, so it skips the square roots and
-// bails on the first segment that claims the point — which is usually the
-// first one it looks at.
-static i32 insideRoad(float px, float py) {
-    if (!grid_items || !tk_w) return 1;      // no geometry to judge against
+// bails on the first segment that claims the point.
+static inline i32 segClaims(i32 i, float px, float py) {
+    i32 j = i + 1; if (j >= tk_center_n) j = 0;
+    Vec2 a = tk_center[i], b = tk_center[j];
+    float r = maxf(tk_w[i], tk_w[j]);
+    return _pointSegDist2(px, py, a.x, a.y, b.x, b.y) < r * r;
+}
+// The only caller is a car, which is asked this every frame and carries an
+// enormous hint: it moves a few pixels per frame, so the centreline segment
+// that claimed it last frame almost always claims it again this one. Trying
+// that segment and its immediate neighbours first turns the usual case from a
+// 3x3 grid walk over a few dozen segments into a handful of point-to-segment
+// distances, and the answer is identical either way — it is the same
+// union-of-discs test, only asked in a better order.
+#define ROAD_HINT_SPAN 2
+static i32 insideRoad(float px, float py, i32 *hint) {
+    if (!grid_items || !tk_w) return 1;
+    i32 n = tk_center_n;
+    i32 hs = *hint;
+    if (hs >= 0 && hs < n) {
+        for (i32 d = -ROAD_HINT_SPAN; d <= ROAD_HINT_SPAN; d++) {
+            i32 i = hs + d; if (i < 0) i += n; else if (i >= n) i -= n;
+            if (segClaims(i, px, py)) { *hint = i; return 1; }
+        }
+    }
+    // Miss: the car has moved further than the hint window, or it is off the
+    // road entirely. Fall back to the grid and re-seed the hint from whatever
+    // claims it.
     i32 gx = (i32)floorf_((px - grid_ox) / grid_cell);
     i32 gy = (i32)floorf_((py - grid_oy) / grid_cell);
     i32 xlo = maxi(gx - 1, 0), xhi = mini(gx + 1, grid_nx - 1);
     i32 ylo = maxi(gy - 1, 0), yhi = mini(gy + 1, grid_ny - 1);
-    i32 n = tk_center_n;
     for (i32 ix = xlo; ix <= xhi; ix++) for (i32 iy = ylo; iy <= yhi; iy++) {
         i32 k = iy * grid_nx + ix;
         for (i32 s = grid_start[k]; s < grid_start[k + 1]; s++) {
-            i32 i = grid_items[s], j = (i + 1) % n;
-            Vec2 a = tk_center[i], b = tk_center[j];
-            float r = maxf(tk_w[i], tk_w[j]);
-            if (_pointSegDist2(px, py, a.x, a.y, b.x, b.y) < r * r) return 1;
+            i32 i = grid_items[s];
+            if (segClaims(i, px, py)) { *hint = i; return 1; }
         }
     }
     return 0;
@@ -1387,10 +1463,15 @@ static const float CAR_LAT_GRIP = 0.93f;
 // sensor overlay the UI draws — reads it from here so the three can never
 // disagree. Exported because script.js draws the rays and must use the same
 // number the simulation raycast used.
+// Recomputed by set_config rather than per call: updateCar wants it once per
+// car per frame and buildWallBuckets once per wall, and it is a multiply and
+// two compares off a config value that changes a handful of times a session.
+static float cfg_sensorLen = SENSOR_LEN_MIN;
 __attribute__((export_name("sensor_len")))
-float sensor_len(void) {
+float sensor_len(void) { return cfg_sensorLen; }
+static void recompute_sensor_len(void) {
     float r = cfg_maxSpeed * SENSOR_LOOKAHEAD_FRAMES;
-    return r < SENSOR_LEN_MIN ? SENSOR_LEN_MIN : (r > SENSOR_LEN_MAX ? SENSOR_LEN_MAX : r);
+    cfg_sensorLen = r < SENSOR_LEN_MIN ? SENSOR_LEN_MIN : (r > SENSOR_LEN_MAX ? SENSOR_LEN_MAX : r);
 }
 
 __attribute__((export_name("set_config")))
@@ -1400,6 +1481,7 @@ void set_config(float maxSpeed, float accel, float turnSpeed, float brakeStrengt
     cfg_initialTTL = initialTTL; cfg_targetLaps = targetLaps;
     cfg_focusPct = focusPct;
     cfg_hidden = hidden < 1 ? 1 : (hidden > MAX_HIDDEN ? MAX_HIDDEN : hidden);
+    recompute_sensor_len();
 }
 
 // Absolute checkpoint-index window the focused sub-population's reward is
@@ -1447,13 +1529,17 @@ static i32   car_crashed[MAX_CARS], car_ttl[MAX_CARS], car_frames[MAX_CARS];
 static i32   car_nextCP[MAX_CARS], car_laps[MAX_CARS], car_cpReached[MAX_CARS];
 static float car_lastLap[MAX_CARS]; static i32 car_prevLapFrame[MAX_CARS];
 static i32   car_lastCpFrame[MAX_CARS];   // for scoring how fast each gate was reached
+// Which centreline segment claimed this car last frame — see insideRoad.
+static i32   car_roadSeg[MAX_CARS];
 // Set by evolve() (on the master) for the slots it breeds as focused clones,
 // then shipped to each worker alongside its slice of the brains every
 // generation — reset_car() below never touches it, only evolve() does.
 static i32   car_focused[MAX_CARS];
 static float car_out[MAX_CARS * OUT_N];
 static float car_in[MAX_CARS * IN_N];
-static float hidden_scratch[MAX_HIDDEN];
+// Rounded up to a whole number of vectors and aligned, because feedForward
+// writes the hidden layer four units at a time.
+static float hidden_scratch[(MAX_HIDDEN + 3) & ~3] __attribute__((aligned(16)));
 
 __attribute__((export_name("car_focused_ptr")))
 i32 car_focused_ptr(void) { return (i32)(unsigned long)car_focused; }
@@ -1474,6 +1560,18 @@ static float render_buf[MAX_CARS * RENDER_STRIDE];
 static float fitness_buf[MAX_CARS * 5];
 
 static i32 pop_n = 0, pop_id_offset = 0, brain_stride_v = 0;
+// The cars still driving, compacted. A generation starts with every car in
+// here and empties it as they crash; the alternative — testing car_crashed on
+// every slot on every iteration — reads the whole population to find the
+// handful still moving, and a generation spends most of its steps in exactly
+// that state. At 500 cars and a 2500-step hyper chunk that was over a million
+// pointless loads and branches per chunk.
+static i32 active[MAX_CARS];
+static i32 active_n = 0;
+static void rebuild_active(void) {
+    active_n = 0;
+    for (i32 i = 0; i < pop_n; i++) if (!car_crashed[i]) active[active_n++] = i;
+}
 
 __attribute__((export_name("brain_stride")))
 i32 brain_stride(void) { return brain_stride_v; }
@@ -1503,6 +1601,7 @@ static void reset_car(i32 i) {
     car_nextCP[i] = tk_cp_n > 0 ? (tk_start_cp + 1) % tk_cp_n : 0;
     car_laps[i] = 0; car_cpReached[i] = 0;
     car_lastLap[i] = 0.0f; car_prevLapFrame[i] = 0; car_lastCpFrame[i] = 0;
+    car_roadSeg[i] = -1;
     for (i32 k = 0; k < OUT_N; k++) car_out[i * OUT_N + k] = 0.0f;
     for (i32 k = 0; k < IN_N; k++) car_in[i * IN_N + k] = 0.0f;
 }
@@ -1518,6 +1617,7 @@ i32 pop_init(i32 count, i32 id_offset, i32 hidden, u32 seed) {
     brain_stride_v = stride_for(cfg_hidden);
     rng_seed(seed);
     for (i32 i = 0; i < pop_n; i++) { reset_car(i); car_focused[i] = 0; }
+    rebuild_active();
     reset_gate_ratio();
     focus_lo = -1; focus_hi = -1;
     return pop_n;
@@ -1546,6 +1646,7 @@ void pop_randomize_brains(void) {
 __attribute__((export_name("pop_reset")))
 void pop_reset(void) {
     for (i32 i = 0; i < pop_n; i++) reset_car(i);
+    rebuild_active();
     // A fresh run per generation, so last generation's per-gate pace can't
     // leak into this one's — car 0 might crash early and never overwrite the
     // entries a slower or luckier previous run left behind.
@@ -1556,15 +1657,26 @@ void pop_reset(void) {
 // The step. Everything below runs per car per frame, so it is the only code in
 // the project where the shape of the data actually matters.
 // ---------------------------------------------------------------------------
+// Do two segments cross?
+//
+// The textbook form divides out the denominator and then checks the two
+// parameters against [0,1]. Both divisions are pure waste for a test that only
+// wants a yes or no: t = tn/bottom lies in [0,1] exactly when tn lies between
+// 0 and bottom, and flipping the signs of everything when bottom is negative
+// turns that into one unsigned range check per parameter. A miss — which is
+// what almost every call is — now costs no division at all, and a float
+// division is an order of magnitude dearer than the multiply it replaces.
 static inline i32 fastIntersect(float Ax, float Ay, float Bx, float By,
                                 float Cx, float Cy, float Dx, float Dy) {
-    float bottom = (Dy - Cy) * (Bx - Ax) - (Dx - Cx) * (By - Ay);
+    float abx = Bx - Ax, aby = By - Ay;
+    float cdx = Dx - Cx, cdy = Dy - Cy;
+    float bottom = cdy * abx - cdx * aby;
     if (bottom == 0.0f) return 0;
-    float t = ((Dx - Cx) * (Ay - Cy) - (Dy - Cy) * (Ax - Cx)) / bottom;
-    if (t < 0.0f || t > 1.0f) return 0;
-    float u = ((Cy - Ay) * (Ax - Bx) - (Cx - Ax) * (Ay - By)) / bottom;
-    if (u < 0.0f || u > 1.0f) return 0;
-    return 1;
+    float acx = Ax - Cx, acy = Ay - Cy;
+    float tn = cdx * acy - cdy * acx;
+    float un = acy * abx - acx * aby;
+    if (bottom < 0.0f) { bottom = -bottom; tn = -tn; un = -un; }
+    return tn >= 0.0f && tn <= bottom && un >= 0.0f && un <= bottom;
 }
 // Per-car broad-phase scratch, refilled every step. `sc_` holds the walls a
 // sensor could reach; `nc_` the much smaller set the car could physically touch
@@ -1577,16 +1689,83 @@ static inline i32 fastIntersect(float Ax, float Ay, float Bx, float By,
 // the master) was several megabytes of almost entirely untouched memory on a
 // machine with a few cores. The bounds checks below are unchanged.
 #define MAX_SCRATCH 4096
-static float sc_x1[MAX_SCRATCH], sc_y1[MAX_SCRATCH], sc_dx[MAX_SCRATCH], sc_dy[MAX_SCRATCH];
-static float nc_x1[MAX_SCRATCH], nc_y1[MAX_SCRATCH], nc_dx[MAX_SCRATCH], nc_dy[MAX_SCRATCH];
+// Four floats of slack past the cap: the vectorised gather below writes a full
+// 128-bit group and then advances the cursor by however many of its four lanes
+// it actually kept, so the last accepted wall can put three dead floats past
+// the write position.
+#define SCRATCH_SLACK 4
+static float sc_x1[MAX_SCRATCH + SCRATCH_SLACK], sc_y1[MAX_SCRATCH + SCRATCH_SLACK];
+static float sc_dx[MAX_SCRATCH + SCRATCH_SLACK], sc_dy[MAX_SCRATCH + SCRATCH_SLACK];
+static float nc_x1[MAX_SCRATCH + SCRATCH_SLACK], nc_y1[MAX_SCRATCH + SCRATCH_SLACK];
+static float nc_dx[MAX_SCRATCH + SCRATCH_SLACK], nc_dy[MAX_SCRATCH + SCRATCH_SLACK];
 static i32 sc_n, nc_n;
 
 #ifdef __wasm_simd128__
 typedef float v4f __attribute__((vector_size(16)));
 typedef int   v4i __attribute__((vector_size(16)));
+typedef signed char v16i8 __attribute__((vector_size(16)));
 static inline v4f vsplat(float x) { return (v4f){ x, x, x, x }; }
+// Unaligned 128-bit load/store. wasm has no alignment requirement on
+// v128.load, but casting a float* straight to a v4f* claims an alignment the
+// pointer may not have, and a brain's hidden block starts wherever `stride`
+// puts it. Going through a packed struct is the portable way to say
+// "128 bits, any address".
+typedef struct { v4f v; } __attribute__((packed, aligned(1))) v4f_unaligned;
+static inline v4f vload(const float *p) { return ((const v4f_unaligned *)p)->v; }
+static inline void vstore(float *p, v4f x) { ((v4f_unaligned *)p)->v = x; }
 // Branchless lane select: mask lanes are all-ones or all-zeros from a compare.
 static inline v4f vsel(v4i m, v4f a, v4f b) { return (v4f)((m & (v4i)a) | (~m & (v4i)b)); }
+// Left-packing: given four lanes and a mask saying which to keep, move the
+// kept ones to the front so they can be written out as a run. wasm has no
+// compress instruction, but it has a full dynamic byte shuffle, and there are
+// only sixteen possible masks — so the shuffle pattern is a table lookup and
+// the whole compaction is one swizzle and one store per array.
+static const v16i8 PACK_LANES[16] = {
+    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 4, 5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 0, 1, 2, 3, 4, 5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 8, 9, 10, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 0, 1, 2, 3, 8, 9, 10, 11, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 4, 5, 6, 7, 8, 9, 10, 11, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 0, 0, 0 },
+    { 12, 13, 14, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 0, 1, 2, 3, 12, 13, 14, 15, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 4, 5, 6, 7, 12, 13, 14, 15, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 0, 0, 0, 0 },
+    { 8, 9, 10, 11, 12, 13, 14, 15, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 0, 0, 0, 0 },
+    { 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 0, 0, 0 },
+    { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 },
+};
+static inline void packStore(float *dst, v4f v, v16i8 pattern) {
+    vstore(dst, (v4f)__builtin_wasm_swizzle_i8x16((v16i8)v, pattern));
+}
+
+// nn_tanh, four at a time, and to the same f32 result: the hidden layer runs
+// four lanes wide while the two outputs stay scalar, and a network whose units
+// disagreed about their own activation by an ulp depending on where they sat
+// in the layer would be a genuinely nasty bug to find. Branch-free, so the
+// saturation the scalar version does with an early return is a min/max pair
+// here — past +-9.011 the quotient already lands on exactly +-1 in f32.
+static inline v4f nn_tanh4(v4f x) {
+    const v4f lim = vsplat(9.011f), one = vsplat(1.0f);
+    v4f xc = __builtin_wasm_min_f32x4(__builtin_wasm_max_f32x4(x, -lim), lim);
+    v4f y = xc * vsplat(NN_LOG2E_X2);
+    v4f n = __builtin_wasm_nearest_f32x4(y);
+    v4f f = y - n;
+    v4f p = vsplat(1.5252733804059840e-5f);
+    p = p * f + vsplat(1.5403530393381609e-4f);
+    p = p * f + vsplat(1.3333558146428443e-3f);
+    p = p * f + vsplat(9.6181291076284772e-3f);
+    p = p * f + vsplat(5.5504108664821580e-2f);
+    p = p * f + vsplat(2.4022650695910071e-1f);
+    p = p * f + vsplat(6.9314718055994531e-1f);
+    p = p * f + one;
+    v4i sc = ((v4i)__builtin_convertvector(n, v4i) + (v4i){127,127,127,127}) << 23;
+    v4f e = p * (v4f)sc;
+    return (e - one) / (e + one);
+}
 #endif
 
 // Nearest hit along a ray, as a fraction of its length, over a contiguous run
@@ -1600,20 +1779,34 @@ static float raycast(float Ax, float Ay, float Bx, float By,
     const v4f vAx = vsplat(Ax), vAy = vsplat(Ay);
     const v4f vabx = vsplat(abx), vaby = vsplat(aby);
     const v4f one = vsplat(1.0f), zero = vsplat(0.0f);
+    const v4i signbit = (v4i){ (int)0x80000000, (int)0x80000000, (int)0x80000000, (int)0x80000000 };
     v4f best = one;
     for (i32 i = 0; i < n; i += 4) {
-        v4f cx = *(const v4f *)(x1 + i), cy = *(const v4f *)(y1 + i);
-        v4f ddx = *(const v4f *)(dx + i), ddy = *(const v4f *)(dy + i);
+        v4f cx = vload(x1 + i), cy = vload(y1 + i);
+        v4f ddx = vload(dx + i), ddy = vload(dy + i);
         v4f bottom = ddy * vabx - ddx * vaby;
         v4f acx = vAx - cx, acy = vAy - cy;
-        // A zero denominator makes these inf or NaN; every comparison below is
-        // false for NaN, so the lane falls out through the same mask that
-        // rejects an out-of-range hit. No special case needed.
-        v4f t = (ddx * acy - ddy * acx) / bottom;
-        v4f u = (acy * vabx - acx * vaby) / bottom;
-        v4i m = (bottom != zero) & (t >= zero) & (t <= one) & (u >= zero) & (u <= one);
-        v4f cand = vsel(m, t, one);
-        best = vsel(cand < best, cand, best);
+        v4f tn = ddx * acy - ddy * acx;
+        v4f un = acy * vabx - acx * vaby;
+        // Sign-normalise instead of dividing, the same way the scalar path
+        // does: multiplying tn, un and bottom through by sign(bottom) leaves
+        // the two range tests unchanged and costs three bit operations. The
+        // sign flip is an xor of the denominator's sign bit, and |bottom| is
+        // that bit cleared.
+        v4i sgn = (v4i)bottom & signbit;
+        v4f ab = (v4f)((v4i)bottom & ~signbit);
+        tn = (v4f)((v4i)tn ^ sgn);
+        un = (v4f)((v4i)un ^ sgn);
+        v4i m = (ab != zero) & (tn >= zero) & (tn <= ab) & (un >= zero) & (un <= ab);
+        // The division is the single dearest instruction in the loop and four
+        // walls out of four miss on the overwhelming majority of iterations,
+        // so it is worth a branch to skip it. The branch is about as
+        // predictable as a branch gets: a ray crosses two or three walls out
+        // of the hundred-odd it is tested against.
+        if (__builtin_wasm_any_true_v128((v16i8)m)) {
+            v4f cand = vsel(m, tn / ab, one);
+            best = __builtin_wasm_min_f32x4(cand, best);
+        }
     }
     float b0 = best[0] < best[1] ? best[0] : best[1];
     float b1 = best[2] < best[3] ? best[2] : best[3];
@@ -1625,10 +1818,15 @@ static float raycast(float Ax, float Ay, float Bx, float By,
         float bottom = ddy * abx - ddx * aby;
         if (bottom == 0.0f) continue;
         float acx = Ax - x1[i], acy = Ay - y1[i];
-        float t = (ddx * acy - ddy * acx) / bottom;
-        if (t < 0.0f || t > 1.0f) continue;
-        float u = (acy * abx - acx * aby) / bottom;
-        if (u < 0.0f || u > 1.0f) continue;
+        float tn = ddx * acy - ddy * acx;
+        float un = acy * abx - acx * aby;
+        if (bottom < 0.0f) { bottom = -bottom; tn = -tn; un = -un; }
+        // Same sign-normalised range test as segmentHits, for the same
+        // reason — but here the fraction itself is wanted, so the division
+        // survives. It now happens only for the handful of walls a ray
+        // actually crosses rather than for every wall it is compared against.
+        if (tn < 0.0f || tn > bottom || un < 0.0f || un > bottom) continue;
+        float t = tn / bottom;
         if (t < best) best = t;
     }
     return best;
@@ -1637,6 +1835,10 @@ static float raycast(float Ax, float Ay, float Bx, float By,
 
 // Does this segment cross any wall in the run? Same math, but it can stop at
 // the first hit, so it stays scalar — a crash ends the car's frame anyway.
+// Five of these per living car per frame (the travel segment plus the four
+// sides of the body), and like fastIntersect above they now contain no
+// division whatsoever: the range check is done against the denominator
+// instead of dividing by it.
 static i32 segmentHits(float Ax, float Ay, float Bx, float By,
                        const float *x1, const float *y1, const float *dx, const float *dy, i32 n) {
     const float abx = Bx - Ax, aby = By - Ay;
@@ -1645,14 +1847,30 @@ static i32 segmentHits(float Ax, float Ay, float Bx, float By,
         float bottom = ddy * abx - ddx * aby;
         if (bottom == 0.0f) continue;
         float acx = Ax - x1[i], acy = Ay - y1[i];
-        float t = (ddx * acy - ddy * acx) / bottom;
-        if (t < 0.0f || t > 1.0f) continue;
-        float u = (acy * abx - acx * aby) / bottom;
-        if (u >= 0.0f && u <= 1.0f) return 1;
+        float tn = ddx * acy - ddy * acx;
+        float un = acy * abx - acx * aby;
+        if (bottom < 0.0f) { bottom = -bottom; tn = -tn; un = -un; }
+        if (tn >= 0.0f && tn <= bottom && un >= 0.0f && un <= bottom) return 1;
     }
     return 0;
 }
 
+// The network. Eleven inputs, one hidden layer, two outputs — small enough
+// that how the loops walk the weights costs more than the arithmetic does.
+//
+// weightsIH is stored [input][hidden], so ONE INPUT'S weights to every hidden
+// unit are contiguous. The old loop nest had hidden on the outside and input
+// on the inside, which walked that array with a stride of h and touched a
+// different cache line for every one of the 11 multiply-adds a unit needs.
+// Accumulating across the hidden layer instead — a running total per unit,
+// one input's row added into all of them at a time — reads every weight in
+// order, and on the SIMD build does four units per instruction.
+//
+// No masking on the tail: the k loop rounds h up to a multiple of four and
+// the extra lanes accumulate whatever weights sit after the row. Those lanes
+// are never read back (only hidden_scratch[0..h-1] is), and the reads stay
+// inside this car's own brain — the furthest is wIH[(IN_N-1)*h + h + 3],
+// which is offHO + 3, and the brain runs to offHO + 3h + 2 past that.
 static void feedForward(i32 i) {
     const float *in = &car_in[i * IN_N];
     const float *b = &brains[i * brain_stride_v];
@@ -1661,17 +1879,35 @@ static void feedForward(i32 i) {
     const float *wHO = b + IN_N * h;
     const float *bH  = wHO + h * OUT_N;
     const float *bO  = bH + h;
-    for (i32 k = 0; k < h; k++) {
-        float sum = bH[k];
-        for (i32 j = 0; j < IN_N; j++) sum += in[j] * wIH[j * h + k];
-        hidden_scratch[k] = tanhf_(sum);
+#ifdef __wasm_simd128__
+    i32 hv = (h + 3) & ~3;
+    for (i32 k = 0; k < hv; k += 4) {
+        v4f acc = vload(bH + k);
+        for (i32 j = 0; j < IN_N; j++) acc += vsplat(in[j]) * vload(wIH + j * h + k);
+        vstore(hidden_scratch + k, nn_tanh4(acc));
+    }
+#else
+    for (i32 k = 0; k < h; k++) hidden_scratch[k] = bH[k];
+    for (i32 j = 0; j < IN_N; j++) {
+        float v = in[j];
+        const float *row = wIH + j * h;
+        for (i32 k = 0; k < h; k++) hidden_scratch[k] += v * row[k];
+    }
+    for (i32 k = 0; k < h; k++) hidden_scratch[k] = nn_tanh(hidden_scratch[k]);
+#endif
+    // Two outputs, so the same transpose applies in the other direction:
+    // weightsHO is stored [hidden][output], and walking it a hidden unit at a
+    // time reads the pair for that unit side by side instead of striding down
+    // one output column and then the other.
+    float s0 = bO[0], s1 = bO[1];
+    for (i32 j = 0; j < h; j++) {
+        float v = hidden_scratch[j];
+        s0 += v * wHO[j * OUT_N];
+        s1 += v * wHO[j * OUT_N + 1];
     }
     float *out = &car_out[i * OUT_N];
-    for (i32 k = 0; k < OUT_N; k++) {
-        float sum = bO[k];
-        for (i32 j = 0; j < h; j++) sum += hidden_scratch[j] * wHO[j * OUT_N + k];
-        out[k] = tanhf_(sum);
-    }
+    out[0] = nn_tanh(s0);
+    out[1] = nn_tanh(s1);
 }
 
 // Below this a car counts as not moving at all: it cannot steer (no grip to
@@ -1790,7 +2026,7 @@ static void updateCar(i32 i) {
     // walls were not in the lookup bucket. The barrier sits exactly on the edge
     // of the road, so "the centre is off the road" is "the centre is past a
     // barrier", whether or not any particular wall segment noticed.
-    if (!insideRoad(car_x[i], car_y[i])) { car_crashed[i] = 1; car_fitness[i] -= 50.0f; return; }
+    if (!insideRoad(car_x[i], car_y[i], &car_roadSeg[i])) { car_crashed[i] = 1; car_fitness[i] -= 50.0f; return; }
 
     i32 nxt = car_nextCP[i];
     i32 curSeg = (nxt >= 0 && nxt < tk_cp_n) ? nxt : 0;
@@ -1821,16 +2057,72 @@ static void updateCar(i32 i) {
     {
         float collR = speed + 8.0f;
         i32 sn = 0, nn = 0;
-        for (i32 w = wStart; w < wEnd; w++) {
+        i32 w = wStart;
+#ifdef __wasm_simd128__
+        // Four walls per iteration. The three tests are the same three; what
+        // the vector path adds is that the survivors are compacted into the
+        // scratch arrays with a swizzle rather than one conditional store at a
+        // time, which is what the scalar version spends most of its time on
+        // once the tests themselves are this cheap.
+        //
+        // Buckets are padded to a multiple of four by buildWallBuckets, so the
+        // scalar tail below normally runs zero times; it is there because
+        // nothing else in this file assumes that padding either.
+        {
+            const v4f vcx = vsplat(cx_), vcy = vsplat(cy_);
+            const v4f vcos = vsplat(cosA), vsin = vsplat(sinA);
+            const v4f vcollR = vsplat(collR);
+            for (; w + 4 <= wEnd && sn <= MAX_SCRATCH - 4 && nn <= MAX_SCRATCH - 4; w += 4) {
+                v4f ddx = vcx - vload(b_mx + w), ddy = vcy - vload(b_my + w);
+                v4f d2 = ddx * ddx + ddy * ddy;
+                v4f hl = vload(b_hl + w);
+                v4i near = d2 <= vload(b_r2 + w);
+                v4i msen = near & ((ddx * vcos + ddy * vsin) <= hl);
+                v4f cr = vcollR + hl;
+                v4i mcol = near & (d2 <= cr * cr);
+                i32 bs = __builtin_wasm_bitmask_i32x4(msen);
+                i32 bc = __builtin_wasm_bitmask_i32x4(mcol);
+                if (bs | bc) {
+                    v4f x1 = vload(b_x1 + w), y1 = vload(b_y1 + w);
+                    v4f dxv = vload(b_dx + w), dyv = vload(b_dy + w);
+                    if (bs) {
+                        v16i8 pat = PACK_LANES[bs];
+                        packStore(sc_x1 + sn, x1, pat); packStore(sc_y1 + sn, y1, pat);
+                        packStore(sc_dx + sn, dxv, pat); packStore(sc_dy + sn, dyv, pat);
+                        sn += __builtin_popcount((unsigned)bs);
+                    }
+                    if (bc) {
+                        v16i8 pat = PACK_LANES[bc];
+                        packStore(nc_x1 + nn, x1, pat); packStore(nc_y1 + nn, y1, pat);
+                        packStore(nc_dx + nn, dxv, pat); packStore(nc_dy + nn, dyv, pat);
+                        nn += __builtin_popcount((unsigned)bc);
+                    }
+                }
+            }
+        }
+#endif
+        for (; w < wEnd; w++) {
             float ddx = cx_ - b_mx[w], ddy = cy_ - b_my[w];
             float d2 = ddx * ddx + ddy * ddy;
             if (d2 > b_r2[w]) continue;
-            if (sn < MAX_SCRATCH) {
+            float hl = b_hl[w];
+            // A third cull, for the sensor set only, and free next to the
+            // seven raycasts it shortens. The fan spans -90 to +90 degrees
+            // about the heading, so EVERY point of every ray has a forward
+            // projection of at least zero: a wall lying entirely behind the
+            // car cannot be hit by any of them. Projections along the wall
+            // stay within half its length of its midpoint's, so
+            // "midpoint at least -halfLength forward" is the exact
+            // conservative form of that, and on an ordinary track it drops
+            // about half the bucket. (Not applied to the collision set: the
+            // car's own body extends backwards, so it can still clip a wall
+            // behind its centre.)
+            if (ddx * cosA + ddy * sinA <= hl && sn < MAX_SCRATCH) {
                 sc_x1[sn] = b_x1[w]; sc_y1[sn] = b_y1[w];
                 sc_dx[sn] = b_dx[w]; sc_dy[sn] = b_dy[w];
                 sn++;
             }
-            float cr = collR + b_hl[w];
+            float cr = collR + hl;
             if (d2 <= cr * cr && nn < MAX_SCRATCH) {
                 nc_x1[nn] = b_x1[w]; nc_y1[nn] = b_y1[w];
                 nc_dx[nn] = b_dx[w]; nc_dy[nn] = b_dy[w];
@@ -1979,14 +2271,49 @@ static void updateCar(i32 i) {
     // the sensor overlay read — which was seven redundant stores per living
     // car per frame for a copy that was always identical.
     float *in = &car_in[i * IN_N];
-    const float senLen = sensor_len();
-    static const float SENSOR_ANGLES[SENS_N] = {
-        -PI_F / 2.0f, -PI_F / 3.0f, -PI_F / 6.0f, 0.0f, PI_F / 6.0f, PI_F / 3.0f, PI_F / 2.0f
+    const float senLen = cfg_sensorLen;
+
+    // Seven ray directions, from the heading the car already has sin/cos for.
+    //
+    // This used to be seven more sincos_d calls — seven Cody-Waite argument
+    // reductions and fourteen polynomial evaluations per living car per frame,
+    // which made trigonometry, not raycasting, the single largest line item in
+    // the step. But the seven offsets are compile-time constants, so
+    //
+    //     sin(a +- b) = sin a cos b +- cos a sin b
+    //     cos(a +- b) = cos a cos b -+ sin a sin b
+    //
+    // turns all seven into four multiplies and eight adds off sd/cd, with the
+    // +-90 degree pair falling out for free (cos 90 = 0, sin 90 = 1) and the
+    // straight-ahead ray being sd/cd themselves. The +-30 and +-60 pairs share
+    // their four products because cos 60 = sin 30 and sin 60 = cos 30, so the
+    // two offsets are the same two numbers swapped.
+    //
+    // The products are done in f64 like the reduction they replace, so each
+    // direction is still correct to the last bit an f32 can hold.
+    const double C30 = 0.86602540378443864676;   // cos 30 = sin 60
+    const double S30 = 0.5;                      // sin 30 = cos 60
+    const double p = sd * C30, q = cd * S30, r = cd * C30, t = sd * S30;
+    const float rcos[SENS_N] = {
+        (float)sd,        // -90
+        (float)(q + p),   // -60
+        (float)(r + t),   // -30
+        (float)cd,        //   0
+        (float)(r - t),   // +30
+        (float)(q - p),   // +60
+        (float)-sd        // +90
+    };
+    const float rsin[SENS_N] = {
+        (float)-cd,       // -90
+        (float)(t - r),   // -60
+        (float)(p - q),   // -30
+        (float)sd,        //   0
+        (float)(p + q),   // +30
+        (float)(t + r),   // +60
+        (float)cd         // +90
     };
     for (i32 k = 0; k < SENS_N; k++) {
-        float rA = car_angle[i] + SENSOR_ANGLES[k];
-        double rs, rc; sincos_d((double)rA, &rs, &rc);
-        float ex = cx_ + (float)rc * senLen, ey = cy_ + (float)rs * senLen;
+        float ex = cx_ + rcos[k] * senLen, ey = cy_ + rsin[k] * senLen;
         float minT = raycast(cx_, cy_, ex, ey, sc_x1, sc_y1, sc_dx, sc_dy, sc_n);
         in[k] = 1.0f - minT;
     }
@@ -1997,8 +2324,20 @@ static void updateCar(i32 i) {
     if (relCP) {
         float tX = (relCP->p1x + relCP->p2x) * 0.5f, tY = (relCP->p1y + relCP->p2y) * 0.5f;
         float relAng = atan2f_(tY - cy_, tX - cx_) - car_angle[i];
-        while (relAng >  PI_F) relAng -= 2.0f * PI_F;
-        while (relAng < -PI_F) relAng += 2.0f * PI_F;
+        // The heading is never wrapped (see the note on sincos_d), so after a
+        // few laps car_angle is tens of radians and this difference can be
+        // many whole turns from the branch the network wants. Two `while`
+        // loops unwound it one turn at a time — a loop in the per-car,
+        // per-frame path whose trip count grows with how long the car has
+        // been driving, and with Turn Speed wound up it grows fast. One
+        // floor does the whole reduction at once. The test in front of it is
+        // what a lap of an ordinary track hits on almost every frame, and
+        // costs a compare.
+        if (relAng > PI_F || relAng < -PI_F) {
+            double relD = (double)relAng;
+            relD -= (2.0 * PI_D) * floord_((relD + PI_D) * (1.0 / (2.0 * PI_D)));
+            relAng = (float)relD;
+        }
         in[SENS_N] = car_speed[i] / cfg_maxSpeed;
         in[SENS_N + 1] = relAng / PI_F;
     } else {
@@ -2023,23 +2362,39 @@ static void updateCar(i32 i) {
 // marshalling, so hyper mode can run thousands of steps per crossing.
 // ---------------------------------------------------------------------------
 static i32 last_all_crashed = 1;
+// Cars actually stepped by the last run() — the exact count of updateCar calls,
+// not the population size. engine.js divides the worker's wall-clock time by it
+// to get a real throughput figure, which is the only honest way to compare two
+// workers whose slices died off at different rates. Costs one add per
+// iteration.
+static i32 last_car_steps = 0;
+__attribute__((export_name("car_steps")))
+i32 car_steps(void) { return last_car_steps; }
 
 __attribute__((export_name("run")))
 i32 run(i32 iters) {
     i32 maxLaps = 0;
     i32 allCrashed = 1;
+    i32 steps = 0;
     for (i32 it = 0; it < iters; it++) {
-        allCrashed = 1;
-        for (i32 c = 0; c < pop_n; c++) {
-            if (!car_crashed[c]) {
-                updateCar(c);
-                allCrashed = 0;
-                if (car_laps[c] > maxLaps) maxLaps = car_laps[c];
-            }
+        i32 n = active_n;
+        allCrashed = (n == 0);
+        if (allCrashed) break;
+        steps += n;
+        // Compacted in place as it goes: a car that crashes in its own
+        // update simply is not written back.
+        i32 keep = 0;
+        for (i32 a = 0; a < n; a++) {
+            i32 c = active[a];
+            updateCar(c);
+            if (car_laps[c] > maxLaps) maxLaps = car_laps[c];
+            if (!car_crashed[c]) active[keep++] = c;
         }
-        if (allCrashed || maxLaps >= cfg_targetLaps) break;
+        active_n = keep;
+        if (maxLaps >= cfg_targetLaps) break;
     }
     last_all_crashed = allCrashed;
+    last_car_steps = steps;
     return maxLaps;
 }
 
@@ -2086,11 +2441,7 @@ __attribute__((export_name("fitness_stride")))
 i32 fitness_stride(void) { return 5; }
 
 __attribute__((export_name("alive_count")))
-i32 alive_count(void) {
-    i32 n = 0;
-    for (i32 i = 0; i < pop_n; i++) if (!car_crashed[i]) n++;
-    return n;
-}
+i32 alive_count(void) { return active_n; }
 
 // ---------------------------------------------------------------------------
 // Evolution. Selection needs the whole population, which is spread across
@@ -2319,5 +2670,19 @@ __attribute__((export_name("t_sin")))   float t_sin(float x)   { return sinf_(x)
 __attribute__((export_name("t_cos")))   float t_cos(float x)   { return cosf_(x); }
 __attribute__((export_name("t_atan2"))) float t_atan2(float y, float x) { return atan2f_(y, x); }
 __attribute__((export_name("t_tanh")))  float t_tanh(float x)  { return tanhf_(x); }
+// The f32 activation feedForward actually runs. Held to its own bar in
+// tools/mathtest so "it is only the activation" can never quietly become
+// "and nobody checked it".
+__attribute__((export_name("t_tanh_nn"))) float t_tanh_nn(float x) { return nn_tanh(x); }
+// And the four-lane form the hidden layer actually runs on the SIMD build, so
+// "the two agree" is a checked claim rather than a comment. On the scalar
+// build there is no vector path and this is the scalar one.
+__attribute__((export_name("t_tanh_nn4"))) float t_tanh_nn4(float x) {
+#ifdef __wasm_simd128__
+    return nn_tanh4(vsplat(x))[0];
+#else
+    return nn_tanh(x);
+#endif
+}
 __attribute__((export_name("t_acos")))  float t_acos(float x)  { return acosf_(x); }
 __attribute__((export_name("t_exp")))   double t_exp(double x) { return exp_d(x); }

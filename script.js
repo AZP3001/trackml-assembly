@@ -39,13 +39,92 @@ const HYPER_CHUNK = 2500;
 
 // Canvas repaint ceiling. The simulation is not capped by this — it steps on
 // every animation frame regardless — only the drawing is.
-const RENDER_HZ = 30;
-const RENDER_MIN_MS = 1000 / RENDER_HZ - 1;   // -1 so a 60Hz frame clock still lands on every other frame
+//
+// Lower on a phone, where the paint and the simulation are competing for one
+// slow core and the paint is the half you can afford to skip: twenty frames a
+// second of a car going round a track looks the same and leaves a third more
+// of the frame budget for the thing that is actually learning.
+const RENDER_HZ_DESKTOP = 30, RENDER_HZ_MOBILE = 20;
 
 // Cached car sprite. The car body is 14x8 drawn at 1.5x, so 21x12 covers it
 // exactly; the origin sits at the middle.
 const SPRITE_W = 22, SPRITE_H = 12;
 const SPRITE_CX = SPRITE_W / 2, SPRITE_CY = SPRITE_H / 2;
+
+// ---------------------------------------------------------------------------
+// Is this a phone or a tablet?
+//
+// Asked once, at load, and it decides three things: the starting settings (a
+// smaller field, a shorter goal, a slightly smaller brain), how many workers
+// the engine spawns, and how many pixels the canvas rasterises. None of them
+// is a lock — every one is still a slider or recomputed from the real window
+// — they are just the defaults that make the thing usable on a device with
+// four slow cores and a thermal budget instead of a fan.
+//
+// The test is deliberately several tests. userAgentData.mobile is the only
+// honest one, and only Chromium has it and only for phones; iPadOS ships a
+// desktop user-agent string and gives itself away by being a "Macintosh" with
+// a touchscreen; everything else falls back to asking whether the primary
+// input is a finger and there is no hover, which is what a tablet on a
+// browser nobody has heard of still answers correctly.
+function detectMobileDevice() {
+    if (typeof navigator === 'undefined') return false;
+    const uaData = navigator.userAgentData;
+    if (uaData && uaData.mobile === true) return true;
+    const ua = navigator.userAgent || '';
+    if (/Android|iPhone|iPod|iPad|Windows Phone|IEMobile|Opera Mini|Mobile Safari|Silk|Kindle|PlayBook|BB10/i.test(ua)) return true;
+    if (/\bMacintosh\b/.test(ua) && (navigator.maxTouchPoints || 0) > 1) return true;   // iPad, pretending
+    const mm = window.matchMedia;
+    if (mm && mm('(pointer: coarse)').matches && mm('(hover: none)').matches) return true;
+    return false;
+}
+const IS_MOBILE = detectMobileDevice();
+// -1 so a 60Hz frame clock still lands on every other frame rather than every third.
+const RENDER_MIN_MS = 1000 / (IS_MOBILE ? RENDER_HZ_MOBILE : RENDER_HZ_DESKTOP) - 1;
+
+// Starting settings. Everything here is a slider the moment the page is up —
+// this is where the sliders START, not where they are allowed to be.
+//
+// The mobile column is not a watered-down version of the desktop one for its
+// own sake; each number is there because of what it costs per frame. Population
+// is the direct multiplier on every per-car cost there is. Target Laps decides
+// how long a generation runs before it is scored, and two laps on a phone gets
+// you a result while you are still looking at it. Elite Clones tracks the
+// population so the carried-forward band stays the same tenth of the field it
+// is on desktop rather than becoming a fifth of it. And one hidden unit fewer
+// is not a rounding-down: the hidden layer is evaluated four units at a time on
+// the SIMD build, so five units cost two passes and four cost one — dropping
+// the fifth halves the network's share of the step rather than shaving a fifth
+// off it.
+const DEFAULT_SETTINGS = {
+    desktop: { populationSize: 500, eliteClones: 30, targetLaps: 3, hiddenLayers: 5 },
+    mobile:  { populationSize: 150, eliteClones: 15, targetLaps: 2, hiddenLayers: 4 }
+};
+const DEVICE_DEFAULTS = IS_MOBILE ? DEFAULT_SETTINGS.mobile : DEFAULT_SETTINGS.desktop;
+
+// How many pixels the canvas actually rasterises, as a fraction of the fixed
+// 1200x900 world the whole app draws in.
+//
+// The backing store is 1200x900 no matter what is showing it, which on a
+// desktop is right — the browser downsamples it to the window and you get
+// free supersampling for pixels that machine was never going to miss. On a
+// phone it is not: the canvas sits in a box around 380px wide, so the same
+// 1.08 million pixels are painted to show about a tenth of that, twenty times
+// a second, on the same thread that has to keep the workers fed.
+//
+// So on a phone the raster follows the display — never more than the screen
+// can resolve, and a little less than that, because the picture is a crowd of
+// ten-pixel cars on flat colour and not something anyone reads. Desktop is
+// left exactly as it was. Either way it is a scale factor on one transform,
+// so no drawing code below knows it exists.
+const RENDER_SCALE_MIN = 0.34;
+function computeRenderScale(cssW, cssH) {
+    if (!IS_MOBILE) return 1;
+    if (!(cssW > 0) || !(cssH > 0)) return 0.5;    // not laid out yet; the resize handler re-asks
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    const fit = Math.min((cssW * dpr) / CANVAS_WIDTH, (cssH * dpr) / CANVAS_HEIGHT);
+    return Math.max(RENDER_SCALE_MIN, Math.min(1, fit));
+}
 
 // The road surface is the centreline stroked at the full track width with a
 // round join/cap — literally the region the barriers bound, so the two can
@@ -189,7 +268,14 @@ function wipeStorage() {
 // --- Main Application ---
 const app = {
     state: {
-        populationSize: 500, eliteClones: 30, targetLaps: 3, focusPct: 0.20, hiddenLayers: 5, initialTTL: 750,
+        // Population, elite band, lap goal and hidden-unit count come from
+        // DEVICE_DEFAULTS, which is the desktop set unless this is a phone or
+        // a tablet. Everything else is the same on both.
+        populationSize: DEVICE_DEFAULTS.populationSize,
+        eliteClones: DEVICE_DEFAULTS.eliteClones,
+        targetLaps: DEVICE_DEFAULTS.targetLaps,
+        hiddenLayers: DEVICE_DEFAULTS.hiddenLayers,
+        focusPct: 0.20, initialTTL: 750,
         physics: { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.02, brakeStrength: 0.05 },
         tracks: [], currentTrackIndex: 1, cars: [], generation: 1, isRunning: false, speedMultiplier: 1, hyperMode: false,
         stats: [], globalBest: null, bestTimes: { gen: null, all: null }, isEditing: false, trackToEdit: null,
@@ -217,7 +303,13 @@ const app = {
         ui.telemetryLabel = $('telemetry-label');
         ui.btnRelease   = $('btn-release-spectate');
         ui.canvas       = $('sim-canvas');
-        ui.ctx          = ui.canvas.getContext('2d');
+        // Opaque. Every pixel of the backing store is painted on every pass
+        // (the cached background covers it at zoom 1, and pan is clamped to
+        // the map above that), so there is nothing for an alpha channel to
+        // reveal — and telling the compositor that means it can blit the
+        // canvas instead of blending it.
+        ui.ctx          = ui.canvas.getContext('2d', { alpha: false });
+        this._applyRenderScale();
         ui.btnPlay      = $('btn-play');
         ui.btnHyper     = $('btn-hyper');
         ui.btnPlayM     = $('btn-play-m');
@@ -244,23 +336,71 @@ const app = {
         }, { passive: false });
     },
 
+    // ---- raster size ----------------------------------------------------
+    // The world is always 1200x900 and every piece of drawing code below is
+    // written in it. How many real pixels that becomes is a separate question,
+    // answered here and folded into the one view transform, so nothing else
+    // has to know: on a desktop it is usually 1:1, and on a phone it is
+    // whatever the display can actually resolve, which is a lot less.
+    _renderScale: 1,
+    _applyRenderScale: function() {
+        const c = ui.canvas;
+        if (!c) return false;
+        const r = c.getBoundingClientRect();
+        let s = computeRenderScale(r.width, r.height);
+        // Snap the width to a multiple of four so the height lands on a whole
+        // pixel too (the world is 4:3), and the cached background is then an
+        // exact 1:1 blit at zoom 1 rather than a resample every frame.
+        let bw = Math.min(CANVAS_WIDTH, Math.max(4, Math.round(CANVAS_WIDTH * s / 4) * 4));
+        s = bw / CANVAS_WIDTH;
+        const bh = Math.round(CANVAS_HEIGHT * s);
+        // Set unconditionally: the scale and the backing size are two halves
+        // of one fact, and letting them be written on different paths is how
+        // they end up disagreeing.
+        this._renderScale = s;
+        if (c.width === bw && c.height === bh) return false;
+        c.width = bw; c.height = bh;          // note: this also clears it
+        return true;
+    },
+
+    // Re-ask on a resize or a rotate, and rebuild the background at the new
+    // size when the answer changes. Debounced, because a drag-resize fires
+    // this continuously and reallocating two canvases per event is exactly
+    // the sort of thing that makes a window feel like glue.
+    _resizeTimer: null,
+    handleViewportResize: function() {
+        clearTimeout(this._resizeTimer);
+        this._resizeTimer = setTimeout(() => {
+            if (!this._applyRenderScale()) return;
+            if (this.currentTrack) this.cacheBackgroundRender();
+            this._needsDraw = true;
+            this.draw();
+        }, 150);
+    },
+
     // ---- pan / zoom -----------------------------------------------------
-    // The canvas backing store is always a fixed 1200x900 (CSS scales it to
-    // fit via object-contain) and everything already draws in that space, so
-    // zoom/pan is one extra transform applied once at the top of each draw
-    // pass rather than a change to any drawing code: screen = view * world,
-    // a uniform scale plus a translate, no rotation.
+    // Everything below draws in the fixed 1200x900 world, so zoom/pan is one
+    // extra transform applied once at the top of each draw pass rather than a
+    // change to any drawing code: screen = view * world, a uniform scale plus
+    // a translate, no rotation. The raster scale rides along in the same
+    // multiply — it is a uniform scale about the origin too.
     _viewMatrix: function() {
-        const v = this.state.view;
-        return { z: v.zoom, e: CANVAS_WIDTH / 2 - v.panX * v.zoom, f: CANVAS_HEIGHT / 2 - v.panY * v.zoom };
+        const v = this.state.view, s = this._renderScale;
+        return {
+            z: v.zoom * s,
+            e: s * (CANVAS_WIDTH / 2 - v.panX * v.zoom),
+            f: s * (CANVAS_HEIGHT / 2 - v.panY * v.zoom)
+        };
     },
 
     // CSS pixels (from a pointer event) -> canvas backing-store pixels. The
-    // one step every coordinate conversion below shares.
+    // one step every coordinate conversion below shares. Measured against the
+    // canvas's real backing size rather than the world size, so it follows the
+    // raster scale automatically.
     _toBackingPx: function(e) {
-        const r = ui.canvas.getBoundingClientRect();
-        const scale = Math.min(r.width / CANVAS_WIDTH, r.height / CANVAS_HEIGHT);
-        const offsetX = (r.width - CANVAS_WIDTH * scale) / 2, offsetY = (r.height - CANVAS_HEIGHT * scale) / 2;
+        const c = ui.canvas, r = c.getBoundingClientRect();
+        const scale = Math.min(r.width / c.width, r.height / c.height);
+        const offsetX = (r.width - c.width * scale) / 2, offsetY = (r.height - c.height * scale) / 2;
         return { x: (e.clientX - r.left - offsetX) / scale, y: (e.clientY - r.top - offsetY) / scale };
     },
 
@@ -280,8 +420,11 @@ const app = {
         const w = this.screenToWorld(backingPt.x, backingPt.y);
         v.zoom = z;
         // Keep the same world point under the cursor after the zoom changes.
-        v.panX = w.x - (backingPt.x - CANVAS_WIDTH / 2) / z;
-        v.panY = w.y - (backingPt.y - CANVAS_HEIGHT / 2) / z;
+        // backingPt is in real pixels, so it comes back through the raster
+        // scale before it is compared against the world's own centre.
+        const s = this._renderScale;
+        v.panX = w.x - (backingPt.x / s - CANVAS_WIDTH / 2) / z;
+        v.panY = w.y - (backingPt.y / s - CANVAS_HEIGHT / 2) / z;
         this._clampView();
         this._needsDraw = true;
     },
@@ -305,13 +448,16 @@ const app = {
     },
 
     zoomStep: function(factor) {
-        this._zoomAt({ x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT / 2 }, factor);
+        this._zoomAt({ x: ui.canvas.width / 2, y: ui.canvas.height / 2 }, factor);
     },
 
     _panState: null,
     startPan: function(e) {
         e.preventDefault();
-        ui.canvas.setPointerCapture(e.pointerId);
+        // Capture is a nicety — it keeps the drag alive when the pointer
+        // leaves the canvas — and it throws if the pointer has already been
+        // released. Losing it is not a reason to lose the drag.
+        try { ui.canvas.setPointerCapture(e.pointerId); } catch (err) { /* pointer already gone */ }
         const p = this._toBackingPx(e);
         this._panState = { pointerId: e.pointerId, startBX: p.x, startBY: p.y, panX0: this.state.view.panX, panY0: this.state.view.panY };
     },
@@ -319,8 +465,12 @@ const app = {
         const ps = this._panState;
         if(!ps || e.pointerId !== ps.pointerId) return;
         const p = this._toBackingPx(e), v = this.state.view;
-        v.panX = ps.panX0 - (p.x - ps.startBX) / v.zoom;
-        v.panY = ps.panY0 - (p.y - ps.startBY) / v.zoom;
+        // Divided by the FULL view scale, raster factor included — the drag is
+        // measured in real canvas pixels, and how many world units one of
+        // those covers is exactly what that scale says.
+        const z = v.zoom * this._renderScale;
+        v.panX = ps.panX0 - (p.x - ps.startBX) / z;
+        v.panY = ps.panY0 - (p.y - ps.startBY) / z;
         this._clampView();
         this._needsDraw = true;
     },
@@ -390,7 +540,14 @@ const app = {
         try {
             this._initUICache();
             this.bindActions();
+            // The markup ships the desktop numbers; on a phone the state was
+            // built from the mobile column, so push it out to the sliders
+            // before anyone sees them disagree.
+            this.syncSettingsUI();
             this.showBuildStamp();
+            const onResize = () => this.handleViewportResize();
+            window.addEventListener('resize', onResize);
+            window.addEventListener('orientationchange', onResize);
             await Engine.ready();
             if(ui.coreCount && Engine._pendingCoreLabel) ui.coreCount.innerHTML = Engine._pendingCoreLabel;
             this.resetTracks();
@@ -512,7 +669,10 @@ const app = {
                 id: i, x: 0, y: 0, angle: 0, speed: 0, color: this._colors[i],
                 fitness: 0, crashed: false, checkpoints: 0,
                 sensors: new Float32Array(SENSOR_COUNT), inputs: new Float32Array(2),
-                completedLaps: 0
+                completedLaps: 0,
+                // Resolved here rather than looked up by colour string on every
+                // car on every painted frame.
+                sprite: null
             };
             this.state.cars = cars;
         }
@@ -521,6 +681,7 @@ const app = {
         for(let i=0; i<n; i++) {
             const c = cars[i];
             c.color = this._colors[i];
+            c.sprite = this._carSprite(c.color);
             c.x = sx; c.y = sy; c.angle = sa;
             c.speed = 0; c.fitness = 0; c.crashed = false; c.completedLaps = 0; c.checkpoints = 0;
             c.sensors.fill(0); c.inputs[0] = 0; c.inputs[1] = 0;
@@ -531,25 +692,41 @@ const app = {
     // Selection, crossover and mutation all happen inside the master wasm
     // instance — it is the only one holding every brain. All this does is hand
     // over the fitness column and rebuild the render records.
+    // Two arrays the size of the population, reused across generations. In
+    // hyper mode a generation can turn over several times a second, and
+    // allocating (and then sorting a boxed copy of) two thousand numbers each
+    // time was garbage created at exactly the rate that hurts most.
+    _fitBuf: null,
+    _sortBuf: null,
     evolve: function() {
         if(this.state.cars.length === 0) return;
-        const cars = this.state.cars;
-        const fitness = new Float32Array(cars.length);
+        const cars = this.state.cars, n = cars.length;
+        if(!this._fitBuf || this._fitBuf.length !== n) {
+            this._fitBuf = new Float32Array(n);
+            this._sortBuf = new Float32Array(n);
+        }
+        const fitness = this._fitBuf;
         let best = -Infinity, sum = 0;
-        for(let i=0; i<cars.length; i++) {
-            fitness[i] = cars[i].fitness;
-            sum += cars[i].fitness;
-            if(cars[i].fitness > best) best = cars[i].fitness;
+        for(let i=0; i<n; i++) {
+            const f = cars[i].fitness;
+            fitness[i] = f;
+            sum += f;
+            if(f > best) best = f;
         }
 
         // Percentile snapshot for the improvement table — cheap next to
         // breeding a whole generation, and this is the only place that ever
-        // sees every car's fitness at once.
-        const sorted = Array.from(fitness).sort((a, b) => b - a);
-        const n1 = Math.max(1, Math.round(sorted.length * 0.01));
-        const n10 = Math.max(1, Math.round(sorted.length * 0.10));
-        let s1 = 0; for(let i=0; i<n1; i++) s1 += sorted[i];
-        let s10 = 0; for(let i=0; i<n10; i++) s10 += sorted[i];
+        // sees every car's fitness at once. Sorted as a typed array, which
+        // sorts numerically and in place with no comparator call per
+        // comparison; that leaves it ASCENDING, so the top of the field is at
+        // the far end.
+        const sorted = this._sortBuf;
+        sorted.set(fitness);
+        sorted.sort();
+        const n1 = Math.max(1, Math.round(n * 0.01));
+        const n10 = Math.max(1, Math.round(n * 0.10));
+        let s1 = 0; for(let i=0; i<n1; i++) s1 += sorted[n - 1 - i];
+        let s10 = 0; for(let i=0; i<n10; i++) s10 += sorted[n - 1 - i];
         const top1 = s1 / n1, top10 = s10 / n10;
 
         const res = Engine.evolve(fitness, this.state.eliteClones, this.state.generation);
@@ -560,11 +737,16 @@ const app = {
             gen: this.state.generation, best, avg, top1, top10,
             time: this.state.bestTimes.gen ? this.state.bestTimes.gen.toFixed(2) : null
         });
-        this.updateChart();
 
         this._recent.push({ gen: this.state.generation, best, avg, top1, top10 });
         if(this._recent.length > 101) this._recent.shift();
-        this._updateStatsTable();
+
+        // Both panels are monitoring displays; redrawing them on every
+        // generation is a canvas repaint and an innerHTML reparse at whatever
+        // rate hyper mode happens to be breeding, which can be several times a
+        // second. They are coalesced instead — the numbers are all still there
+        // on the next tick, and nobody was going to read them at 10Hz.
+        this._scheduleStatsRefresh();
 
         // Elite clones keep the green/lime livery so you can pick the carried-
         // forward brains out of the pack on screen.
@@ -677,7 +859,6 @@ const app = {
                     const prevLaps = c.completedLaps;
                     c.completedLaps = buf[idx+8];
                     c.fitness = buf[idx+9];
-                    for(let j=0; j<SENSOR_COUNT; j++) c.sensors[j] = buf[idx+11+j];
                     if(c.completedLaps > prevLaps) this._recordLap(buf[idx+10]);
                 }
             } else {
@@ -695,11 +876,31 @@ const app = {
                 }
             }
         }
-        for(const r of st.rows) Engine.recycle(r.index, r.buffer.buffer);
         this.state.aliveCount = alive;
         this._needsDraw = true;
         // Once per applied round, not once per rendered frame — see draw().
-        this._spectated = this._pickSpectated();
+        // Hyper mode paints nothing at all, so there is no panel to choose a
+        // car for and no reason to walk the whole field looking for one.
+        this._spectated = this.state.hyperMode ? null : this._pickSpectated();
+
+        // Sensor readings, for the ONE car whose overlay is drawn.
+        //
+        // These used to be copied for every car — seven floats each, five
+        // hundred times, sixty times a second — to be read for a single car
+        // and thrown away. The rows are still in hand here (they go back to
+        // their workers on the next line), so the one car that needs them can
+        // take them straight out of the buffer it arrived in.
+        const sp = this._spectated;
+        if(sp) {
+            for(const r of st.rows) {
+                if(!r.render || sp.id < r.start || sp.id >= r.start + r.count) continue;
+                const base = (sp.id - r.start) * 18 + 11;
+                for(let j=0; j<SENSOR_COUNT; j++) sp.sensors[j] = r.buffer[base + j];
+                break;
+            }
+        }
+
+        for(const r of st.rows) Engine.recycle(r.index, r.buffer.buffer);
     },
 
     _recordLap: function(time) {
@@ -722,6 +923,10 @@ const app = {
     // untouched screen repaints zero times instead of sixty times a second.
     _needsDraw: true,
 
+    // Bound once. `this.loop.bind(this)` inside the loop allocated a fresh
+    // closure sixty times a second for the garbage collector to deal with,
+    // which on a phone is a minor cost with a major multiplier.
+    _loopBound: null,
     loop: async function() {
         const running = this.state.isRunning && !this.state.isEditing;
 
@@ -753,7 +958,7 @@ const app = {
         //   * hyper mode draws NOTHING at all, not even the cached background,
         //     because the whole point of it is that the screen is not the
         //     output;
-        //   * everything else is capped at RENDER_HZ and skipped entirely when
+        //   * everything else is capped at the repaint ceiling and skipped when
         //     nothing has changed. The simulation still steps on every
         //     animation frame — only the painting is throttled.
         if(this.state.isEditing) {
@@ -766,14 +971,21 @@ const app = {
                 this.draw();
             }
         }
-        requestAnimationFrame(this.loop.bind(this));
+        if(!this._loopBound) this._loopBound = this.loop.bind(this);
+        requestAnimationFrame(this._loopBound);
     },
 
     cacheBackgroundRender: function() {
+        // Rasterised at exactly the size it will be blitted at, so the
+        // per-frame draw of it is a straight copy and not a resample of a
+        // 1200x900 image down to whatever the screen is.
+        this._applyRenderScale();
+        const s = this._renderScale;
         this.state.bgCanvas = document.createElement('canvas');
-        this.state.bgCanvas.width = CANVAS_WIDTH;
-        this.state.bgCanvas.height = CANVAS_HEIGHT;
-        const ctx = this.state.bgCanvas.getContext('2d');
+        this.state.bgCanvas.width = ui.canvas ? ui.canvas.width : CANVAS_WIDTH;
+        this.state.bgCanvas.height = ui.canvas ? ui.canvas.height : CANVAS_HEIGHT;
+        const ctx = this.state.bgCanvas.getContext('2d', { alpha: false });
+        ctx.setTransform(s, 0, 0, s, 0, 0);   // everything below is in world units
         const t = this.currentTrack;
 
         ctx.fillStyle = '#3a5a40'; ctx.fillRect(0,0,CANVAS_WIDTH,CANVAS_HEIGHT);
@@ -800,7 +1012,7 @@ const app = {
 
         if(this.state.isEditing && this.state.trackToEdit) {
             ctx.setTransform(1, 0, 0, 1, 0, 0);
-            ctx.fillStyle = '#3a5a40'; ctx.fillRect(0,0,CANVAS_WIDTH,CANVAS_HEIGHT);
+            ctx.fillStyle = '#3a5a40'; ctx.fillRect(0, 0, ui.canvas.width, ui.canvas.height);
             editor.draw(ctx);
             return;
         }
@@ -813,7 +1025,9 @@ const app = {
         const v = this._viewMatrix();
         ctx.setTransform(v.z, 0, 0, v.z, v.e, v.f);
 
-        if(this.state.bgCanvas) ctx.drawImage(this.state.bgCanvas, 0, 0);
+        // Given in world units, not pixels, so the cache can be any
+        // resolution and still land exactly over the map.
+        if(this.state.bgCanvas) ctx.drawImage(this.state.bgCanvas, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
         // Render ALL cars persistently, no color flashing, no hiding.
         // Telemetry/highlight follows a manually-clicked car, or else
@@ -835,7 +1049,7 @@ const app = {
         for(let i=0; i<cars.length; i++) {
             const c = cars[i];
             if(c.crashed) continue;
-            const sprite = this._carSprite(c.color);
+            const sprite = c.sprite || (c.sprite = this._carSprite(c.color));
             const cs = Math.cos(c.angle), sn = Math.sin(c.angle);
             ctx.setTransform(v.z*cs, v.z*sn, -v.z*sn, v.z*cs, v.e + v.z*c.x, v.f + v.z*c.y);
             ctx.drawImage(sprite, -SPRITE_CX, -SPRITE_CY);
@@ -1364,6 +1578,26 @@ const app = {
         });
         window.addEventListener('resize', () => this._drawChart());
         this._drawChart();
+    },
+
+    // Coalesced redraw of the fitness chart and the improvement table. Leading
+    // edge, so the first generation after a pause shows up at once, then at
+    // most one refresh per STATS_REFRESH_MS with a trailing one so the final
+    // state is never the stale one.
+    STATS_REFRESH_MS: 200,
+    _statsTimer: null,
+    _lastStatsRefresh: 0,
+    _scheduleStatsRefresh: function() {
+        const now = performance.now();
+        const wait = this.STATS_REFRESH_MS - (now - this._lastStatsRefresh);
+        if(wait <= 0) { this._flushStatsRefresh(); return; }
+        if(this._statsTimer) return;
+        this._statsTimer = setTimeout(() => { this._statsTimer = null; this._flushStatsRefresh(); }, wait);
+    },
+    _flushStatsRefresh: function() {
+        this._lastStatsRefresh = performance.now();
+        this.updateChart();
+        this._updateStatsTable();
     },
 
     updateChart: function() {

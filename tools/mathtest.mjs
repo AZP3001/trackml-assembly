@@ -79,9 +79,31 @@ check('cos', 2e-7, [...linspace(-Math.PI * 2, Math.PI * 2, 4001), ...randRange(-
     check('acos(-0)', 3e-7, [[-0]], () => Math.PI / 2, () => negZero);
 }
 
-// tanh is the activation — called (population x (hidden + 2)) times per frame.
+// tanh, the f64 one. Kept for anything that wants the full-precision version.
 check('tanh', 2e-7, [...linspace(-12, 12, 20001), ...randRange(-40, 40, 5000, 13)],
     x => Math.tanh(x), x => w.t_tanh(x));
+
+// The activation feedForward actually runs — (population x (hidden + 2)) times
+// per frame, which makes it the most-executed transcendental in the project.
+// It is f32 throughout and skips exp's f64 argument reduction, so it gets
+// checked on its own rather than riding on the f64 one's result. Same 2e-7 bar:
+// "it is only the activation" is not a reason to let it drift.
+{
+    const samples = [...linspace(-12, 12, 20001), ...randRange(-40, 40, 5000, 13)];
+    check('tanh(nn)', 2e-7, samples, x => Math.tanh(x), x => w.t_tanh_nn(x));
+    // And the four-lane form the SIMD build's hidden layer uses. Units in the
+    // same layer must not disagree about their own activation depending on
+    // which lane they landed in, so this is held to the stricter bar of being
+    // bit-identical to the scalar one rather than merely close to Math.tanh.
+    let lanesDiffer = 0;
+    for (const [raw] of samples) {
+        const x = Math.fround(raw);
+        if (w.t_tanh_nn4(x) !== w.t_tanh_nn(x)) lanesDiffer++;
+    }
+    const ok = lanesDiffer === 0;
+    if (!ok) failures++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'}  ${'tanh(x4)'.padEnd(10)} vector and scalar activations agree exactly  (${lanesDiffer} of ${samples.length} differ)`);
+}
 
 // atan2 over all four quadrants plus the axes.
 {

@@ -48,6 +48,31 @@ function simdSupported() {
     try { return WebAssembly.validate(SIMD_PROBE); } catch (e) { return false; }
 }
 
+// How many workers to spawn.
+//
+// hardwareConcurrency is a count of logical cores, and on a phone that count
+// is a lie about what they are worth: an eight-core phone is typically four
+// fast cores and four slow ones, and the two kinds can differ by a factor of
+// three. Every round here ends at a barrier — the main thread cannot draw the
+// frame until the LAST worker reports — so a slice handed to a slow core sets
+// the pace for all of them, and adding those cores makes the whole thing
+// slower, not faster. On top of that each worker carries its own wasm instance,
+// and eight of those on a phone is memory the tab does not have to spare and
+// heat it cannot shed.
+//
+// So on a phone or tablet: roughly the fast half, and never more than four.
+// On a desktop, unchanged — every core, as before.
+function workerCountFor(cores, isMobile) {
+    const n = Math.max(1, cores | 0);
+    if (!isMobile) return n;
+    return Math.max(1, Math.min(4, Math.min(n, Math.ceil(n / 2))));
+}
+// script.js decides what counts as a phone; engine.js is loaded first, so it
+// asks rather than deciding again, and falls back to "desktop" on its own.
+function engineIsMobile() {
+    return typeof IS_MOBILE !== 'undefined' ? !!IS_MOBILE : false;
+}
+
 const Engine = {
     module: null,        // compiled WebAssembly.Module, cloned out to workers
     master: null,        // { exports, memory } on the main thread
@@ -84,8 +109,9 @@ const Engine = {
             }
             this.master = await this._instantiate();
 
-            this.coreCount = navigator.hardwareConcurrency || 4;
-            this._pendingCoreLabel = `<svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v2"></path><path d="M12 2v2"></path><path d="M17 20v2"></path><path d="M17 2v2"></path><path d="M2 12h2"></path><path d="M2 17h2"></path><path d="M2 7h2"></path><path d="M20 12h2"></path><path d="M20 17h2"></path><path d="M20 7h2"></path><path d="M7 20v2"></path><path d="M7 2v2"></path><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="8" y="8" width="8" height="8" rx="1"></rect></svg> ${this.coreCount} Cores · WASM${this.usingSimd ? '+SIMD' : ''}`;
+            this.hardwareCores = navigator.hardwareConcurrency || 4;
+            this.coreCount = workerCountFor(this.hardwareCores, engineIsMobile());
+            this._pendingCoreLabel = `<svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v2"></path><path d="M12 2v2"></path><path d="M17 20v2"></path><path d="M17 2v2"></path><path d="M2 12h2"></path><path d="M2 17h2"></path><path d="M2 7h2"></path><path d="M20 12h2"></path><path d="M20 17h2"></path><path d="M20 7h2"></path><path d="M7 20v2"></path><path d="M7 2v2"></path><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="8" y="8" width="8" height="8" rx="1"></rect></svg> ${this.coreCount}${this.coreCount < this.hardwareCores ? '/' + this.hardwareCores : ''} Cores · WASM${this.usingSimd ? '+SIMD' : ''}`;
 
             await this._spawnWorkers();
             return this;
@@ -258,6 +284,9 @@ const Engine = {
         this._hasGlobalBest = false;
         this._globalBestFitness = -Infinity;
         this._lastGateRatio = null;
+        // _rate is deliberately NOT cleared here: it describes the machine,
+        // not the population, and a Reset would otherwise throw away the one
+        // measurement that takes several generations to settle.
 
         ex.pop_init(this._popSize, 0, hiddenLayers, (Math.random() * 0xffffffff) >>> 0);
 
@@ -276,14 +305,61 @@ const Engine = {
         this._shipBrains();
     },
 
+    // Measured throughput per worker, in car-steps per millisecond, as a
+    // rolling average. Null until a worker has reported at least one round.
+    _rate: [],
+    // Smoothing. A single round is noisy — a slice whose cars all crashed in
+    // the first few frames finishes in no time — so each reading only moves
+    // the estimate a fifth of the way. Rebalancing therefore follows a
+    // sustained difference between cores and ignores one unlucky generation.
+    _RATE_ALPHA: 0.2,
+
+    _noteWorkerTiming: function(data) {
+        // Too small a sample says more about postMessage than about the core.
+        if (!(data.busyMs > 0.5) || !(data.carSteps > 0)) return;
+        const r = data.carSteps / data.busyMs;
+        const prev = this._rate[data.index];
+        this._rate[data.index] = prev > 0 ? prev + (r - prev) * this._RATE_ALPHA : r;
+    },
+
+    // Partition the population across workers. Slices stay contiguous so a
+    // render row's car id is just `sliceStart + i`.
+    //
+    // Sized by measured speed rather than equally. Every round ends at a
+    // barrier — nothing can be drawn or bred until the LAST worker reports —
+    // so equal slices on unequal cores means everyone waits for the slowest,
+    // and a phone's little cores are a third the speed of its big ones. Giving
+    // each worker a share proportional to how fast it has actually been makes
+    // them finish together, which is the only thing the barrier cares about.
+    // Before any timings exist this is exactly the old equal split.
     _sliceUp: function() {
         const n = this.workers.length || 1;
-        const per = Math.ceil(this._popSize / n);
-        this.slices = [];
+        const pop = this._popSize;
+        const weights = new Array(n);
+        let total = 0;
         for (let i = 0; i < n; i++) {
-            const start = Math.min(i * per, this._popSize);
-            const count = Math.min(per, this._popSize - start);
-            this.slices.push({ start, count });
+            const r = this._rate[i];
+            weights[i] = r > 0 ? r : 0;
+            total += weights[i];
+        }
+        // Any worker that has not reported yet, or a pool with no timings at
+        // all, falls back to an even share for everyone — mixing measured and
+        // assumed weights would hand the unmeasured ones whatever was left.
+        if (!(total > 0) || weights.some(w => w === 0)) {
+            for (let i = 0; i < n; i++) weights[i] = 1;
+            total = n;
+        }
+
+        this.slices = [];
+        let start = 0;
+        for (let i = 0; i < n; i++) {
+            // The last worker takes the remainder, so rounding can never lose
+            // or duplicate a car.
+            const count = i === n - 1
+                ? pop - start
+                : Math.min(pop - start, Math.max(0, Math.round((pop * weights[i]) / total)));
+            this.slices.push({ start, count: Math.max(0, count) });
+            start += count;
         }
     },
 
@@ -354,6 +430,7 @@ const Engine = {
     _handleWorkerMessage: function(data) {
         const st = this._runState;
         if (!st || data.type !== 'done') return;
+        this._noteWorkerTiming(data);
         if (data.maxLaps > st.maxLaps) st.maxLaps = data.maxLaps;
         if (!data.allCrashed) st.allCrashed = false;
         if (data.gateRatio) this._lastGateRatio = data.gateRatio;
@@ -394,6 +471,10 @@ const Engine = {
             this._f32(this.master, ex.gate_ratio_ptr(), ex.max_gates()).set(this._lastGateRatio);
         }
         ex.evolve(eliteClones, this._hasGlobalBest ? 1 : 0, generation | 0);
+        // A generation boundary is the one moment the partition can move: every
+        // worker is idle and about to be handed a fresh slice anyway, so
+        // resizing them here costs nothing beyond the arithmetic.
+        this._sliceUp();
         this._shipBrains();
         return { bestFitness: bestFit, globalBest: this._globalBestFitness };
     },

@@ -9,16 +9,28 @@
 //
 //   npx http-server -p 8765 . &
 //   node tools/e2e.mjs [http://127.0.0.1:8765]
+//
+// PLAYWRIGHT_CHROMIUM_PATH points at an already-installed Chromium, for
+// sandboxes and CI images that ship one at a version Playwright would
+// otherwise insist on re-downloading. Unset, Playwright finds its own.
 import { chromium } from 'playwright';
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8765';
+// The phone column of DEFAULT_SETTINGS in script.js, restated here on purpose:
+// a test that read the value out of the page could not tell the difference
+// between "the mobile defaults are applied" and "the mobile defaults are
+// whatever the page happens to be doing".
+const DEFAULTS_MOBILE = { pop: 150, elite: 15, laps: 2, hidden: 4 };
 let failures = 0;
 const check = (ok, name, detail) => {
     if (!ok) failures++;
     console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
 };
 
-const browser = await chromium.launch();
+const browser = await chromium.launch(
+    process.env.PLAYWRIGHT_CHROMIUM_PATH
+        ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }
+        : {});
 const page = await browser.newPage();
 
 const errors = [];
@@ -286,7 +298,8 @@ check(!afterReload.sessionTrack, 'a track made this session does not come back')
 check(!afterReload.ghost, 'storage planted by an older build is ignored');
 check(afterReload.tracks === boot.tracks, 'reload gives the built-in track list',
     `${afterReload.tracks} tracks`);
-check(afterReload.pop === 500, 'settings reset to defaults', `population ${afterReload.pop}`);
+check(afterReload.pop === boot.cars, 'settings reset to defaults',
+    `population ${afterReload.pop}`);
 
 // --- session round trip ---------------------------------------------------
 // Save the whole run, scramble the live state, load it back, and check the
@@ -493,6 +506,78 @@ await page.evaluate(() => { if (app.state.isEditing) editor.cancel(); });
         JSON.stringify(stamped.mobiles));
 }
 
+// --- the raster size and the coordinates that depend on it --------------
+// On a phone the canvas no longer rasterises a fixed 1200x900; it sizes itself
+// to what the display can resolve, and the scale is folded into the one view
+// transform. (On a desktop it is still the full 1200x900, which is what this
+// context is.) That makes the pointer maths the thing to watch: a click has to
+// land on the same world point it did before, at any raster size and any zoom,
+// or clicking a car selects its neighbour and dragging a track point puts it
+// somewhere else.
+{
+    const geom = await page.evaluate(() => {
+        const c = document.getElementById('sim-canvas');
+        const r = c.getBoundingClientRect();
+        // World -> the client coordinates a real pointer event would carry,
+        // going the long way round through the element's object-contain box.
+        const fit = Math.min(r.width / c.width, r.height / c.height);
+        const ox = (r.width - c.width * fit) / 2, oy = (r.height - c.height * fit) / 2;
+        const worldToClient = (wx, wy) => {
+            const v = app._viewMatrix();
+            return {
+                clientX: r.left + ox + (v.z * wx + v.e) * fit,
+                clientY: r.top + oy + (v.z * wy + v.f) * fit
+            };
+        };
+        const roundTrip = (wx, wy) => {
+            const p = app._toBackingPx(worldToClient(wx, wy));
+            const w = app.screenToWorld(p.x, p.y);
+            return Math.max(Math.abs(w.x - wx), Math.abs(w.y - wy));
+        };
+        const pts = [[600, 450], [100, 100], [1100, 800], [300, 620]];
+        const atRest = Math.max(...pts.map(([x, y]) => roundTrip(x, y)));
+
+        // And again zoomed in and panned off-centre, where the scale and the
+        // translation are both doing work.
+        app.state.view.zoom = 3.5;
+        app.state.view.panX = 430; app.state.view.panY = 560;
+        app._clampView();
+        const zoomed = Math.max(...pts.map(([x, y]) => roundTrip(x, y)));
+
+        // A right-button drag has to move the map by exactly the distance the
+        // pointer moved over it. Held here against the world point under the
+        // pointer, which must not shift at all during the drag.
+        const anchor = [700, 500];
+        const from = worldToClient(...anchor);
+        app.startPan({ preventDefault() {}, pointerId: 7, button: 2,
+                       clientX: from.clientX, clientY: from.clientY });
+        app.movePan({ pointerId: 7, clientX: from.clientX + 37, clientY: from.clientY - 21 });
+        const moved = app.screenToWorld(
+            ...(p => [p.x, p.y])(app._toBackingPx({ clientX: from.clientX + 37, clientY: from.clientY - 21 })));
+        const dragErr = Math.max(Math.abs(moved.x - anchor[0]), Math.abs(moved.y - anchor[1]));
+        app.endPan({ pointerId: 7 });
+        app.resetView();
+
+        return {
+            w: c.width, h: c.height, scale: app._renderScale,
+            bg: app.state.bgCanvas ? app.state.bgCanvas.width : 0,
+            atRest, zoomed, dragErr
+        };
+    });
+    check(geom.w > 0 && geom.w <= 1200 && geom.h === Math.round(geom.w * 0.75),
+        'the backing store is sized in whole pixels, in the world aspect',
+        `${geom.w}x${geom.h} backing store (scale ${geom.scale.toFixed(3)})`);
+    check(geom.scale === 1, 'and on a desktop it is the full 1200x900, unchanged');
+    check(geom.bg === geom.w, 'the cached background matches it exactly, so it blits 1:1',
+        `background ${geom.bg}px wide`);
+    check(geom.atRest < 0.5, 'a pointer lands on the world point it is over',
+        `worst error ${geom.atRest.toExponential(2)} world px`);
+    check(geom.zoomed < 0.5, 'and still does zoomed in and panned',
+        `worst error ${geom.zoomed.toExponential(2)} world px`);
+    check(geom.dragErr < 0.5, 'a pan drag moves the map exactly as far as the pointer',
+        `world point drifted ${geom.dragErr.toExponential(2)} px under the cursor`);
+}
+
 // --- canvas actually drew something ------------------------------------
 const drew = await page.evaluate(() => {
     const c = document.getElementById('sim-canvas');
@@ -505,6 +590,59 @@ check(drew > 2, 'canvas is rendering', `${drew} distinct sampled colours`);
 
 const realErrors = errors.filter(e => !/favicon|Failed to load resource/i.test(e));
 check(realErrors.length === 0, 'no page errors', realErrors.length ? realErrors.slice(0, 3).join(' | ') : 'clean');
+
+// --- the same page, told it is a phone ----------------------------------
+// A second context with a phone's user agent, viewport and pixel ratio. The
+// point is not that the layout reflows — that is CSS and always did — but that
+// the three things a phone actually cannot afford come out smaller: the field,
+// the worker pool, and the number of pixels being painted.
+{
+    const phone = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 ' +
+                   '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+        viewport: { width: 412, height: 915 },
+        deviceScaleFactor: 2.625,
+        isMobile: true, hasTouch: true
+    });
+    const mp = await phone.newPage();
+    const mobileErrors = [];
+    mp.on('pageerror', e => mobileErrors.push(String(e)));
+    await mp.goto(`${BASE}/index.html`, { waitUntil: 'load' });
+    await mp.waitForFunction(APP_READY, null, { timeout: 30000 });
+    const m = await mp.evaluate(() => ({
+        detected: IS_MOBILE,
+        pop: app.state.populationSize, elite: app.state.eliteClones,
+        laps: app.state.targetLaps, hidden: app.state.hiddenLayers,
+        cars: app.state.cars.length,
+        stride: Engine.master.ex.brain_stride(),
+        workers: Engine.workers.length, cores: Engine.hardwareCores,
+        canvasW: document.getElementById('sim-canvas').width,
+        sliderPop: +document.getElementById('cfg-populationSize').value,
+        sliderElite: +document.getElementById('cfg-eliteClones').value,
+        sliderLaps: +document.getElementById('cfg-targetLaps').value,
+        sliderHidden: +document.getElementById('cfg-hiddenLayers').value
+    }));
+    const d = DEFAULTS_MOBILE;
+    check(m.detected, 'a phone is recognised as one');
+    check(m.pop === d.pop && m.elite === d.elite && m.laps === d.laps && m.hidden === d.hidden,
+        'phone defaults are the lighter set',
+        `pop ${m.pop}, elite ${m.elite}, laps ${m.laps}, ${m.hidden} hidden units`);
+    check(m.cars === d.pop, 'and the field that was actually built matches', `${m.cars} cars`);
+    // 11 inputs x h, plus h x 2 out, plus h hidden biases and 2 output ones.
+    check(m.stride === 11 * d.hidden + d.hidden * 2 + d.hidden + 2,
+        'the smaller brain reaches wasm, not just the slider', `stride ${m.stride}`);
+    check(m.workers > 0 && m.workers <= 4 && m.workers <= m.cores,
+        'the worker pool is capped rather than one per logical core',
+        `${m.workers} of ${m.cores}`);
+    check(m.canvasW > 0 && m.canvasW < 1200, 'the canvas rasterises fewer pixels than the world',
+        `${m.canvasW}px wide backing store`);
+    check(m.sliderPop === m.pop && m.sliderElite === m.elite && m.sliderLaps === m.laps
+        && m.sliderHidden === m.hidden,
+        'and the sliders show what is actually in force');
+    check(mobileErrors.length === 0, 'no page errors on mobile',
+        mobileErrors.length ? mobileErrors.slice(0, 2).join(' | ') : 'clean');
+    await phone.close();
+}
 
 await browser.close();
 console.log();

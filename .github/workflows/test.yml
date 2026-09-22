@@ -37,8 +37,19 @@ jobs:
         with:
           node-version: 20
 
-      - name: Build both wasm variants
-        run: ./wasm/build.sh
+      # The committed .wasm files ARE the backend — Pages serves this repo as
+      # is and nothing compiles them at deploy time — so they have to be the
+      # ones sim.c produces. Same contract as the stylesheet below: rebuild,
+      # and fail if the bytes drift.
+      - name: Build both wasm variants, and check the committed ones match
+        run: |
+          cp wasm/sim.wasm /tmp/committed-sim.wasm
+          cp wasm/sim-simd.wasm /tmp/committed-sim-simd.wasm
+          ./wasm/build.sh
+          diff -q /tmp/committed-sim.wasm wasm/sim.wasm \
+            || { echo '::error::wasm/sim.wasm is stale — run ./wasm/build.sh and commit the result'; exit 1; }
+          diff -q /tmp/committed-sim-simd.wasm wasm/sim-simd.wasm \
+            || { echo '::error::wasm/sim-simd.wasm is stale — run ./wasm/build.sh and commit the result'; exit 1; }
 
       # external/tailwind.css is generated from the classes used in the markup
       # and committed, because Pages serves this repo as-is. Same contract the
@@ -115,6 +126,9 @@ jobs:
 
       # Loads the real page in a real browser: module compiles, worker pool
       # comes up, tracks generate, cars drive, generations advance, editor edits.
+      # Includes a second pass in a phone-shaped browser context: the lighter
+      # defaults, the capped worker pool and the smaller raster are things you
+      # only find out are wrong on a device, so they get checked here instead.
       - name: End-to-end
         run: |
           npx --yes http-server -p 8765 --silent . &

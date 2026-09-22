@@ -34,7 +34,7 @@ build() {
         -Wall -Wextra \
         -Wno-unused-parameter \
         -Wl,--no-entry \
-        -Wl,--initial-memory=16777216 \
+        -Wl,--initial-memory=6291456 \
         -Wl,-z,stack-size=262144 \
         -Wl,--strip-all \
         "$@" \
@@ -48,5 +48,13 @@ build() {
 # into calls to themselves. There is no -ffast-math either — the geometry leans
 # on exact float comparisons (`if (bottom == 0.0f)`), and reassociating those
 # would quietly change which walls a ray hits.
+#
+# --initial-memory is 6MB against 4.4MB of static data, and every instance
+# reserves the whole of it up front. The app runs one instance per core plus
+# the master, so this number is multiplied by nine on an eight-core machine —
+# which is why it is sized to the static data plus a megabyte and a half of
+# track arena rather than left at a round 16MB. Tracks that need more than
+# that grow the memory themselves (see arena_alloc); nothing on either side of
+# the boundary caches a view across a call that can grow it.
 build sim.wasm
 build sim-simd.wasm -msimd128

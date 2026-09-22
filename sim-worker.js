@@ -95,7 +95,14 @@ self.onmessage = async (e) => {
             break;
 
         case 'run': {
+            // Timed, so the master can see how fast THIS worker's core really
+            // is. On a phone the pool is spread over cores that differ by a
+            // factor of three, and the master divides this by the car-steps
+            // below to size the next generation's slices accordingly.
+            const t0 = performance.now();
             const maxLaps = ex.run(msg.iters);
+            const busyMs = performance.now() - t0;
+            const carSteps = ex.car_steps();
             const allCrashed = ex.all_crashed() === 1;
 
             // Hyper mode puts nothing on screen, so only fitness/laps/lap time
@@ -132,7 +139,7 @@ self.onmessage = async (e) => {
             // count them itself.
             self.postMessage({
                 type: 'done', index, start: popStart, count: popCount,
-                maxLaps, allCrashed, alive: ex.alive_count(),
+                maxLaps, allCrashed, alive: ex.alive_count(), busyMs, carSteps,
                 render: !!msg.wantRender, stride: ex.fitness_stride(), buffer, gateRatio
             }, gateRatio ? [buffer.buffer, gateRatio.buffer] : [buffer.buffer]);
             break;
