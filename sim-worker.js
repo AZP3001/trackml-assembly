@@ -94,6 +94,42 @@ self.onmessage = async (e) => {
             ex.pop_reset();
             break;
 
+        // Pool reshape, outgoing half: hand every car this worker holds back
+        // to the master exactly as it is mid-generation (see pack_state in
+        // sim.c), plus this slice's crash tally and — for the slice holding
+        // global car 0 — its per-gate pace, so neither is lost when the cars
+        // move to a different worker.
+        case 'export': {
+            ex.pack_state();
+            const words = ex.state_words();
+            const state = new Uint32Array(memory.buffer, ex.state_ptr(), popCount * words).slice();
+            const crashCount = i32(ex.crash_count_ptr(), ex.max_gates()).slice();
+            const gateRatio = popStart === 0 ? f32(ex.gate_ratio_ptr(), ex.max_gates()).slice() : null;
+            const transfer = [state.buffer, crashCount.buffer];
+            if (gateRatio) transfer.push(gateRatio.buffer);
+            self.postMessage({ type: 'exported', index, start: popStart, count: popCount, state, crashCount, gateRatio }, transfer);
+            break;
+        }
+
+        // Incoming half: take over a slice mid-generation. Same as 'pop' up to
+        // the brains and focus window, then the cars are overwritten with the
+        // state they had wherever they were before, instead of being reset to
+        // the start line. The crash tally starts from zero here — the master
+        // folded every old worker's count into its own running total before
+        // handing the cars out.
+        case 'import': {
+            popStart = msg.start;
+            popCount = msg.count;
+            ex.pop_init(popCount, popStart, msg.hidden, msg.seed);
+            const stride = ex.brain_stride();
+            f32(ex.brains_ptr(), popCount * stride).set(msg.brains.subarray(0, popCount * stride));
+            ex.set_focus_window(msg.focusLo === undefined ? -1 : msg.focusLo, msg.focusHi === undefined ? -1 : msg.focusHi);
+            new Uint32Array(memory.buffer, ex.state_ptr(), popCount * ex.state_words()).set(msg.state);
+            ex.unpack_state();
+            if (msg.gateRatio) f32(ex.gate_ratio_ptr(), ex.max_gates()).set(msg.gateRatio);
+            break;
+        }
+
         case 'run': {
             // Timed, so the master can see how fast THIS worker's core really
             // is. On a phone the pool is spread over cores that differ by a

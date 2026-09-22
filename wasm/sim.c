@@ -2499,6 +2499,106 @@ __attribute__((export_name("alive_count")))
 i32 alive_count(void) { return active_n; }
 
 // ---------------------------------------------------------------------------
+// Car-state interchange: every per-car field the step reads or writes, packed
+// STATE_WORDS 32-bit words per car, array-of-structs. Two consumers, one
+// layout:
+//
+//   * migration — the worker pool can change size (or move to the GPU)
+//     mid-generation, and the cars a worker was simulating have to carry on
+//     exactly where they were on whichever instance takes them next, rather
+//     than the whole field being sent back to the start line;
+//   * the WebGPU backend — gpu-worker.js keeps the population resident on the
+//     GPU in this exact layout (its WGSL `Car` struct declares the same fields
+//     in the same order), so building the initial state is pop_reset() here
+//     plus one upload, and nothing about spawning a car is written twice.
+//
+// Word map (f = f32, i = i32):
+//    0 x f  1 y f  2 angle f  3 vx f  4 vy f  5 speed f  6 fitness f
+//    7 crashed i  8 ttl i  9 frames i  10 nextCP i  11 laps i  12 cpReached i
+//   13 lastLap f  14 prevLapFrame i  15 lastCpFrame i  16 roadSeg i  17 focused i
+//   18 out0 f  19 out1 f  20..30 in[0..10] f  31 reserved (0)
+// ---------------------------------------------------------------------------
+#define STATE_WORDS 32
+static u32 state_buf[MAX_CARS * STATE_WORDS];
+static inline u32 fbits(float f) { union { float f; u32 u; } v; v.f = f; return v.u; }
+static inline float bitsf(u32 u) { union { u32 u; float f; } v; v.u = u; return v.f; }
+
+__attribute__((export_name("state_ptr")))   i32 state_ptr(void) { return (i32)(unsigned long)state_buf; }
+__attribute__((export_name("state_words"))) i32 state_words(void) { return STATE_WORDS; }
+
+__attribute__((export_name("pack_state")))
+void pack_state(void) {
+    for (i32 i = 0; i < pop_n; i++) {
+        u32 *s = &state_buf[i * STATE_WORDS];
+        s[0] = fbits(car_x[i]); s[1] = fbits(car_y[i]); s[2] = fbits(car_angle[i]);
+        s[3] = fbits(car_vx[i]); s[4] = fbits(car_vy[i]); s[5] = fbits(car_speed[i]);
+        s[6] = fbits(car_fitness[i]);
+        s[7] = (u32)car_crashed[i]; s[8] = (u32)car_ttl[i]; s[9] = (u32)car_frames[i];
+        s[10] = (u32)car_nextCP[i]; s[11] = (u32)car_laps[i]; s[12] = (u32)car_cpReached[i];
+        s[13] = fbits(car_lastLap[i]);
+        s[14] = (u32)car_prevLapFrame[i]; s[15] = (u32)car_lastCpFrame[i];
+        s[16] = (u32)car_roadSeg[i]; s[17] = (u32)car_focused[i];
+        s[18] = fbits(car_out[i * OUT_N]); s[19] = fbits(car_out[i * OUT_N + 1]);
+        for (i32 k = 0; k < IN_N; k++) s[20 + k] = fbits(car_in[i * IN_N + k]);
+        s[31] = 0;
+    }
+}
+
+// The inverse, for however many cars pop_init() last sized this slice to.
+// Rebuilds the active list from the crashed flags it just wrote, so the next
+// run() steps exactly the cars that were still driving when they were packed.
+__attribute__((export_name("unpack_state")))
+void unpack_state(void) {
+    for (i32 i = 0; i < pop_n; i++) {
+        const u32 *s = &state_buf[i * STATE_WORDS];
+        car_x[i] = bitsf(s[0]); car_y[i] = bitsf(s[1]); car_angle[i] = bitsf(s[2]);
+        car_vx[i] = bitsf(s[3]); car_vy[i] = bitsf(s[4]); car_speed[i] = bitsf(s[5]);
+        car_fitness[i] = bitsf(s[6]);
+        car_crashed[i] = (i32)s[7]; car_ttl[i] = (i32)s[8]; car_frames[i] = (i32)s[9];
+        car_nextCP[i] = (i32)s[10]; car_laps[i] = (i32)s[11]; car_cpReached[i] = (i32)s[12];
+        car_lastLap[i] = bitsf(s[13]);
+        car_prevLapFrame[i] = (i32)s[14]; car_lastCpFrame[i] = (i32)s[15];
+        car_roadSeg[i] = (i32)s[16]; car_focused[i] = (i32)s[17];
+        car_out[i * OUT_N] = bitsf(s[18]); car_out[i * OUT_N + 1] = bitsf(s[19]);
+        for (i32 k = 0; k < IN_N; k++) car_in[i * IN_N + k] = bitsf(s[20 + k]);
+    }
+    rebuild_active();
+}
+
+// Everything about the current track a second implementation of the step
+// needs, in one call: counts, the scalars the step reads, and where each
+// array lives in this instance's memory. Word map (i = i32, f = f32, p = ptr):
+//    0 cpN i  1 startCp i  2 zoneN i  3 centerN i  4 gridNx i  5 gridNy i
+//    6 gridItems i  7 bucketWalls i  8 hasGrid i  9 hasBuckets i
+//   10 wbs_start p  11..18 b_x1,b_y1,b_dx,b_dy,b_mx,b_my,b_r2,b_hl p
+//   19 cps p  20 zones p  21 centreline p  22 widths p  23 grid_start p  24 grid_items p
+//   25 gridCell f  26 gridOx f  27 gridOy f  28 trackLen f  29 wMax f  30 sensorLen f
+static u32 tinfo_buf[32];
+__attribute__((export_name("track_info")))
+i32 track_info(void) {
+    u32 *t = tinfo_buf;
+    i32 hasBuckets = wbs_start != 0 && tk_cp_n > 0;
+    i32 hasGrid = grid_items != 0 && tk_w != 0;
+    t[0] = (u32)tk_cp_n; t[1] = (u32)tk_start_cp; t[2] = (u32)tk_zone_n; t[3] = (u32)tk_center_n;
+    t[4] = (u32)grid_nx; t[5] = (u32)grid_ny;
+    t[6] = (u32)(hasGrid ? grid_start[grid_nx * grid_ny] : 0);
+    t[7] = (u32)(hasBuckets ? wbs_start[tk_cp_n] : 0);
+    t[8] = (u32)hasGrid; t[9] = (u32)hasBuckets;
+    t[10] = (u32)(unsigned long)wbs_start;
+    t[11] = (u32)(unsigned long)b_x1; t[12] = (u32)(unsigned long)b_y1;
+    t[13] = (u32)(unsigned long)b_dx; t[14] = (u32)(unsigned long)b_dy;
+    t[15] = (u32)(unsigned long)b_mx; t[16] = (u32)(unsigned long)b_my;
+    t[17] = (u32)(unsigned long)b_r2; t[18] = (u32)(unsigned long)b_hl;
+    t[19] = (u32)(unsigned long)tk_cps; t[20] = (u32)(unsigned long)tk_zones;
+    t[21] = (u32)(unsigned long)tk_center; t[22] = (u32)(unsigned long)tk_w;
+    t[23] = (u32)(unsigned long)grid_start; t[24] = (u32)(unsigned long)grid_items;
+    t[25] = fbits(grid_cell); t[26] = fbits(grid_ox); t[27] = fbits(grid_oy);
+    t[28] = fbits(tk_len); t[29] = fbits(tk_w_max); t[30] = fbits(cfg_sensorLen);
+    t[31] = 0;
+    return (i32)(unsigned long)tinfo_buf;
+}
+
+// ---------------------------------------------------------------------------
 // Evolution. Selection needs the whole population, which is spread across
 // workers, so the main thread's instance owns it: it holds every brain, breeds
 // the next generation here, and hands each worker back its slice.

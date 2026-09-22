@@ -6,15 +6,17 @@
   "scripts": {
     "build": "./wasm/build.sh",
     "serve": "http-server -p 8765 .",
-    "test": "npm run test:math && npm run test:autowidth && npm run test:gates && npm run test:race && npm run test:physics && npm run test:evolution && npm run test:version",
+    "test": "npm run test:math && npm run test:autowidth && npm run test:gates && npm run test:race && npm run test:physics && npm run test:evolution && npm run test:migrate && npm run test:version",
     "test:math": "node tools/mathtest.mjs wasm/sim.wasm && node tools/mathtest.mjs wasm/sim-simd.wasm",
     "test:autowidth": "node tools/autowidth.mjs wasm/sim.wasm && node tools/autowidth.mjs wasm/sim-simd.wasm",
     "test:gates": "node tools/checkpoints.mjs wasm/sim.wasm && node tools/checkpoints.mjs wasm/sim-simd.wasm",
     "test:race": "node tools/racepace.mjs wasm/sim.wasm",
     "test:physics": "node tools/carphysics.mjs wasm/sim.wasm && node tools/carphysics.mjs wasm/sim-simd.wasm",
     "test:evolution": "node tools/mutationsettle.mjs wasm/sim.wasm && node tools/mutationsettle.mjs wasm/sim-simd.wasm",
+    "test:migrate": "node tools/statemigrate.mjs wasm/sim.wasm && node tools/statemigrate.mjs wasm/sim-simd.wasm",
     "test:version": "node tools/versioncheck.mjs",
     "test:e2e": "node tools/e2e.mjs",
+    "test:gpu": "node tools/gpuparity.mjs",
     "bench": "node tools/bench.mjs",
     "build:css": "./tools/build-css.sh"
   },

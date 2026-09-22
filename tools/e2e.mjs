@@ -27,10 +27,12 @@ const check = (ok, name, detail) => {
     console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
 };
 
-const browser = await chromium.launch(
-    process.env.PLAYWRIGHT_CHROMIUM_PATH
-        ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }
-        : {});
+// --enable-unsafe-webgpu so the CPU/GPU toggle can be exercised headless
+// (SwiftShader's software adapter); it changes nothing else about the page.
+const browser = await chromium.launch({
+    ...(process.env.PLAYWRIGHT_CHROMIUM_PATH ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH } : {}),
+    args: ['--enable-unsafe-webgpu']
+});
 const page = await browser.newPage();
 
 const errors = [];
@@ -129,12 +131,62 @@ check(afterGen.cars === boot.cars, 'population size held', `${afterGen.cars} car
 
 // --- worker-count slider --------------------------------------------------
 // Drives the real slider (a real 'input' event, proving the data-input
-// wiring, not a hand call to Engine.setCoreCount) down to one core, confirms
-// training keeps working — no hang, no lost cars — on the smaller pool, then
-// back up to the full hardware count and confirms the same there. Shrinking
-// only lands between rounds and growing happens in the background (see
-// Engine._maybeResizePool), so both are given a moment to actually land
-// before being checked.
+// wiring, not a hand call to Engine.setCoreCount). The pool now changes
+// shape MID-GENERATION: every car is exported from the old workers and
+// imported into the new ones exactly where it was (see Engine._reshape), so
+// the checks are that the label moves the instant the slider does, that the
+// pool lands in well under a second without the generation ending, that the
+// cars carry on from where they were rather than back on the start line, and
+// that training carries on afterwards.
+const setCores = n => page.evaluate((v) => {
+    const el = document.getElementById('cfg-coreCount');
+    el.value = v;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    return document.getElementById('val-cores').textContent;
+}, n);
+// Positions of every still-driving car, and how many of them are still near
+// the start line — the tell-tale of a population that got reset.
+const snapCars = () => page.evaluate(() => {
+    const s = app.currentTrack.startPos;
+    return app.state.cars.map(c => ({ x: c.x, y: c.y, crashed: c.crashed, off: Math.hypot(c.x - s.x, c.y - s.y) }));
+});
+// A pool change happens between rounds; pause, let the round in flight land,
+// reshape, then run a couple of frames and see where the cars went.
+async function reshapeMidRace(label, doChange, landed) {
+    await page.evaluate(() => { app.state.hyperMode = false; app.state.isRunning = true; });
+    await page.waitForFunction(() => {
+        const s = app.currentTrack.startPos;
+        return app.state.cars.filter(c => !c.crashed && Math.hypot(c.x - s.x, c.y - s.y) > 60).length >= 5;
+    }, null, { timeout: 60000 });
+    await page.evaluate(() => { app.state.isRunning = false; });
+    await page.waitForFunction(() => !app._pending && !Engine._runState, null, { timeout: 10000 });
+    const gen0 = await page.evaluate(() => app.state.generation);
+    const before = await snapCars();
+    const t0 = Date.now();
+    const changeResult = await doChange();
+    await page.waitForFunction(landed, null, { timeout: 60000 });
+    const ms = Date.now() - t0;
+    // A handful of frames at 1x: each round moves a car at most Max Speed
+    // (10px), so a car that carried on is within a few dozen px of where it
+    // was, and one that was reset is back on the start line.
+    await page.evaluate(async () => {
+        app.state.isRunning = true;
+        for (let i = 0; i < 4; i++) await new Promise(r => requestAnimationFrame(r));
+        app.state.isRunning = false;
+    });
+    await page.waitForFunction(() => !app._pending && !Engine._runState, null, { timeout: 10000 });
+    const after = await snapCars();
+    const gen1 = await page.evaluate(() => app.state.generation);
+    let carried = 0, eligible = 0;
+    before.forEach((b, i) => {
+        if (b.crashed || b.off < 60) return;
+        eligible++;
+        const a = after[i];
+        if (a && (a.crashed || (Math.hypot(a.x - b.x, a.y - b.y) < 80 && a.off > 20))) carried++;
+    });
+    return { ms, gen0, gen1, carried, eligible, changeResult };
+}
+
 {
     const bounds = await page.evaluate(() => {
         const el = document.getElementById('cfg-coreCount');
@@ -144,32 +196,91 @@ check(afterGen.cars === boot.cars, 'population size held', `${afterGen.cars} car
         'the cores slider is bounded to the hardware and starts at the stock default',
         `min ${bounds.min}, max ${bounds.max}, value ${bounds.value} (hardware ${bounds.hw})`);
 
-    const setCores = n => page.evaluate((v) => {
-        const el = document.getElementById('cfg-coreCount');
-        el.value = v;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-    }, n);
-
-    await setCores(1);
-    await page.waitForFunction(() => Engine.workers.length === 1, null, { timeout: 15000 });
-    const genAtOne = await page.evaluate(() => app.state.generation);
-    await page.waitForFunction(g => app.state.generation > g, genAtOne, { timeout: 60000 });
-    const shrunk = await page.evaluate(() => ({ workers: Engine.workers.length, cars: app.state.cars.length }));
-    check(shrunk.workers === 1, 'shrinking the slider to 1 drops the pool to a single worker',
-        `${shrunk.workers} worker(s)`);
-    check(shrunk.cars === boot.cars, 'and training keeps going on it, population intact',
-        `${shrunk.cars} cars`);
+    const down = await reshapeMidRace('shrink', () => setCores(1), () => Engine.workers.length === 1);
+    check(down.changeResult === `1 / ${bounds.hw}`, 'the slider label follows the slider the instant it moves',
+        `"${down.changeResult}"`);
+    check(down.ms < 3000 && down.gen0 === down.gen1,
+        'shrinking to 1 core lands mid-generation, without waiting for the generation to end',
+        `pool of 1 in ${down.ms}ms, still generation ${down.gen1}`);
+    check(down.eligible > 0 && down.carried === down.eligible,
+        'and every car carries on from where it was instead of going back to the start line',
+        `${down.carried}/${down.eligible} cars picked up where they left off`);
 
     const target = bounds.hw > 1 ? bounds.hw : 1;
-    await setCores(target);
-    await page.waitForFunction(t => Engine.workers.length === t, target, { timeout: 15000 });
-    const genAtFull = await page.evaluate(() => app.state.generation);
-    await page.waitForFunction(g => app.state.generation > g, genAtFull, { timeout: 60000 });
-    const grown = await page.evaluate(() => ({ workers: Engine.workers.length, cars: app.state.cars.length }));
-    check(grown.workers === target, 'and growing it back rebuilds the pool up to the hardware count',
-        `${grown.workers}/${target} workers`);
-    check(grown.cars === boot.cars, 'training still advances afterwards, population still intact',
-        `${grown.cars} cars`);
+    const up = await reshapeMidRace('grow', () => setCores(target), t => Engine.workers.length === Engine.hardwareCores);
+    check(up.ms < 5000 && up.gen0 === up.gen1 && up.carried === up.eligible,
+        'growing it back to every core does the same, mid-generation, cars intact',
+        `${target} workers in ${up.ms}ms, ${up.carried}/${up.eligible} cars carried over`);
+
+    await page.evaluate(() => { app.state.isRunning = true; });
+    const g = await page.evaluate(() => app.state.generation);
+    await page.waitForFunction(g => app.state.generation > g, g, { timeout: 60000 });
+    const after = await page.evaluate(() => ({ workers: Engine.workers.length, cars: app.state.cars.length,
+        badge: document.getElementById('core-count').textContent.trim() }));
+    check(after.cars === boot.cars && after.workers === target,
+        'training still advances afterwards, population intact', `${after.cars} cars on ${after.workers} workers`);
+    check(after.badge.includes(`${target}`) && after.badge.includes('Cores'),
+        'and the Compute badge reports the pool as it actually is', `"${after.badge}"`);
+}
+
+// --- CPU / GPU toggle ------------------------------------------------------
+// Real clicks on the real toggle. Same mid-generation hand-over as the
+// slider, but to a WebGPU compute shader — and back, both on request and on
+// a lost GPU. Headless Chromium here runs WebGPU on SwiftShader (software),
+// so this proves the wiring, not the speed; tools/gpuparity.mjs proves the
+// GPU computes the same race.
+{
+    const hasGpu = await page.evaluate(async () => !!(navigator.gpu && await navigator.gpu.requestAdapter()));
+    if (!hasGpu) {
+        console.log('skip  no WebGPU adapter in this browser — GPU toggle not exercised');
+    } else {
+        // The toggle lives in the settings panel, which starts collapsed.
+        await page.evaluate(() => {
+            if (document.getElementById('config-panel').classList.contains('hidden')) app.toggleSettings();
+        });
+        const toGpu = await reshapeMidRace('gpu', () => page.click('#btn-compute-gpu'), () => Engine.mode === 'gpu');
+        const ui = await page.evaluate(() => ({
+            workers: Engine.workers.length,
+            badge: document.getElementById('core-count').textContent.trim(),
+            gpuBtn: document.getElementById('btn-compute-gpu').className,
+            sliderDisabled: document.getElementById('cfg-coreCount').disabled
+        }));
+        check(ui.workers === 1 && /bg-blue-600/.test(ui.gpuBtn) && ui.badge.includes('GPU'),
+            'the GPU toggle moves the whole population onto one WebGPU worker', `badge "${ui.badge}"`);
+        check(toGpu.gen0 === toGpu.gen1 && toGpu.carried === toGpu.eligible,
+            '  mid-generation, every car carrying on from where it was',
+            `${toGpu.carried}/${toGpu.eligible} cars, ${toGpu.ms}ms (shader compile included)`);
+        check(ui.sliderDisabled, '  and the CPU-cores slider stands down while the GPU runs');
+
+        await page.evaluate(() => { app.state.hyperMode = true; app.state.isRunning = true; });
+        const g0 = await page.evaluate(() => app.state.generation);
+        await page.waitForFunction(g => app.state.generation >= g + 2, g0, { timeout: 180000 });
+        await page.evaluate(async () => { await new Promise(r => setTimeout(r, 1200)); });
+        const trained = await page.evaluate(() => ({ gen: app.state.generation, cars: app.state.cars.length,
+            best: app.state.stats.length ? app.state.stats[0].best : null,
+            rate: document.getElementById('compute-rate').textContent }));
+        check(trained.cars === boot.cars && Number.isFinite(trained.best),
+            'generations evolve on the GPU backend', `gen ${g0} -> ${trained.gen}, best ${Math.round(trained.best)}`);
+        check(/car-steps\/s/.test(trained.rate), '  and the throughput readout measures it', `"${trained.rate}"`);
+        await page.evaluate(() => { app.state.hyperMode = false; });
+
+        // A GPU that goes away mid-race (driver reset, a phone reclaiming it)
+        // must hand the race back to the CPU, not freeze it.
+        const lost = await reshapeMidRace('lost', () => page.evaluate(() => Engine._onGpuLost('simulated device loss')),
+            () => Engine.mode === 'cpu');
+        const fell = await page.evaluate(() => ({ workers: Engine.workers.length, target: Engine._target.cores,
+            status: document.getElementById('compute-status').textContent,
+            cpuBtn: document.getElementById('btn-compute-cpu').className }));
+        check(fell.workers === fell.target && /bg-blue-600/.test(fell.cpuBtn) && /GPU unavailable/.test(fell.status),
+            'a lost GPU falls back to the CPU pool and says so', `"${fell.status}"`);
+        check(lost.gen0 === lost.gen1 && lost.carried === lost.eligible,
+            '  mid-generation, from the GPU\'s last state', `${lost.carried}/${lost.eligible} cars carried over`);
+
+        await page.evaluate(() => { app.state.isRunning = true; });
+        const g1 = await page.evaluate(() => app.state.generation);
+        await page.waitForFunction(g => app.state.generation > g, g1, { timeout: 60000 });
+        check(true, '  and training carries on there');
+    }
 }
 
 // The mutation-settle/focus-mode bookkeeping (see script.js: app.evolve) ran

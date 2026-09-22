@@ -14,7 +14,7 @@ const SVG_PAUSE = `<svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewB
 // Cached DOM references — populated once in _initUICache(), used everywhere else
 const ui = {};
 // Dirty-check values for updateUI — skip DOM writes if unchanged
-let _ui_gen = -1, _ui_alive = -1, _ui_allBest = null, _ui_cores = -1;
+let _ui_gen = -1, _ui_alive = -1, _ui_allBest = null, _ui_pool = '', _ui_tpAt = 0;
 
 const SETTING_DESCRIPTIONS = {
     speedMultiplier: "Simulation cycles per frame. High values train extremely fast.",
@@ -28,8 +28,14 @@ const SETTING_DESCRIPTIONS = {
     maxSpeed: "Top speed. Higher speeds require faster AI reaction times.",
     acceleration: "Engine power.", turnSpeed: "Steering sensitivity. Cars turn tightest at low speed and lose authority as they speed up, same as a real car's grip limit.",
     brakeStrength: "How hard the brake pedal bites. Braking now scales with how hard the AI presses it, instead of every negative throttle snapping speed down by the same flat amount.",
-    coreCount: "How many CPU cores run the simulation — one worker (its own wasm instance, its own slice of the population) per core. Stock is every core the machine has; pulling it down leaves the rest free for other tabs/apps at the cost of training speed. Takes effect live, no reset needed: a worker is added or dropped at the next generation boundary, never mid-round."
+    coreCount: "How many CPU cores run the simulation — one worker (its own wasm instance, its own slice of the population) per core. Stock is every core the machine has; pulling it down leaves the rest free for other tabs/apps at the cost of training speed. Takes effect within a frame or two, mid-generation: every car is handed to its new core exactly where it was, nobody restarts. At 1x speed the race is paced by the screen, so the difference shows in hyper mode and in the steps/s readout.",
+    computeMode: "Where the simulation runs. CPU (stock): WebAssembly on every core, as above. GPU: the whole step — wall raycasts, the neural networks, physics, gates and scoring — runs as a WebGPU compute shader with the population kept in GPU memory, and only the results come back, once per frame (or once per chunk in hyper mode). It pays off most with big populations and in hyper mode; with a small field the CPU can be just as fast, so compare the steps/s readout on your own machine. Needs WebGPU; if the GPU is unavailable or lost, the race carries on on the CPU from where it was."
 };
+
+// WebGPU is exposed or it isn't; whether an adapter is actually there (a
+// blocklisted driver, a GPU-less VM) is only found out by trying, which the
+// GPU worker does the moment the toggle asks for it.
+const GPU_API = typeof navigator !== 'undefined' && !!navigator.gpu;
 
 // How many simulation steps to ask for per round trip to the workers.
 // Hyper mode doesn't draw, so nothing is gained by coming back every frame and
@@ -48,6 +54,13 @@ const HYPER_CHUNK = 2500;
 // spend that half of the frame budget on training instead of painting; see
 // app.state.renderHz / app.setRenderHz.
 const RENDER_HZ_DEFAULT = 60;
+
+// 1234567 -> "1.23M", 45600 -> "45.6k".
+function formatRate(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 1 : 2) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k';
+    return Math.round(n).toString();
+}
 
 // Cached car sprite. The car body is 14x8 drawn at 1.5x, so 21x12 covers it
 // exactly; the origin sits at the middle.
@@ -367,6 +380,7 @@ const app = {
         ui.btnFps30     = $('btn-fps-30');
         ui.btnFps60     = $('btn-fps-60');
         ui.btnFollowCar = $('btn-follow-car');
+        ui.computeRate  = $('compute-rate');
         this._syncRenderHzUI();
         this._syncFollowCarUI();
         // Apply the pending Engine core label now that the element is cached
@@ -763,6 +777,8 @@ const app = {
             await Engine.ready();
             if(ui.coreCount && Engine._pendingCoreLabel) ui.coreCount.innerHTML = Engine._pendingCoreLabel;
             this._initCoreCountSlider();
+            Engine.onPoolChange = () => this._syncComputeUI();
+            this._syncComputeUI();
             this.resetTracks();
             this.initChart();
             this._updateStatsTable();
@@ -1581,7 +1597,57 @@ const app = {
     // pool doesn't actually reach the requested count until the resize —
     // synchronous for a shrink, asynchronous for a grow — finishes.
     updateCoreCount: function(v) {
-        Engine.setCoreCount(parseInt(v, 10));
+        const n = parseInt(v, 10);
+        const lbl = document.getElementById('val-cores');
+        if(lbl) lbl.innerText = n + ' / ' + (Engine.hardwareCores || n);
+        Engine.setCoreCount(n);
+    },
+
+    // CPU <-> GPU. The pool change itself is live and keeps every car where it
+    // is (see Engine._reshape); bringing a GPU up takes a moment the first time
+    // (finding an adapter, compiling the shaders), and the old backend keeps
+    // racing meanwhile, so the toggle shows it as pending until it lands.
+    setComputeMode: async function(mode) {
+        if(mode === 'gpu' && !GPU_API) {
+            Engine.gpuError = "WebGPU isn't available in this browser";
+            this._syncComputeUI();
+            return;
+        }
+        this._computePending = mode;
+        this._syncComputeUI();
+        await Engine.setComputeMode(mode);
+        this._computePending = null;
+        this._syncComputeUI();
+    },
+    _computePending: null,
+    _syncComputeUI: function() {
+        const want = this._computePending || Engine.mode;
+        const ON = 'px-2.5 py-1 text-[10px] font-bold rounded bg-blue-600 text-white transition-colors';
+        const OFF = 'px-2.5 py-1 text-[10px] font-bold rounded text-slate-400 hover:bg-slate-600 transition-colors';
+        const cpu = document.getElementById('btn-compute-cpu'), gpu = document.getElementById('btn-compute-gpu');
+        if(cpu) cpu.className = want === 'cpu' ? ON : OFF;
+        if(gpu) {
+            gpu.className = (want === 'gpu' ? ON : OFF) + (GPU_API ? '' : ' opacity-40 cursor-not-allowed');
+            gpu.title = GPU_API ? 'Run the simulation as a WebGPU compute shader' : "WebGPU isn't available in this browser";
+        }
+        const onGpu = Engine.mode === 'gpu';
+        const slider = document.getElementById('cfg-coreCount');
+        if(slider) slider.disabled = onGpu;
+        const coreRow = document.getElementById('core-slider-row');
+        if(coreRow) coreRow.classList.toggle('opacity-40', onGpu);
+        // Straight away rather than on the next updateUI: in hyper mode the
+        // loop can be waiting on a long round when the switch lands.
+        if(ui.coreCount && Engine.workers.length) ui.coreCount.innerHTML = Engine.coreLabelHTML();
+        const status = document.getElementById('compute-status');
+        if(status) {
+            let text = '', warn = false;
+            if(this._computePending === 'gpu' && !onGpu) text = 'Starting the GPU — the CPU keeps racing meanwhile…';
+            else if(Engine.gpuError && !onGpu) { text = 'GPU unavailable: ' + Engine.gpuError + ' — running on the CPU.'; warn = true; }
+            else if(onGpu) text = 'Every car runs on the GPU; the core slider applies to CPU mode.';
+            status.textContent = text;
+            status.className = 'text-[9px] leading-snug ' + (warn ? 'text-amber-400' : 'text-slate-500') + (text ? '' : ' hidden');
+        }
+        _ui_pool = '';
     },
     syncSettingsUI: function() {
         const st = this.state;
@@ -1601,7 +1667,7 @@ const app = {
         apply('cfg-turnSpeed', st.physics.turnSpeed, 'val-turn');
         apply('cfg-brakeStrength', st.physics.brakeStrength, 'val-brakeStrength');
         const nudgeBox = document.getElementById('cfg-nudgeMode'); if(nudgeBox) nudgeBox.checked = !!st.nudgeMode;
-        apply('cfg-coreCount', Engine.coreCount || 1, 'val-cores', v => v + ' / ' + (Engine.hardwareCores || v));
+        if(Engine._target) apply('cfg-coreCount', Engine._target.cores, 'val-cores', v => v + ' / ' + (Engine.hardwareCores || v));
     },
     // The slider's range is device-dependent (1..every logical core the
     // machine reports), so unlike every other setting it can't ship a fixed
@@ -1653,10 +1719,20 @@ const app = {
         // only actually reflects reality once the resize has landed, not the
         // instant it's requested. Cheap enough to just poll here every frame
         // rather than have engine.js reach into the DOM itself.
-        const cores = Engine.workers ? Engine.workers.length : 0;
-        if(_ui_cores !== cores && cores > 0) {
+        const pool = Engine.workers && Engine.workers.length ? Engine.mode + Engine.workers.length + Engine.gpuLabel : '';
+        if(_ui_pool !== pool && pool) {
             if(ui.coreCount) ui.coreCount.innerHTML = Engine.coreLabelHTML();
-            _ui_cores = cores;
+            _ui_pool = pool;
+        }
+        // Twice a second is plenty for a number people read, and it keeps the
+        // text node from being rewritten sixty times a second.
+        const now = performance.now();
+        if(ui.computeRate && now - _ui_tpAt > 500) {
+            _ui_tpAt = now;
+            const tp = Engine.throughput;
+            ui.computeRate.textContent = this.state.isRunning && tp.stepsPerSec > 0
+                ? `${formatRate(tp.stepsPerSec)} car-steps/s · ${tp.roundMs.toFixed(1)} ms/round`
+                : 'Start the race to measure throughput';
         }
     },
 

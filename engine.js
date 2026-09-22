@@ -113,9 +113,12 @@ const Engine = {
 
             this.hardwareCores = navigator.hardwareConcurrency || 4;
             this.coreCount = workerCountFor(this.hardwareCores, engineIsMobile());
-            this._pendingCoreLabel = this.coreLabelHTML();
+            this._target = { mode: 'cpu', cores: this.coreCount };
+            this._crashBase = new Int32Array(this.master.ex.max_gates());
 
-            await this._spawnWorkers();
+            this.workers = await this._spawnPool('cpu', this.coreCount, 0);
+            this._incoming = [];
+            this._pendingCoreLabel = this.coreLabelHTML();
             return this;
         })();
         return this._ready;
@@ -135,99 +138,274 @@ const Engine = {
         return { ex: instance.exports, mem: instance.exports.memory };
     },
 
-    _spawnWorkers: function() {
-        return Promise.all(Array.from({ length: this.coreCount }, (_, i) => new Promise((resolve, reject) => {
-            const w = new Worker(`./sim-worker.js?v=${ASSET_VERSION}`);
-            w.onerror = e => { console.error('Worker error:', e.message); reject(new Error(e.message)); };
+    // ---- the worker pool -----------------------------------------------
+    // Two shapes. 'cpu': one sim-worker.js (its own wasm instance, its own
+    // slice of the population) per core, `cores` of them. 'gpu': a single
+    // gpu-worker.js, which speaks the same protocol but runs every car on the
+    // GPU. Both change LIVE, mid-generation, from the Compute panel:
+    //
+    //   1. whatever new workers the target shape needs are spawned and brought
+    //      up to date (track, config) in the background while the current pool
+    //      keeps racing — that is the slow part (a GPU has to find an adapter
+    //      and compile its shaders), and it costs the running race nothing;
+    //   2. then new rounds are held back, the one in flight (at most one) is
+    //      allowed to finish, and every current worker hands back its cars
+    //      exactly as they are ('export');
+    //   3. and the pool is swapped, re-sliced, and every car handed to its new
+    //      worker ('import') to carry on from precisely where it was.
+    //
+    // Only step 2 stops the race, and only for one message round trip, which
+    // is why moving the slider or flipping to GPU takes effect within a frame
+    // or two instead of at the end of the generation — the population is
+    // never regenerated and nobody goes back to the start line.
+    //
+    // A worker is killed only after it has answered its export, never while
+    // a round is waiting on it: run()'s promise counts replies, and one that
+    // never arrives would freeze the main loop for good.
+    mode: 'cpu',
+    gpuLabel: '',
+    gpuError: '',
+    onPoolChange: null,
+    _target: null,
+    _incoming: [],
+    _reshaping: null,
+    _reshapeAgain: false,
+    _gate: null,
+    _idleWaiters: [],
+    _exportSink: null,
+    // Bumped by anything that hands the pool a fresh population. A reshape
+    // that sees it change while it was collecting cars knows those cars are
+    // stale and ships the new population instead.
+    _popEpoch: 0,
+    // Crash tallies from workers that have since been retired (or had their
+    // cars migrated), folded in so evolve() still sees the whole generation.
+    _crashBase: null,
+    _lastConfig: null,
+
+    // Spawns `count` workers of one kind with indices firstIndex.., resolves
+    // once every one has finished its handshake and been caught up on the
+    // current track and config. They sit in _incoming — reachable by
+    // setTrack/pushConfig, invisible to run() — until a reshape adopts them.
+    _spawnPool: function(mode, count, firstIndex) {
+        const url = mode === 'gpu' ? `./gpu-worker.js?v=${ASSET_VERSION}` : `./sim-worker.js?v=${ASSET_VERSION}`;
+        const spawned = [];
+        const one = index => new Promise((resolve, reject) => {
+            const w = new Worker(url);
+            spawned.push(w);
+            w.onerror = e => reject(new Error(e.message || 'worker failed to start'));
             w.onmessage = e => {
-                if (e.data.type === 'ready') { resolve(w); return; }
-                this._handleWorkerMessage(e.data);
+                const d = e.data;
+                if (d.type === 'gpu-error') { reject(new Error(d.message)); return; }
+                if (d.type !== 'ready') return;
+                w.onmessage = ev => this._handleWorkerMessage(ev.data);
+                w.onerror = ev => console.error('Worker error:', ev.message);
+                if (d.gpu) this.gpuLabel = d.gpu;
+                if (this._lastTrackMsg) w.postMessage({ type: 'track', def: this._lastTrackMsg.def, config: this._lastTrackMsg.config });
+                else if (this._lastConfig) w.postMessage({ type: 'config', args: this._lastConfig });
+                this._incoming.push(w);
+                resolve(w);
             };
-            w.postMessage({ type: 'init', module: this.module, index: i });
-            this.workers.push(w);
-        })));
+            w.postMessage({ type: 'init', module: this.module, index });
+        });
+        return Promise.all(Array.from({ length: count }, (_, k) => one(firstIndex + k))).catch(err => {
+            for (const w of spawned) w.terminate();
+            this._incoming = this._incoming.filter(w => !spawned.includes(w));
+            throw err;
+        });
     },
 
-    // The badge in the top bar (and the settings slider's label) both build
-    // this fresh off current state rather than caching it, so a resize never
-    // leaves a stale number on screen.
+    // The badge in the Compute panel builds this fresh off the pool as it
+    // actually is, so it only changes once a reshape has landed.
     coreLabelHTML: function() {
+        if (this.mode === 'gpu') {
+            const name = String(this.gpuLabel || '').replace(/[^\w .+-]/g, '');
+            return `${CORE_ICON_SVG} GPU · WebGPU${name ? ' · ' + name : ''}`;
+        }
         const n = this.workers.length, m = this.hardwareCores || n;
         return `${CORE_ICON_SVG} ${n}${n < m ? '/' + m : ''} Cores · WASM${this.usingSimd ? '+SIMD' : ''}`;
     },
 
-    // ---- live worker-pool resizing --------------------------------------
-    // The population never has to be regenerated to change this — the pool
-    // just gets a different number of slices of the SAME population array on
-    // the master, which is exactly what _sliceUp()/_shipBrains() already
-    // recompute every generation. Only the pool itself (spawning/terminating
-    // Workers) needs care, for one hazard: killing a worker while a round is
-    // in flight would leave its 'done' response uncounted, and run()'s
-    // promise (awaited by script.js's main loop) would then never resolve —
-    // the whole simulation would just freeze. So a shrink only actually
-    // happens once _runState is null, i.e. between rounds — see
-    // _maybeResizePool(). Growing has no such hazard: a worker that finishes
-    // its handshake mid-round is simply not one run() already dispatched to
-    // (it read workers.length before this one existed), so it sits idle for
-    // the rest of that round and joins in on the next one.
-    _targetCoreCount: null,
-    _resizing: false,
+    // Both are wired to controls that exist before ready() has finished; a
+    // click that early is simply ignored rather than thrown.
     setCoreCount: function(n) {
+        if (!this._target) return Promise.resolve();
         const cap = this.hardwareCores || this.workers.length || 1;
-        this._targetCoreCount = Math.max(1, Math.min(cap, n | 0));
-        this._maybeResizePool();
+        this._target.cores = Math.max(1, Math.min(cap, n | 0));
+        return this._kickReshape();
     },
-    _maybeResizePool: function() {
-        if (this._resizing || this._targetCoreCount == null) return;
-        if (this._targetCoreCount > this.workers.length) {
-            this._resizing = true;
-            this._growOneWorker().then(() => {
-                this._resizing = false;
-                this._maybeResizePool();   // one at a time — see _growOneWorker
-            });
-        } else if (this._targetCoreCount < this.workers.length) {
-            if (this._runState) return;   // mid-round; evolve() retries this at the next generation boundary
-            // From the tail only. Every worker's own `index` (assigned once,
-            // at spawn) has to keep matching its position in `workers` —
-            // _rate and _sliceUp both trust that alignment — and only
-            // dropping the tail leaves everyone before it un-renumbered.
-            const dead = this.workers.pop();
-            dead.terminate();
-            if (this._rate.length > this.workers.length) this._rate.length = this.workers.length;
-            this.coreCount = this.workers.length;
-            this._maybeResizePool();
+
+    // Resolves once the pool has actually changed (or failed to — gpuError
+    // then says why, and the pool stays on the CPU).
+    setComputeMode: function(mode) {
+        if (!this._target) return Promise.resolve();
+        this._target.mode = mode === 'gpu' ? 'gpu' : 'cpu';
+        if (mode === 'gpu') this.gpuError = '';
+        return this._kickReshape();
+    },
+
+    _poolMatches: function() {
+        const t = this._target;
+        return t.mode === this.mode && (t.mode === 'gpu' || this.workers.length === t.cores);
+    },
+
+    // One reshape at a time; a request that arrives mid-reshape is picked up
+    // the moment the current one lands, so dragging the slider across its
+    // whole range converges on wherever it stopped instead of queueing one
+    // reshape per notch.
+    _kickReshape: function() {
+        if (this._reshaping) { this._reshapeAgain = true; return this._reshaping; }
+        if (this._poolMatches()) return Promise.resolve();
+        const p = this._reshape().catch(err => {
+            console.warn('compute pool change failed:', err);
+            if (this._target.mode === 'gpu' && this.mode !== 'gpu') this.gpuError = (err && err.message) || String(err);
+            // Settle the target on the pool that actually exists, so a failure
+            // can't turn into a retry loop.
+            this._target = { mode: this.mode, cores: this.mode === 'cpu' ? this.workers.length : this._target.cores };
+        }).then(() => {
+            this._reshaping = null;
+            if (this.onPoolChange) this.onPoolChange();
+            if (this._reshapeAgain) { this._reshapeAgain = false; return this._kickReshape(); }
+        });
+        this._reshaping = p;
+        return p;
+    },
+
+    _reshape: async function() {
+        const target = { mode: this._target.mode, cores: this._target.cores };
+        const old = this.workers;
+        let keep, incoming;
+        if (target.mode === 'cpu' && this.mode === 'cpu') {
+            // Same kind, different count: keep the ones that stay, add or drop
+            // at the tail, so every kept worker's index still matches its
+            // position (the throughput table and the slicer both trust that).
+            keep = old.slice(0, Math.min(old.length, target.cores));
+            incoming = target.cores > old.length ? await this._spawnPool('cpu', target.cores - old.length, old.length) : [];
+        } else {
+            keep = [];
+            incoming = await this._spawnPool(target.mode, target.mode === 'gpu' ? 1 : target.cores, 0);
+        }
+
+        this._closeGate();
+        try {
+            await this._whenIdle();
+            const epoch = this._popEpoch;
+            const exported = this._popSize > 0 ? await this._exportAll(old) : null;
+            const pool = keep.concat(incoming);
+            for (const w of old) if (!pool.includes(w)) w.terminate();
+            this._incoming = this._incoming.filter(w => !pool.includes(w));
+            this.workers = pool;
+            this.mode = target.mode;
+            this.coreCount = pool.length;
+            // Timings and recycled buffers belong to the workers that took
+            // them; the new pool starts from an even split and measures again.
+            this._rate = [];
+            this._spare = [];
+            const fresh = !exported || epoch !== this._popEpoch;
+            if (!fresh) {
+                for (const e of exported) {
+                    for (let g = 0; g < this._crashBase.length; g++) this._crashBase[g] += e.crashCount[g];
+                    if (e.gateRatio) this._lastGateRatio = e.gateRatio;
+                }
+            }
+            this._crashCountByWorker = [];
+            if (this._popSize > 0) {
+                this._sliceUp();
+                if (fresh) this._shipBrains(); else this._importState(exported);
+            }
+        } finally {
+            this._openGate();
         }
     },
-    // Spawns exactly one worker and resolves once its init handshake is
-    // done — sequentially, not N at once, because the position it lands at
-    // in `workers` (assigned the moment it's pushed) has to equal the
-    // `index` it was created with, and two handshakes racing each other
-    // could finish in either order.
-    _growOneWorker: function() {
-        const index = this.workers.length;
-        return new Promise((resolve, reject) => {
-            const w = new Worker(`./sim-worker.js?v=${ASSET_VERSION}`);
-            w.onerror = e => { console.error('Worker error:', e.message); reject(new Error(e.message)); };
-            w.onmessage = e => {
-                if (e.data.type === 'ready') {
-                    w.onmessage = ev => this._handleWorkerMessage(ev.data);
-                    // Every other worker already has the current track built
-                    // and the current config set (setTrack()/pushConfig()
-                    // broadcast to whichever workers existed at the time) —
-                    // replay the latest of both so this one isn't simulating
-                    // against an empty, never-built track on its first 'pop'.
-                    if (this._lastTrackMsg) {
-                        w.postMessage({ type: 'track', def: this._lastTrackMsg.def, config: this._lastTrackMsg.config });
-                    }
-                    this.workers.push(w);
-                    this.coreCount = this.workers.length;
-                    resolve();
-                    return;
-                }
-                this._handleWorkerMessage(e.data);
+
+    _closeGate: function() {
+        let open;
+        const promise = new Promise(r => { open = r; });
+        this._gate = { promise, open };
+    },
+    _openGate: function() {
+        const g = this._gate;
+        this._gate = null;
+        if (g) g.open();
+    },
+    _whenIdle: function() {
+        if (!this._runState) return Promise.resolve();
+        return new Promise(r => this._idleWaiters.push(r));
+    },
+
+    // Every current worker's cars, as they are right now. A worker that
+    // doesn't answer within a few seconds (a crashed thread, a hung driver)
+    // isn't allowed to hold the whole app hostage: the reshape gives up on
+    // migrating and ships a fresh generation to the new pool instead.
+    _exportAll: function(workers) {
+        return new Promise(resolve => {
+            const out = [];
+            let left = workers.length;
+            const timer = setTimeout(() => { this._exportSink = null; resolve(null); }, 5000);
+            this._exportSink = d => {
+                out.push(d);
+                if (--left === 0) { clearTimeout(timer); this._exportSink = null; resolve(out); }
             };
-            w.postMessage({ type: 'init', module: this.module, index });
+            workers.forEach(w => w.postMessage({ type: 'export' }));
         });
+    },
+
+    // Hand each worker of the (already re-sliced) pool its cars: the brains
+    // and focus window are the master's for this generation, the car state is
+    // whatever the old pool exported, reassembled in car-id order.
+    _importState: function(exported) {
+        const ex = this.master.ex;
+        const W = ex.state_words();
+        const all = new Uint32Array(this._popSize * W);
+        for (const e of exported) if (e.count > 0) all.set(e.state.subarray(0, e.count * W), e.start * W);
+        const stride = ex.brain_stride();
+        const brains = this._f32(this.master, ex.brains_ptr(), (ex.max_cars() + 1) * stride);
+        const focusLo = ex.focus_lo(), focusHi = ex.focus_hi();
+        this.workers.forEach((w, i) => {
+            const s = this.slices[i];
+            const b = brains.slice(s.start * stride, (s.start + s.count) * stride);
+            const state = all.slice(s.start * W, (s.start + s.count) * W);
+            const gateRatio = s.start === 0 && this._lastGateRatio ? this._lastGateRatio.slice() : null;
+            const transfer = [b.buffer, state.buffer];
+            if (gateRatio) transfer.push(gateRatio.buffer);
+            w.postMessage({
+                type: 'import', start: s.start, count: s.count, hidden: this._hidden,
+                seed: (Math.random() * 0xffffffff) >>> 0, brains: b, focusLo, focusHi, state, gateRatio
+            }, transfer);
+        });
+    },
+
+    // The GPU went away under a running race (driver reset, a mobile browser
+    // reclaiming it in the background). The GPU worker still holds the last
+    // state it read back, so the cars move to the CPU from there.
+    _onGpuLost: function(message) {
+        this.gpuError = message || 'GPU device lost';
+        if (this.mode === 'gpu' || this._target.mode === 'gpu') {
+            this._target.mode = 'cpu';
+            this._kickReshape();
+        }
+    },
+
+    // Measured, not estimated: car-steps actually simulated per second of
+    // wall time (so in the normal, frame-paced mode it reads the pace the
+    // screen allows, and in hyper mode the real ceiling of the backend), and
+    // how long one round takes end to end.
+    throughput: { stepsPerSec: 0, roundMs: 0 },
+    _tpSteps: 0, _tpT0: 0, _tpLast: 0,
+    _noteThroughput: function(st) {
+        const now = performance.now();
+        let steps = 0;
+        for (const r of st.rows) steps += r.carSteps || 0;
+        const ms = now - st.t0;
+        this.throughput.roundMs = this.throughput.roundMs ? this.throughput.roundMs * 0.8 + ms * 0.2 : ms;
+        if (!this._tpT0 || st.t0 - this._tpLast > 1000) { this._tpT0 = st.t0; this._tpSteps = 0; }
+        this._tpSteps += steps;
+        this._tpLast = now;
+        const span = now - this._tpT0;
+        if (span >= 500) {
+            this.throughput.stepsPerSec = this._tpSteps * 1000 / span;
+            this._tpSteps = 0;
+            this._tpT0 = now;
+        }
     },
 
     // A wasm instance's memory can be detached and replaced when it grows, so a
@@ -330,12 +508,15 @@ const Engine = {
     },
 
     // The most recent {def, config} sent to every worker via setTrack(),
-    // config kept current by pushConfig() too — replayed at a freshly grown
-    // worker (see _growOneWorker) so it starts from the same track and
-    // config as everyone else instead of an empty, unbuilt instance. Null
-    // until the first setTrack(), which every startup reaches before the
-    // pool could ever be resized.
+    // config kept current by pushConfig() too — replayed at a freshly spawned
+    // worker (see _spawnPool) so it starts from the same track and config as
+    // everyone else instead of an empty, unbuilt instance.
     _lastTrackMsg: null,
+
+    // Every worker that will be simulating soon: the pool, plus any spawned
+    // for a reshape that hasn't landed yet — a track or config change made
+    // while one is coming up has to reach it too.
+    _allWorkers: function() { return this._incoming.length ? this.workers.concat(this._incoming) : this.workers; },
 
     pushConfig: function(state) {
         const p = state.physics;
@@ -343,7 +524,8 @@ const Engine = {
                       state.initialTTL, state.targetLaps, state.focusPct, state.hiddenLayers,
                       state.nudgeMode ? 1 : 0];
         if (this.master) this.master.ex.set_config(...args);
-        this.workers.forEach(w => w.postMessage({ type: 'config', args }));
+        this._allWorkers().forEach(w => w.postMessage({ type: 'config', args }));
+        this._lastConfig = args;
         if (this._lastTrackMsg) this._lastTrackMsg.config = args;
     },
 
@@ -366,8 +548,9 @@ const Engine = {
                         state.initialTTL, state.targetLaps, state.focusPct, state.hiddenLayers,
                         state.nudgeMode ? 1 : 0];
         if (this.master) this.master.ex.set_config(...config);
-        this.workers.forEach(w => w.postMessage({ type: 'track', def, config }));
+        this._allWorkers().forEach(w => w.postMessage({ type: 'track', def, config }));
         this._lastTrackMsg = { def, config };
+        this._lastConfig = config;
     },
 
     // ---- population ----------------------------------------------------
@@ -381,6 +564,8 @@ const Engine = {
         this._globalBestFitness = -Infinity;
         this._lastGateRatio = null;
         this._crashCountByWorker = [];
+        this._crashBase.fill(0);
+        this._popEpoch++;
         // _rate is deliberately NOT cleared here: it describes the machine,
         // not the population, and a Reset would otherwise throw away the one
         // measurement that takes several generations to settle.
@@ -503,11 +688,13 @@ const Engine = {
     _spare: [],
 
     run: function(iters, wantRender) {
+        // A pool reshape is swapping workers; the round starts on the new ones.
+        if (this._gate) return this._gate.promise.then(() => this.run(iters, wantRender));
         return new Promise(resolve => {
             this._runState = {
                 completed: 0, total: this.workers.length,
                 maxLaps: 0, allCrashed: true, wantRender, resolve,
-                rows: []
+                rows: [], t0: performance.now()
             };
             for (let i = 0; i < this.workers.length; i++) {
                 const spare = this._spare[i];
@@ -525,6 +712,8 @@ const Engine = {
     },
 
     _handleWorkerMessage: function(data) {
+        if (data.type === 'exported') { if (this._exportSink) this._exportSink(data); return; }
+        if (data.type === 'gpu-lost') { this._onGpuLost(data.message); return; }
         const st = this._runState;
         if (!st || data.type !== 'done') return;
         this._noteWorkerTiming(data);
@@ -540,7 +729,11 @@ const Engine = {
         st.rows.push(data);
         if (++st.completed === st.total) {
             this._runState = null;
+            this._noteThroughput(st);
             st.resolve(st);
+            const waiters = this._idleWaiters;
+            this._idleWaiters = [];
+            for (const f of waiters) f();
         }
     },
 
@@ -586,26 +779,26 @@ const Engine = {
         {
             const maxGates = ex.max_gates();
             const sum = this._i32(this.master, ex.crash_count_ptr(), maxGates);
-            sum.fill(0);
+            sum.set(this._crashBase);
             for (const wc of this._crashCountByWorker) {
                 if (!wc) continue;
                 for (let g = 0; g < maxGates; g++) sum[g] += wc[g];
             }
         }
         ex.evolve(eliteClones, this._hasGlobalBest ? 1 : 0, sigmaGen | 0, lapCompletions | 0);
-        // A generation boundary is the one moment the partition can move: every
-        // worker is idle and about to be handed a fresh slice anyway, so
-        // resizing them here costs nothing beyond the arithmetic. Also the
-        // retry point for a shrink the user asked for while a round was still
-        // in flight (_maybeResizePool declines to kill a worker mid-round —
-        // see there — so it needs a later, guaranteed-idle moment to land).
-        this._maybeResizePool();
+        this._crashBase.fill(0);
+        this._popEpoch++;
+        // A generation boundary is the one moment the partition can move for
+        // free: every worker is idle and about to be handed a fresh slice
+        // anyway, so re-balancing them here costs nothing beyond arithmetic.
         this._sliceUp();
         this._shipBrains();
         return { bestFitness: bestFit, globalBest: this._globalBestFitness };
     },
 
     resetPopulation: function() {
+        this._crashBase.fill(0);
+        this._popEpoch++;
         this.workers.forEach(w => w.postMessage({ type: 'reset' }));
     },
 

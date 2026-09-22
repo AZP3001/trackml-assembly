@@ -114,6 +114,14 @@ jobs:
           node tools/mutationsettle.mjs wasm/sim.wasm
           node tools/mutationsettle.mjs wasm/sim-simd.wasm
 
+      # The worker pool can change shape mid-generation (the cores slider, the
+      # CPU/GPU toggle): every car is packed out of one wasm instance and
+      # unpacked into another. Byte-identical continuation or it's a bug.
+      - name: State migration
+        run: |
+          node tools/statemigrate.mjs wasm/sim.wasm
+          node tools/statemigrate.mjs wasm/sim-simd.wasm
+
       # The sidebar version number ("V21.9 · build ...") is computed from git
       # history in deploy.yml, never typed by hand — this proves the formula
       # is sound and stays monotonic walking the branch forward.
@@ -146,6 +154,13 @@ jobs:
           npx --yes http-server -p 8765 --silent . &
           npx --yes wait-on -t 30000 http://127.0.0.1:8765/index.html
           node tools/e2e.mjs http://127.0.0.1:8765
+
+      # The WebGPU backend is a second implementation of the step, in WGSL.
+      # Runs a CPU worker and a GPU worker side by side on SwiftShader's
+      # software adapter and holds them to the same race; skips cleanly if
+      # the runner's browser exposes no WebGPU adapter at all.
+      - name: GPU / CPU parity
+        run: node tools/gpuparity.mjs http://127.0.0.1:8765
 
       - name: Benchmark (informational)
         run: |
