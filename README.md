@@ -232,8 +232,11 @@ Underneath those, three things the sliders don't show:
   readout in the sidebar shows both numbers ("4/8 Cores") when they differ.
 * **The canvas rasterises fewer pixels**, sized to the display rather than to the 1200x900 world —
   see the rendering note under Simulation Control. Desktop is untouched.
-* **The repaint ceiling drops** from 30 frames a second to 20, which leaves a third more of the
-  frame budget for the half that is actually learning.
+
+The repaint ceiling itself is not part of this table — it defaults to 60 frames a second on every
+device now, with a 30 next to it (bottom-left of the canvas) for anyone who would rather spend that
+half of the frame budget on training. See [Zoom & Pan](#zoom--pan) for pinch-to-zoom and one-finger
+panning on a touchscreen.
 
 Together, one generation on a phone-shaped workload: **143 ms before, 18 ms after** — about half of
 that from the settings and half from the module itself.
@@ -253,11 +256,20 @@ Click any car on the track to pin the telemetry panel and sensor overlay to it �
 
 ## Zoom & Pan
 Scroll to zoom in and out of the map (centred on the cursor), or use the +/−/1:1 buttons over the
-bottom-right corner of the canvas. Right-click and drag to pan around while zoomed in. This works the
-same way in the race view and the editor — it's one shared view, so switching between them never
-resets what you were looking at. Zooming in doesn't just make things bigger: car-selection and
+bottom-right corner of the canvas. Right-click and drag to pan around while zoomed in. On a
+touchscreen, pinch with two fingers to zoom — the pinch's midpoint stays under your fingers as you
+zoom and pan together in the same gesture, the way a map app's does — and drag with one finger to
+pan; a tap that doesn't turn into a drag still selects the car underneath it, same as a mouse click.
+(Panning by touch is the race view only — while editing a track, single-finger touch drags path
+points instead, so pan there with the +/-/1:1 buttons, Fit to Map, or a mouse if one's handy.) This
+works the same way in the race view and the editor — it's one shared view, so switching between them
+never resets what you were looking at. Zooming in doesn't just make things bigger: car-selection and
 point-editing precision scale with it too, since a fixed distance in track units covers fewer screen
 pixels the further in you are.
+
+The canvas repaint rate — not the simulation, which always steps at full speed regardless — is 60
+frames a second by default, with a 30 next to it (bottom-left of the canvas) for whoever would rather
+spend that half of the frame budget on training instead of painting.
 
 ## Track Editor
 ### How a track is built

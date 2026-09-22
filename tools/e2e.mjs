@@ -578,6 +578,28 @@ await page.evaluate(() => { if (app.state.isEditing) editor.cancel(); });
         `world point drifted ${geom.dragErr.toExponential(2)} px under the cursor`);
 }
 
+// --- the 30/60fps repaint toggle -----------------------------------------
+// The simulation itself is never gated by this (see loop()) — only how often
+// the canvas is repainted. Real clicks on the real buttons, so the
+// data-click wiring (which hands the handler the LITERAL STRING "30", not
+// the number 30) is what's actually being proven, not a hand-written call to
+// app.setRenderHz(30).
+{
+    const before = await page.evaluate(() => app.state.renderHz);
+    await page.click('#btn-fps-30');
+    const afterA = await page.evaluate(() => ({
+        hz: app.state.renderHz,
+        btn30: document.getElementById('btn-fps-30').className,
+        btn60: document.getElementById('btn-fps-60').className
+    }));
+    await page.click('#btn-fps-60');
+    const afterB = await page.evaluate(() => app.state.renderHz);
+    check(before === 60, 'canvas repaint rate defaults to 60fps', `default ${before}fps`);
+    check(afterA.hz === 30 && /bg-blue-600/.test(afterA.btn30) && !/bg-blue-600/.test(afterA.btn60),
+        'the 30fps button switches the rate and highlights itself', `now ${afterA.hz}fps`);
+    check(afterB === 60, 'and the 60fps button switches it back', `now ${afterB}fps`);
+}
+
 // --- canvas actually drew something ------------------------------------
 const drew = await page.evaluate(() => {
     const c = document.getElementById('sim-canvas');
@@ -641,6 +663,97 @@ check(realErrors.length === 0, 'no page errors', realErrors.length ? realErrors.
         'and the sliders show what is actually in force');
     check(mobileErrors.length === 0, 'no page errors on mobile',
         mobileErrors.length ? mobileErrors.slice(0, 2).join(' | ') : 'clean');
+
+    // --- touch: one-finger pan, tap-to-select, two-finger pinch-zoom ----
+    // Playwright's high-level touchscreen only drives a single contact
+    // point, so a pinch needs the CDP Input domain directly. This dispatches
+    // the same touchstart/touchmove/touchend sequence a real gesture would;
+    // Chromium turns that into the pointerdown/pointermove/pointerup events
+    // _touchStart/_touchMove/_touchEnd actually run on, so a real two-finger
+    // gesture is what's being proven, not a hand call to the handlers.
+    const cdp = await phone.newCDPSession(mp);
+    const dispatchTouch = (type, pts) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: pts });
+    await mp.evaluate(() => { app.state.isRunning = false; app.resetView(); app.releaseSpectate(); });
+    const rect = await mp.evaluate(() => {
+        const r = document.getElementById('sim-canvas').getBoundingClientRect();
+        return { left: r.left, top: r.top, width: r.width, height: r.height };
+    });
+
+    // One-finger drag pans the camera by exactly as far as the finger moved
+    // — the same formula movePan uses, checked against real dispatched touch
+    // input rather than a synthetic pointer event. Zoomed in first: at zoom 1
+    // (the minimum) _clampView pins pan dead centre by design — the view
+    // already covers the whole map, so there is nowhere for a pan to go —
+    // and a drag at zoom 1 would trivially "pass" by not moving at all.
+    {
+        await mp.evaluate(() => { app.state.view.zoom = 3; app._clampView(); });
+        const start = { x: rect.left + rect.width * 0.5, y: rect.top + rect.height * 0.5 };
+        const end = { x: start.x + 40, y: start.y - 25 };
+        const before = await mp.evaluate(() => ({ panX: app.state.view.panX, panY: app.state.view.panY }));
+        await dispatchTouch('touchStart', [{ x: start.x, y: start.y, id: 0 }]);
+        await dispatchTouch('touchMove', [{ x: (start.x + end.x) / 2, y: (start.y + end.y) / 2, id: 0 }]);
+        await dispatchTouch('touchMove', [{ x: end.x, y: end.y, id: 0 }]);
+        await dispatchTouch('touchEnd', []);
+        const after = await mp.evaluate(() => ({ panX: app.state.view.panX, panY: app.state.view.panY }));
+        const expected = await mp.evaluate(({ sx, sy, ex, ey }) => {
+            const b0 = app._toBackingPx({ clientX: sx, clientY: sy });
+            const b1 = app._toBackingPx({ clientX: ex, clientY: ey });
+            const z = app.state.view.zoom * app._renderScale;
+            return { dx: -(b1.x - b0.x) / z, dy: -(b1.y - b0.y) / z };
+        }, { sx: start.x, sy: start.y, ex: end.x, ey: end.y });
+        const gotDx = after.panX - before.panX, gotDy = after.panY - before.panY;
+        check(Math.abs(gotDx - expected.dx) < 0.5 && Math.abs(gotDy - expected.dy) < 0.5,
+            'a one-finger touch drag pans the camera',
+            `panned (${gotDx.toFixed(2)}, ${gotDy.toFixed(2)}), expected (${expected.dx.toFixed(2)}, ${expected.dy.toFixed(2)})`);
+        await mp.evaluate(() => app.resetView());
+    }
+
+    // A tap that doesn't turn into a drag selects the car underneath it —
+    // every car starts at the same point on the still-unstarted population,
+    // so any living car under the tap is proof the hit-test ran.
+    {
+        const carClient = await mp.evaluate(() => {
+            const c = app.state.cars.find(c => !c.crashed);
+            const v = app._viewMatrix(), s = app._renderScale;
+            const r = document.getElementById('sim-canvas').getBoundingClientRect();
+            const cnv = document.getElementById('sim-canvas');
+            const scale = Math.min(r.width / cnv.width, r.height / cnv.height);
+            const offX = (r.width - cnv.width * scale) / 2, offY = (r.height - cnv.height * scale) / 2;
+            const bx = v.z * c.x + v.e, by = v.z * c.y + v.f;
+            return { x: r.left + offX + bx * scale, y: r.top + offY + by * scale };
+        });
+        await dispatchTouch('touchStart', [{ x: carClient.x, y: carClient.y, id: 0 }]);
+        await dispatchTouch('touchEnd', []);
+        const picked = await mp.evaluate(() => {
+            const id = app.state.spectateCarId;
+            return { id, valid: id !== null && !!app.state.cars[id] && !app.state.cars[id].crashed };
+        });
+        check(picked.valid, 'a tap that does not drag selects the car underneath it', `spectateCarId=${picked.id}`);
+        await mp.evaluate(() => app.releaseSpectate());
+    }
+
+    // Two fingers spreading apart, symmetric about the canvas centre, zoom in
+    // about that centre — the pinch's anchoring keeps the world point under
+    // the midpoint fixed, and here the midpoint IS the view's own centre, so
+    // the pan should come back out exactly where it started.
+    {
+        await mp.evaluate(() => app.resetView());
+        const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+        const before = await mp.evaluate(() => ({ zoom: app.state.view.zoom, panX: app.state.view.panX, panY: app.state.view.panY }));
+        await dispatchTouch('touchStart', [{ x: cx - 30, y: cy, id: 0 }, { x: cx + 30, y: cy, id: 1 }]);
+        await dispatchTouch('touchMove', [{ x: cx - 50, y: cy, id: 0 }, { x: cx + 50, y: cy, id: 1 }]);
+        await dispatchTouch('touchMove', [{ x: cx - 70, y: cy, id: 0 }, { x: cx + 70, y: cy, id: 1 }]);
+        await dispatchTouch('touchEnd', []);
+        const after = await mp.evaluate(() => ({ zoom: app.state.view.zoom, panX: app.state.view.panX, panY: app.state.view.panY }));
+        const expectedZoom = Math.max(1, Math.min(8, before.zoom * (140 / 60)));
+        check(Math.abs(after.zoom - expectedZoom) < expectedZoom * 0.05,
+            'a two-finger pinch zooms', `zoom ${before.zoom.toFixed(2)} -> ${after.zoom.toFixed(2)}, expected ~${expectedZoom.toFixed(2)}`);
+        check(Math.abs(after.panX - before.panX) < 1 && Math.abs(after.panY - before.panY) < 1,
+            'and stays anchored on the point under the pinch — a centred pinch leaves the view centred',
+            `pan drifted by (${(after.panX - before.panX).toFixed(3)}, ${(after.panY - before.panY).toFixed(3)})`);
+        await mp.evaluate(() => app.resetView());
+    }
+
     await phone.close();
 }
 

@@ -399,13 +399,21 @@
                 <span class="text-xs font-bold uppercase tracking-wider">Hyper Mode Active</span>
             </div>
 
-            <!-- Zoom: scroll-wheel and right-drag-to-pan both work directly on
-                 the canvas (in both the race view and the editor); these are
-                 just a touch-friendly equivalent. -->
+            <!-- Zoom: scroll-wheel + right-drag-to-pan on a mouse, pinch + one-
+                 finger drag on a touchscreen, all work directly on the canvas
+                 (in both the race view and the editor); these buttons are a
+                 fixed-step equivalent for whichever input isn't in hand. -->
             <div class="absolute bottom-3 right-3 z-10 flex flex-col gap-1 bg-slate-800/85 backdrop-blur-sm rounded-lg border border-slate-700 p-1">
                 <button data-click="app.zoomStep|1.3" title="Zoom in" class="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-700 rounded text-base leading-none">+</button>
                 <button data-click="app.zoomStep|0.77" title="Zoom out" class="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-700 rounded text-base leading-none">&minus;</button>
-                <button data-click="app.resetView" title="Reset zoom (scroll to zoom, right-drag to pan)" class="w-7 h-7 flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-700 rounded text-[9px] font-bold">1:1</button>
+                <button data-click="app.resetView" title="Reset zoom (scroll or pinch to zoom, right-drag or one-finger-drag to pan)" class="w-7 h-7 flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-700 rounded text-[9px] font-bold">1:1</button>
+            </div>
+
+            <!-- Canvas repaint rate — the simulation itself is never capped by
+                 this, only how often it's painted (see script.js: loop()). -->
+            <div class="absolute bottom-3 left-3 z-10 flex items-center gap-1 bg-slate-800/85 backdrop-blur-sm rounded-lg border border-slate-700 p-1" title="Canvas repaint rate (the simulation always runs full speed)">
+                <button id="btn-fps-30" data-click="app.setRenderHz|30" class="px-2 py-1 text-[10px] font-bold rounded text-slate-400 hover:bg-slate-700 transition-colors">30</button>
+                <button id="btn-fps-60" data-click="app.setRenderHz|60" class="px-2 py-1 text-[10px] font-bold rounded bg-blue-600 text-white transition-colors">60</button>
             </div>
         </div>
 

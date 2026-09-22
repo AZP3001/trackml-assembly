@@ -40,11 +40,12 @@ const HYPER_CHUNK = 2500;
 // Canvas repaint ceiling. The simulation is not capped by this — it steps on
 // every animation frame regardless — only the drawing is.
 //
-// Lower on a phone, where the paint and the simulation are competing for one
-// slow core and the paint is the half you can afford to skip: twenty frames a
-// second of a car going round a track looks the same and leaves a third more
-// of the frame budget for the thing that is actually learning.
-const RENDER_HZ_DESKTOP = 30, RENDER_HZ_MOBILE = 20;
+// 60 by default everywhere, desktop and phone alike — it's a ceiling, not a
+// target, so it costs nothing on a screen or a tab that can't reach it. A
+// button next to the zoom controls drops it to 30 for whoever would rather
+// spend that half of the frame budget on training instead of painting; see
+// app.state.renderHz / app.setRenderHz.
+const RENDER_HZ_DEFAULT = 60;
 
 // Cached car sprite. The car body is 14x8 drawn at 1.5x, so 21x12 covers it
 // exactly; the origin sits at the middle.
@@ -79,8 +80,6 @@ function detectMobileDevice() {
     return false;
 }
 const IS_MOBILE = detectMobileDevice();
-// -1 so a 60Hz frame clock still lands on every other frame rather than every third.
-const RENDER_MIN_MS = 1000 / (IS_MOBILE ? RENDER_HZ_MOBILE : RENDER_HZ_DESKTOP) - 1;
 
 // Starting settings. Everything here is a slider the moment the page is up —
 // this is where the sliders START, not where they are allowed to be.
@@ -277,6 +276,8 @@ const app = {
         hiddenLayers: DEVICE_DEFAULTS.hiddenLayers,
         focusPct: 0.20, initialTTL: 750,
         physics: { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.02, brakeStrength: 0.05 },
+        // Canvas repaint ceiling — 60 or 30, user-settable, see setRenderHz.
+        renderHz: RENDER_HZ_DEFAULT,
         tracks: [], currentTrackIndex: 1, cars: [], generation: 1, isRunning: false, speedMultiplier: 1, hyperMode: false,
         stats: [], globalBest: null, bestTimes: { gen: null, all: null }, isEditing: false, trackToEdit: null,
         bgCanvas: null, lapHistory: [], spectateCarId: null, aliveCount: 0,
@@ -316,6 +317,9 @@ const app = {
         ui.btnHyperM    = $('btn-hyper-m');
         ui.hyperBanner  = $('hyper-banner');
         ui.coreCount    = $('core-count');
+        ui.btnFps30     = $('btn-fps-30');
+        ui.btnFps60     = $('btn-fps-60');
+        this._syncRenderHzUI();
         // Apply the pending Engine core label now that the element is cached
         if(ui.coreCount && Engine._pendingCoreLabel) ui.coreCount.innerHTML = Engine._pendingCoreLabel;
         // Click/tap a car to spectate it (independent of the editor's own
@@ -323,11 +327,23 @@ const app = {
         // drag pans instead, in both the normal view and the editor — it's
         // deliberately a different button than the editor's own left-click
         // point dragging, so the two gestures can never fight over the same
-        // click.
-        ui.canvas.addEventListener('pointerdown', e => this.handleCanvasClick(e));
-        ui.canvas.addEventListener('pointermove', e => this.movePan(e));
-        ui.canvas.addEventListener('pointerup', e => this.endPan(e));
-        ui.canvas.addEventListener('pointercancel', e => this.endPan(e));
+        // click. Touch is routed to its own state machine (_touchStart etc.)
+        // rather than through handleCanvasClick/movePan/endPan: a touch has
+        // no buttons to disambiguate select-vs-pan the way a mouse does, and
+        // it needs to track more than one finger for a pinch, neither of
+        // which the mouse path is built for.
+        ui.canvas.addEventListener('pointerdown', e => {
+            if (e.pointerType === 'touch') this._touchStart(e); else this.handleCanvasClick(e);
+        });
+        ui.canvas.addEventListener('pointermove', e => {
+            if (e.pointerType === 'touch') this._touchMove(e); else this.movePan(e);
+        });
+        ui.canvas.addEventListener('pointerup', e => {
+            if (e.pointerType === 'touch') this._touchEnd(e); else this.endPan(e);
+        });
+        ui.canvas.addEventListener('pointercancel', e => {
+            if (e.pointerType === 'touch') this._touchEnd(e); else this.endPan(e);
+        });
         ui.canvas.addEventListener('contextmenu', e => e.preventDefault());
         ui.canvas.addEventListener('wheel', e => {
             e.preventDefault();
@@ -478,6 +494,129 @@ const app = {
         if(this._panState && e.pointerId === this._panState.pointerId) this._panState = null;
     },
 
+    // ---- touch: pinch-zoom and one-finger pan/tap ------------------------
+    // The mouse path above (right-drag pan, wheel zoom, left-click select) is
+    // untouched; this is its touch equivalent, routed separately by
+    // e.pointerType so neither has to know the other exists. Only active
+    // outside the editor — the editor's own onpointerdown/onpointermove
+    // already own single-finger touch there (dragging a path point), and
+    // layering a second interpretation of the same touch on top of that
+    // would fight it rather than cooperate. The editor still has its own
+    // zoom controls (the +/-/1:1 buttons and Fit to Map) as the touch-only
+    // escape hatch while editing.
+    //
+    // One finger drags the camera the instant it moves — a finger is worse at
+    // holding still than a mouse, so waiting for a movement threshold before
+    // panning would make every tap feel like it dragged the view a little.
+    // Instead a SEPARATE tap candidate rides alongside the pan and is judged
+    // on release: small total movement and short enough that it still reads
+    // as a tap, not a drag, decides whether to run the same car hit-test a
+    // mouse click does. Two fingers is a pinch — zoom from the change in
+    // distance between them, pan from the change in their midpoint, applied
+    // together in the same gesture the way a map app's does, anchored so the
+    // world point under the midpoint at the start of the gesture stays there.
+    _touches: new Map(),   // pointerId -> {x, y} in backing-store pixels, live
+    _pinch: null,          // {id1, id2, startDist, startZoom, worldX, worldY}
+    _tap: null,            // {pointerId, startBX, startBY, t0} while it might still be a tap
+    _TAP_MAX_DIST: 12,     // backing-store px a touch may drift and still count as a tap
+    _TAP_MAX_MS: 350,
+
+    _touchDist: function(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); },
+
+    _touchStart: function(e) {
+        if (this.state.isEditing) return;
+        e.preventDefault();
+        try { ui.canvas.setPointerCapture(e.pointerId); } catch (err) { /* pointer already gone */ }
+        this._touches.set(e.pointerId, this._toBackingPx(e));
+
+        if (this._touches.size === 2) {
+            // A second finger landed: whatever the first one was doing (a tap
+            // candidate, a one-finger pan) is superseded by the pinch.
+            this._tap = null;
+            const ids = [...this._touches.keys()];
+            const p1 = this._touches.get(ids[0]), p2 = this._touches.get(ids[1]);
+            const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+            const world = this.screenToWorld(mid.x, mid.y);
+            this._pinch = {
+                id1: ids[0], id2: ids[1],
+                startDist: Math.max(1, this._touchDist(p1, p2)),
+                startZoom: this.state.view.zoom,
+                worldX: world.x, worldY: world.y
+            };
+            this._panState = null;   // the pinch owns the gesture now
+        } else if (this._touches.size === 1) {
+            const p = this._touches.get(e.pointerId);
+            this._panState = { pointerId: e.pointerId, startBX: p.x, startBY: p.y, panX0: this.state.view.panX, panY0: this.state.view.panY };
+            this._tap = { pointerId: e.pointerId, startBX: p.x, startBY: p.y, t0: performance.now() };
+        }
+        // A third finger and beyond: recorded in _touches (so releasing one
+        // of the pinch's own two fingers can still find the others) but
+        // otherwise ignored — the pinch keeps tracking the same two ids it
+        // started with rather than re-pairing.
+    },
+
+    _touchMove: function(e) {
+        if (this.state.isEditing || !this._touches.has(e.pointerId)) return;
+        e.preventDefault();
+        this._touches.set(e.pointerId, this._toBackingPx(e));
+
+        if (this._pinch && (e.pointerId === this._pinch.id1 || e.pointerId === this._pinch.id2)) {
+            const p1 = this._touches.get(this._pinch.id1), p2 = this._touches.get(this._pinch.id2);
+            if (!p1 || !p2) return;
+            const dist = Math.max(1, this._touchDist(p1, p2));
+            const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+            const v = this.state.view, s = this._renderScale;
+            v.zoom = Math.max(1, Math.min(8, this._pinch.startZoom * (dist / this._pinch.startDist)));
+            // Re-anchor every frame of the gesture: the world point that sat
+            // under the pinch's midpoint when it started stays under wherever
+            // that midpoint is NOW. Same anchoring _zoomAt does for a single
+            // wheel tick, done continuously — which is what lets one gesture
+            // zoom and pan together instead of only zooming about one spot.
+            v.panX = this._pinch.worldX - (mid.x / s - CANVAS_WIDTH / 2) / v.zoom;
+            v.panY = this._pinch.worldY - (mid.y / s - CANVAS_HEIGHT / 2) / v.zoom;
+            this._clampView();
+            this._needsDraw = true;
+            return;
+        }
+
+        if (this._panState && e.pointerId === this._panState.pointerId) {
+            if (this._tap && e.pointerId === this._tap.pointerId) {
+                const p = this._touches.get(e.pointerId);
+                if (Math.hypot(p.x - this._tap.startBX, p.y - this._tap.startBY) > this._TAP_MAX_DIST) this._tap = null;
+            }
+            this.movePan(e);
+        }
+    },
+
+    _touchEnd: function(e) {
+        this._touches.delete(e.pointerId);
+        if (this.state.isEditing) return;
+
+        if (this._pinch && (e.pointerId === this._pinch.id1 || e.pointerId === this._pinch.id2)) {
+            this._pinch = null;
+            this._tap = null;
+            // One finger of a two-finger gesture lifting doesn't end the
+            // gesture if the other is still down — resume panning from
+            // wherever that finger already is, so the view doesn't jump, but
+            // don't arm a fresh tap for it: this is a continuation of a
+            // multi-touch gesture, not the start of a new one.
+            const [remainingId] = this._touches.keys();
+            if (remainingId !== undefined) {
+                const p = this._touches.get(remainingId);
+                this._panState = { pointerId: remainingId, startBX: p.x, startBY: p.y, panX0: this.state.view.panX, panY0: this.state.view.panY };
+            } else {
+                this._panState = null;
+            }
+            return;
+        }
+
+        const wasTap = !!this._tap && e.pointerId === this._tap.pointerId
+            && (performance.now() - this._tap.t0) <= this._TAP_MAX_MS;
+        this._tap = null;
+        this.endPan(e);
+        if (wasTap) this._selectCarAt(e);
+    },
+
     // Resolves which car telemetry/highlight follows: a manually-clicked car
     // (until it crashes or the user releases it), otherwise the fastest alive.
     // The last pick, refreshed once per applied result round rather than on
@@ -513,9 +652,10 @@ const app = {
         this._needsDraw = true;
     },
 
-    handleCanvasClick: function(e) {
-        if(e.button === 2) { this.startPan(e); return; }
-        if(e.button !== undefined && e.button !== 0) return;
+    // The hit-test itself, shared by a mouse click (on press, below) and a
+    // confirmed touch tap (on release — see _touchEnd, which only calls this
+    // once a touch has proven it wasn't actually a drag).
+    _selectCarAt: function(e) {
         if (this.state.isEditing || this.state.hyperMode || !this.state.cars.length) return;
         const p = this._toBackingPx(e);
         const { x, y } = this.screenToWorld(p.x, p.y);
@@ -532,6 +672,12 @@ const app = {
         this.state.spectateCarId = closest ? closest.id : null;
         this._spectated = this._pickSpectated();
         this._needsDraw = true;
+    },
+
+    handleCanvasClick: function(e) {
+        if(e.button === 2) { this.startPan(e); return; }
+        if(e.button !== undefined && e.button !== 0) return;
+        this._selectCarAt(e);
     },
 
     // Async now: nothing can be built until the wasm module is compiled and the
@@ -965,7 +1111,11 @@ const app = {
             this.draw();
         } else if(!this.state.hyperMode && this._needsDraw) {
             const now = performance.now();
-            if(now - this._lastDraw >= RENDER_MIN_MS) {
+            // -1 so a 60Hz frame clock still lands on every other frame rather
+            // than every third, computed fresh since the toggle can change it
+            // mid-session.
+            const renderMinMs = 1000 / this.state.renderHz - 1;
+            if(now - this._lastDraw >= renderMinMs) {
                 this._lastDraw = now;
                 this._needsDraw = false;
                 this.draw();
@@ -1167,6 +1317,24 @@ const app = {
             btn.classList.toggle('border-slate-600', !active);
         });
         if(ui.hyperBanner) ui.hyperBanner.classList.toggle('hidden', !active);
+    },
+
+    // Canvas repaint ceiling, not the simulation's — see loop(). Takes a
+    // number OR the string a data-click handler hands it (data-click never
+    // parses its literal arguments), so either "30"/"60" or 30/60 works.
+    setRenderHz: function(hz) {
+        const target = Number(hz) === 30 ? 30 : 60;
+        if(this.state.renderHz === target) return;
+        this.state.renderHz = target;
+        this._lastDraw = 0;   // don't make the first frame at the new rate wait out the old interval
+        this._syncRenderHzUI();
+    },
+    _syncRenderHzUI: function() {
+        const on30 = this.state.renderHz === 30;
+        const ON = 'px-2 py-1 text-[10px] font-bold rounded bg-blue-600 text-white transition-colors';
+        const OFF = 'px-2 py-1 text-[10px] font-bold rounded text-slate-400 hover:bg-slate-700 transition-colors';
+        if(ui.btnFps30) ui.btnFps30.className = on30 ? ON : OFF;
+        if(ui.btnFps60) ui.btnFps60.className = on30 ? OFF : ON;
     },
 
     reset: function() {
