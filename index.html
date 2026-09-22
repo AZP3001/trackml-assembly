@@ -241,10 +241,16 @@
 
     <div class="flex-1 p-2 md:p-4 flex flex-col gap-2 md:gap-4 overflow-hidden relative" style="min-width:0">
         
-        <!-- CONTROL BAR -->
-        <div class="flex items-center gap-3 bg-slate-800 p-2 md:p-3 rounded-xl border border-slate-700 shrink-0 shadow-lg z-10">
+        <!-- CONTROL BAR — Start/Hyper/Reset, Gen/Alive, the compact telemetry
+             mirror and the lap-times strip all in one bar rather than three
+             stacked ones. The three mobile-only groups (xl:hidden — desktop
+             has their full versions in the sidebar) can add up to wider than
+             a phone screen, so the bar scrolls horizontally as one strip
+             instead of wrapping; each group is shrink-0 so it scrolls as a
+             unit rather than its contents squeezing. -->
+        <div class="flex items-center gap-3 bg-slate-800 p-2 md:p-3 rounded-xl border border-slate-700 shrink-0 shadow-lg z-10 overflow-x-auto">
             <!-- Start/Hyper/Reset: mobile only (desktop has them in sidebar) -->
-            <div class="flex items-center gap-2 xl:hidden">
+            <div class="flex items-center gap-2 xl:hidden shrink-0">
                 <button id="btn-play-m" data-click="app.toggleRun" class="px-3 py-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-all border text-sm bg-emerald-500/20 text-emerald-400 border-emerald-500/50 hover:bg-emerald-500/30">
                     <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> <span>Start</span>
                 </button>
@@ -254,10 +260,10 @@
                 <button data-click="app.reset" class="p-2 rounded-lg flex items-center justify-center transition-all border bg-slate-700 text-slate-400 border-slate-600 hover:text-white" title="Reset">
                     <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>
                 </button>
-                <div class="w-px h-8 bg-slate-700"></div>
             </div>
+            <div class="w-px h-8 bg-slate-700 shrink-0 xl:hidden"></div>
             <!-- Gen + Alive: always visible -->
-            <div class="flex items-center gap-4">
+            <div class="flex items-center gap-4 shrink-0">
                 <div class="flex flex-col items-end">
                     <span class="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Gen</span>
                     <span id="stat-generation-main" class="text-lg md:text-xl font-mono font-bold leading-none text-white">1</span>
@@ -268,42 +274,45 @@
                     <span id="stat-alive-main" class="text-lg md:text-xl font-mono font-bold leading-none text-emerald-400">0</span>
                 </div>
             </div>
-        </div>
 
-        <!-- COMPACT TELEMETRY: mobile only, so the live inputs/speed are visible
-             right next to Start without opening the settings sidebar. Mirrors
-             the full telemetry panel in the sidebar (same ids with -m) rather
-             than replacing it — desktop already has that one always on screen. -->
-        <div id="tel-panel-m" class="xl:hidden flex items-center gap-3 bg-slate-800/70 rounded-xl px-3 py-2 border border-slate-700 shrink-0 overflow-x-auto">
-            <span id="telemetry-label-m" class="text-[9px] text-slate-500 uppercase tracking-wide font-bold shrink-0 truncate max-w-[70px]">Live</span>
-            <div class="flex items-center gap-1 shrink-0">
-                <span class="text-[9px] text-slate-500">Str</span>
-                <div class="telemetry-bar-bg w-8"><div id="tel-steer-l-m" class="bar-steer-l" style="width: 0%"></div><div id="tel-steer-r-m" class="bar-steer-r" style="width: 0%"></div></div>
+            <!-- COMPACT TELEMETRY: mobile only, so the live inputs/speed are
+                 visible right next to Start without opening the settings
+                 sidebar. Mirrors the full telemetry panel in the sidebar
+                 (same ids with -m) rather than replacing it — desktop
+                 already has that one always on screen. -->
+            <div class="w-px h-8 bg-slate-700 shrink-0 xl:hidden"></div>
+            <div id="tel-panel-m" class="xl:hidden flex items-center gap-3 shrink-0">
+                <span id="telemetry-label-m" class="text-[9px] text-slate-500 uppercase tracking-wide font-bold shrink-0 truncate max-w-[70px]">Live</span>
+                <div class="flex items-center gap-1 shrink-0">
+                    <span class="text-[9px] text-slate-500">Str</span>
+                    <div class="telemetry-bar-bg w-8"><div id="tel-steer-l-m" class="bar-steer-l" style="width: 0%"></div><div id="tel-steer-r-m" class="bar-steer-r" style="width: 0%"></div></div>
+                </div>
+                <div class="flex items-center gap-1 shrink-0">
+                    <span class="text-[9px] text-slate-500">Gas</span>
+                    <div class="telemetry-bar-bg w-6"><div id="tel-gas-m" class="telemetry-bar-fill bg-emerald-500" style="width: 0%"></div></div>
+                </div>
+                <div class="flex items-center gap-1 shrink-0">
+                    <span class="text-[9px] text-slate-500">Brk</span>
+                    <div class="telemetry-bar-bg w-6"><div id="tel-brake-m" class="telemetry-bar-fill bg-red-500" style="width: 0%"></div></div>
+                </div>
+                <div class="flex items-center gap-1 shrink-0">
+                    <span class="text-[9px] text-slate-500">Spd</span>
+                    <div class="telemetry-bar-bg w-8"><div id="tel-speed-m" class="telemetry-bar-fill bg-yellow-400" style="width: 0%"></div></div>
+                    <span id="tel-speed-val-m" class="text-[9px] font-mono text-yellow-400 w-5 text-right">0</span>
+                </div>
             </div>
-            <div class="flex items-center gap-1 shrink-0">
-                <span class="text-[9px] text-slate-500">Gas</span>
-                <div class="telemetry-bar-bg w-6"><div id="tel-gas-m" class="telemetry-bar-fill bg-emerald-500" style="width: 0%"></div></div>
-            </div>
-            <div class="flex items-center gap-1 shrink-0">
-                <span class="text-[9px] text-slate-500">Brk</span>
-                <div class="telemetry-bar-bg w-6"><div id="tel-brake-m" class="telemetry-bar-fill bg-red-500" style="width: 0%"></div></div>
-            </div>
-            <div class="flex items-center gap-1 shrink-0">
-                <span class="text-[9px] text-slate-500">Spd</span>
-                <div class="telemetry-bar-bg w-8"><div id="tel-speed-m" class="telemetry-bar-fill bg-yellow-400" style="width: 0%"></div></div>
-                <span id="tel-speed-val-m" class="text-[9px] font-mono text-yellow-400 w-5 text-right">0</span>
-            </div>
-        </div>
 
-        <!-- LAP TIMES PANEL: mobile only -->
-        <div id="lap-panel" class="xl:hidden flex items-center gap-3 bg-slate-800/70 rounded-xl px-3 py-2 border border-slate-700 shrink-0">
-            <div class="flex flex-col shrink-0">
-                <span class="text-[9px] text-slate-500 uppercase tracking-wide font-bold leading-none mb-0.5">Best</span>
-                <span id="stat-all-best-m" class="text-sm font-mono text-purple-400 leading-none">--</span>
-            </div>
-            <div class="w-px h-8 bg-slate-700 shrink-0"></div>
-            <div id="lap-history-m" class="flex gap-1.5 overflow-x-auto flex-1 items-center">
-                <span class="text-[10px] text-slate-600 italic">No laps yet</span>
+            <!-- LAP TIMES: mobile only -->
+            <div class="w-px h-8 bg-slate-700 shrink-0 xl:hidden"></div>
+            <div id="lap-panel" class="xl:hidden flex items-center gap-3 shrink-0">
+                <div class="flex flex-col shrink-0">
+                    <span class="text-[9px] text-slate-500 uppercase tracking-wide font-bold leading-none mb-0.5">Best</span>
+                    <span id="stat-all-best-m" class="text-sm font-mono text-purple-400 leading-none">--</span>
+                </div>
+                <div class="w-px h-8 bg-slate-700 shrink-0"></div>
+                <div id="lap-history-m" class="flex gap-1.5 items-center shrink-0">
+                    <span class="text-[10px] text-slate-600 italic">No laps yet</span>
+                </div>
             </div>
         </div>
 
