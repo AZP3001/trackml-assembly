@@ -82,7 +82,7 @@ function train({ track, halfWidth, startPos, gens, pop = 100, ttl = 750, targetL
                  maxSpeed = 10, watchEscapes = false, cap = 200000, seed = 4242 }) {
     const t = buildTrack(track, halfWidth, startPos);
     const inside = watchEscapes ? makeInsideTest(t) : null;
-    w.set_config(maxSpeed, 0.05, 0.04, 0.2, ttl, targetLaps, 0.15, 5);
+    w.set_config(maxSpeed, 0.05, 0.04, 0.2, ttl, targetLaps, 0.15, 5, 0);
     w.pop_init(pop, 0, 5, seed);
     w.pop_randomize_brains();
 
@@ -228,7 +228,7 @@ console.log(`race behaviour test (${wasmPath})\n`);
 // generation, with no evolution involved.
 {
     const t = buildTrack(polar(48, a => 340 + Math.sin(a * 3) * 70), 60);
-    w.set_config(10, 0.05, 0.04, 0.2, 750, 99, 0.15, 5);
+    w.set_config(10, 0.05, 0.04, 0.2, 750, 99, 0.15, 5, 0);
     const POP = 200;
     w.pop_init(POP, 0, 5, 20260921);
     w.pop_randomize_brains();

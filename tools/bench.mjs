@@ -36,7 +36,7 @@ async function timeModule(file) {
         throw new Error(`${file}: track_build failed`);
     }
     // Same seed both sides, so both simulate the identical population.
-    w.set_config(10, 0.05, 0.04, 0.2, TTL, 1e9, 0.3, HIDDEN);
+    w.set_config(10, 0.05, 0.04, 0.2, TTL, 1e9, 0.3, HIDDEN, 0);
     w.pop_init(POP, 0, HIDDEN, 20260921);
     w.pop_randomize_brains();
     w.pop_reset();

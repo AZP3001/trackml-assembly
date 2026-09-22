@@ -14,19 +14,21 @@ const SVG_PAUSE = `<svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewB
 // Cached DOM references — populated once in _initUICache(), used everywhere else
 const ui = {};
 // Dirty-check values for updateUI — skip DOM writes if unchanged
-let _ui_gen = -1, _ui_alive = -1, _ui_allBest = null;
+let _ui_gen = -1, _ui_alive = -1, _ui_allBest = null, _ui_cores = -1;
 
 const SETTING_DESCRIPTIONS = {
     speedMultiplier: "Simulation cycles per frame. High values train extremely fast.",
     populationSize: "Number of cars per generation. Scales perfectly via multi-threading.",
     eliteClones: "Top performers copied to the next generation without mutation. Prevents regression.",
     focusPct: "Fraction of the population spent as mutated clones of the current best, reward-boosted specifically through whichever stretch of track it's currently slowest on (roughly ±1 second either side). Helps it stop getting stuck taking one corner badly instead of spreading every mutation evenly over a lap that mostly already works.",
+    nudgeMode: "How the Focus % clones are perturbed. Off (stock): a random nudge across every weight, same as the rest of the population. On: each clone stays identical to the best brain except one push on the throttle bias — a bit more throttle (also a bit less brake) or the reverse — tried directly against the section Focus % is currently aimed at, instead of random noise in weight space.",
     hiddenLayers: "Brain complexity. More layers = smarter but heavier computation.",
     initialTTL: "Time to Live. Frames allowed before death if no checkpoint is reached.",
     targetLaps: "Laps needed to trigger the next generation automatically.",
     maxSpeed: "Top speed. Higher speeds require faster AI reaction times.",
     acceleration: "Engine power.", turnSpeed: "Steering sensitivity. Cars turn tightest at low speed and lose authority as they speed up, same as a real car's grip limit.",
-    brakeStrength: "How hard the brake pedal bites. Braking now scales with how hard the AI presses it, instead of every negative throttle snapping speed down by the same flat amount."
+    brakeStrength: "How hard the brake pedal bites. Braking now scales with how hard the AI presses it, instead of every negative throttle snapping speed down by the same flat amount.",
+    coreCount: "How many CPU cores run the simulation — one worker (its own wasm instance, its own slice of the population) per core. Stock is every core the machine has; pulling it down leaves the rest free for other tabs/apps at the cost of training speed. Takes effect live, no reset needed: a worker is added or dropped at the next generation boundary, never mid-round."
 };
 
 // How many simulation steps to ask for per round trip to the workers.
@@ -117,12 +119,35 @@ const DEVICE_DEFAULTS = IS_MOBILE ? DEFAULT_SETTINGS.mobile : DEFAULT_SETTINGS.d
 // left exactly as it was. Either way it is a scale factor on one transform,
 // so no drawing code below knows it exists.
 const RENDER_SCALE_MIN = 0.34;
-function computeRenderScale(cssW, cssH) {
+function computeRenderScale(cssW, cssH, vp) {
     if (!IS_MOBILE) return 1;
+    vp = vp || { w: CANVAS_WIDTH, h: CANVAS_HEIGHT };
     if (!(cssW > 0) || !(cssH > 0)) return 0.5;    // not laid out yet; the resize handler re-asks
     const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-    const fit = Math.min((cssW * dpr) / CANVAS_WIDTH, (cssH * dpr) / CANVAS_HEIGHT);
+    const fit = Math.min((cssW * dpr) / vp.w, (cssH * dpr) / vp.h);
     return Math.max(RENDER_SCALE_MIN, Math.min(1, fit));
+}
+
+// How much of the world is visible at zoom 1, given the CSS box the canvas
+// actually sits in. Forcing that box to always show exactly the fixed
+// 1200x900 world, letterboxed to fit, is what put black bars down the sides
+// of any container that isn't 4:3 — almost every real window. Instead the
+// world axis that already matches the box is left alone and the OTHER axis
+// is grown to the box's aspect ratio, so the extra room reveals more world
+// (more track margin) rather than stretching or cropping it — a single
+// uniform scale is kept on both axes throughout, which is what car-sprite
+// rotation and every sensor cast in wasm assume. Clamped to a sane stretch
+// so a momentarily tiny/sliver box mid-layout can't blow the backing store
+// up to something absurd.
+const MAX_ASPECT_STRETCH = 1.75;
+function computeViewport(cssW, cssH) {
+    if (!(cssW > 0) || !(cssH > 0)) return { w: CANVAS_WIDTH, h: CANVAS_HEIGHT };
+    const worldAspect = CANVAS_WIDTH / CANVAS_HEIGHT;
+    const containerAspect = Math.max(worldAspect / MAX_ASPECT_STRETCH,
+        Math.min(worldAspect * MAX_ASPECT_STRETCH, cssW / cssH));
+    return containerAspect > worldAspect
+        ? { w: Math.round(CANVAS_HEIGHT * containerAspect), h: CANVAS_HEIGHT }
+        : { w: CANVAS_WIDTH, h: Math.round(CANVAS_WIDTH / containerAspect) };
 }
 
 // The road surface is the centreline stroked at the full track width with a
@@ -275,12 +300,25 @@ const app = {
         targetLaps: DEVICE_DEFAULTS.targetLaps,
         hiddenLayers: DEVICE_DEFAULTS.hiddenLayers,
         focusPct: 0.20, initialTTL: 750,
+        // How the focused sub-population (Focus %) is perturbed — false
+        // (stock) is the original random-Gaussian nudge on every weight;
+        // true is the behavioural-nudge mode, where each focused clone stays
+        // byte-identical to the stash except a small, fixed push on the
+        // throttle bias (more throttle / less brake, or the reverse), tried
+        // specifically against whichever stretch the focus window is
+        // currently aimed at. See NUDGE_TABLE in sim.c.
+        nudgeMode: false,
         physics: { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.02, brakeStrength: 0.05 },
         // Canvas repaint ceiling — 60 or 30, user-settable, see setRenderHz.
         renderHz: RENDER_HZ_DEFAULT,
         tracks: [], currentTrackIndex: 1, cars: [], generation: 1, isRunning: false, speedMultiplier: 1, hyperMode: false,
         stats: [], globalBest: null, bestTimes: { gen: null, all: null }, isEditing: false, trackToEdit: null,
         bgCanvas: null, lapHistory: [], spectateCarId: null, aliveCount: 0,
+        // Camera-follow toggle, not a simulation setting — see draw(), which
+        // re-centres panX/panY on the spectated car every frame while this
+        // is on. A display preference like renderHz, so it isn't part of a
+        // saved session either.
+        followCar: false,
         // Shared by both the normal view and the editor — one canvas, one
         // pan/zoom state, so switching between them never surprises you.
         view: { zoom: 1, panX: CANVAS_WIDTH / 2, panY: CANVAS_HEIGHT / 2 }
@@ -302,6 +340,15 @@ const app = {
         ui.telSpeed     = $('tel-speed');
         ui.telSpeedVal  = $('tel-speed-val');
         ui.telemetryLabel = $('telemetry-label');
+        // Compact mirror in the mobile control bar — same values, so the
+        // dirty-check in _drawTelemetry can write both from one comparison.
+        ui.telSteerLM   = $('tel-steer-l-m');
+        ui.telSteerRM   = $('tel-steer-r-m');
+        ui.telGasM      = $('tel-gas-m');
+        ui.telBrakeM    = $('tel-brake-m');
+        ui.telSpeedM    = $('tel-speed-m');
+        ui.telSpeedValM = $('tel-speed-val-m');
+        ui.telemetryLabelM = $('telemetry-label-m');
         ui.btnRelease   = $('btn-release-spectate');
         ui.canvas       = $('sim-canvas');
         // Opaque. Every pixel of the backing store is painted on every pass
@@ -319,7 +366,9 @@ const app = {
         ui.coreCount    = $('core-count');
         ui.btnFps30     = $('btn-fps-30');
         ui.btnFps60     = $('btn-fps-60');
+        ui.btnFollowCar = $('btn-follow-car');
         this._syncRenderHzUI();
+        this._syncFollowCarUI();
         // Apply the pending Engine core label now that the element is cached
         if(ui.coreCount && Engine._pendingCoreLabel) ui.coreCount.innerHTML = Engine._pendingCoreLabel;
         // Click/tap a car to spectate it (independent of the editor's own
@@ -359,21 +408,29 @@ const app = {
     // has to know: on a desktop it is usually 1:1, and on a phone it is
     // whatever the display can actually resolve, which is a lot less.
     _renderScale: 1,
+    // How much world (in world units) the current backing store shows at
+    // zoom 1 — CANVAS_WIDTH/CANVAS_HEIGHT exactly when the container is 4:3,
+    // wider on one axis otherwise. See computeViewport().
+    _viewportW: CANVAS_WIDTH,
+    _viewportH: CANVAS_HEIGHT,
     _applyRenderScale: function() {
         const c = ui.canvas;
         if (!c) return false;
         const r = c.getBoundingClientRect();
-        let s = computeRenderScale(r.width, r.height);
+        const vp = computeViewport(r.width, r.height);
+        let s = computeRenderScale(r.width, r.height, vp);
         // Snap the width to a multiple of four so the height lands on a whole
-        // pixel too (the world is 4:3), and the cached background is then an
-        // exact 1:1 blit at zoom 1 rather than a resample every frame.
-        let bw = Math.min(CANVAS_WIDTH, Math.max(4, Math.round(CANVAS_WIDTH * s / 4) * 4));
-        s = bw / CANVAS_WIDTH;
-        const bh = Math.round(CANVAS_HEIGHT * s);
-        // Set unconditionally: the scale and the backing size are two halves
-        // of one fact, and letting them be written on different paths is how
-        // they end up disagreeing.
+        // pixel too, and the cached background is then an exact 1:1 blit at
+        // zoom 1 rather than a resample every frame.
+        let bw = Math.max(4, Math.round(vp.w * s / 4) * 4);
+        s = bw / vp.w;
+        const bh = Math.max(4, Math.round(vp.h * s));
+        // Set unconditionally: the scale, the viewport and the backing size
+        // are three facets of one fact, and letting them be written on
+        // different paths is how they end up disagreeing.
         this._renderScale = s;
+        this._viewportW = vp.w;
+        this._viewportH = vp.h;
         if (c.width === bw && c.height === bh) return false;
         c.width = bw; c.height = bh;          // note: this also clears it
         return true;
@@ -404,8 +461,8 @@ const app = {
         const v = this.state.view, s = this._renderScale;
         return {
             z: v.zoom * s,
-            e: s * (CANVAS_WIDTH / 2 - v.panX * v.zoom),
-            f: s * (CANVAS_HEIGHT / 2 - v.panY * v.zoom)
+            e: s * (this._viewportW / 2 - v.panX * v.zoom),
+            f: s * (this._viewportH / 2 - v.panY * v.zoom)
         };
     },
 
@@ -439,21 +496,30 @@ const app = {
         // backingPt is in real pixels, so it comes back through the raster
         // scale before it is compared against the world's own centre.
         const s = this._renderScale;
-        v.panX = w.x - (backingPt.x / s - CANVAS_WIDTH / 2) / z;
-        v.panY = w.y - (backingPt.y / s - CANVAS_HEIGHT / 2) / z;
+        v.panX = w.x - (backingPt.x / s - this._viewportW / 2) / z;
+        v.panY = w.y - (backingPt.y / s - this._viewportH / 2) / z;
         this._clampView();
         this._needsDraw = true;
     },
 
     // Keeps the visible viewport inside the map instead of panning off into
-    // empty space beyond it. At zoom 1 (minimum) the two bounds coincide, so
-    // the centre is pinned to the canvas centre — exactly the old, un-zoomed
-    // behaviour.
+    // empty space beyond it. Bounds are sized off the revealed viewport
+    // (which can be wider/taller than the 1200x900 world — see
+    // computeViewport()) but always recentred on the map's true centre
+    // (CANVAS_WIDTH/2, CANVAS_HEIGHT/2), not the viewport's own centre,
+    // so the extra cover margin grows evenly on both sides of the track
+    // instead of dragging the pin off-centre. At zoom 1 (minimum) the two
+    // bounds coincide there, so the centre is pinned to the map centre —
+    // exactly the old, un-zoomed behaviour, and exactly what this collapses
+    // to whenever the viewport is the plain 1200x900 (viewportW===CANVAS_WIDTH).
     _clampView: function() {
         const v = this.state.view;
-        const halfW = CANVAS_WIDTH / (2 * v.zoom), halfH = CANVAS_HEIGHT / (2 * v.zoom);
-        v.panX = Math.max(halfW, Math.min(CANVAS_WIDTH - halfW, v.panX));
-        v.panY = Math.max(halfH, Math.min(CANVAS_HEIGHT - halfH, v.panY));
+        const vw = this._viewportW, vh = this._viewportH;
+        const halfW = vw / (2 * v.zoom), halfH = vh / (2 * v.zoom);
+        const loX = CANVAS_WIDTH / 2 - vw / 2 + halfW, hiX = CANVAS_WIDTH / 2 + vw / 2 - halfW;
+        const loY = CANVAS_HEIGHT / 2 - vh / 2 + halfH, hiY = CANVAS_HEIGHT / 2 + vh / 2 - halfH;
+        v.panX = Math.max(loX, Math.min(hiX, v.panX));
+        v.panY = Math.max(loY, Math.min(hiY, v.panY));
     },
 
     resetView: function() {
@@ -572,8 +638,8 @@ const app = {
             // that midpoint is NOW. Same anchoring _zoomAt does for a single
             // wheel tick, done continuously — which is what lets one gesture
             // zoom and pan together instead of only zooming about one spot.
-            v.panX = this._pinch.worldX - (mid.x / s - CANVAS_WIDTH / 2) / v.zoom;
-            v.panY = this._pinch.worldY - (mid.y / s - CANVAS_HEIGHT / 2) / v.zoom;
+            v.panX = this._pinch.worldX - (mid.x / s - this._viewportW / 2) / v.zoom;
+            v.panY = this._pinch.worldY - (mid.y / s - this._viewportH / 2) / v.zoom;
             this._clampView();
             this._needsDraw = true;
             return;
@@ -696,6 +762,7 @@ const app = {
             window.addEventListener('orientationchange', onResize);
             await Engine.ready();
             if(ui.coreCount && Engine._pendingCoreLabel) ui.coreCount.innerHTML = Engine._pendingCoreLabel;
+            this._initCoreCountSlider();
             this.resetTracks();
             this.initChart();
             this._updateStatsTable();
@@ -1173,17 +1240,23 @@ const app = {
     cacheBackgroundRender: function() {
         // Rasterised at exactly the size it will be blitted at, so the
         // per-frame draw of it is a straight copy and not a resample of a
-        // 1200x900 image down to whatever the screen is.
+        // world-sized image down to whatever the screen is.
         this._applyRenderScale();
         const s = this._renderScale;
+        const vw = this._viewportW, vh = this._viewportH;
+        // The track itself never moves — it's always generated in, and drawn
+        // at, the fixed 1200x900 world coordinates it always was. What grows
+        // is only the grass margin around it, split evenly on both axes so
+        // the track stays centred (see computeViewport() / _clampView()).
+        const marginX = (vw - CANVAS_WIDTH) / 2, marginY = (vh - CANVAS_HEIGHT) / 2;
         this.state.bgCanvas = document.createElement('canvas');
-        this.state.bgCanvas.width = ui.canvas ? ui.canvas.width : CANVAS_WIDTH;
-        this.state.bgCanvas.height = ui.canvas ? ui.canvas.height : CANVAS_HEIGHT;
+        this.state.bgCanvas.width = ui.canvas ? ui.canvas.width : Math.round(vw * s);
+        this.state.bgCanvas.height = ui.canvas ? ui.canvas.height : Math.round(vh * s);
         const ctx = this.state.bgCanvas.getContext('2d', { alpha: false });
-        ctx.setTransform(s, 0, 0, s, 0, 0);   // everything below is in world units
+        ctx.setTransform(s, 0, 0, s, s * marginX, s * marginY);   // everything below is in world units
         const t = this.currentTrack;
 
-        ctx.fillStyle = '#3a5a40'; ctx.fillRect(0,0,CANVAS_WIDTH,CANVAS_HEIGHT);
+        ctx.fillStyle = '#3a5a40'; ctx.fillRect(-marginX, -marginY, vw, vh);
         if(!t) return;
 
         drawRoadSurface(ctx, t, '#343a40');
@@ -1212,6 +1285,21 @@ const app = {
             return;
         }
 
+        // Camera follow: re-aim the pan at the spectated car before building
+        // the view matrix, so every other draw call below (cars, sensors,
+        // telemetry) just sees an ordinary pan it doesn't know is automatic.
+        // A crashed/lost spectated car leaves the last pan alone rather than
+        // snapping to (0,0) — _pickSpectated already re-targets a living car
+        // as soon as one is picked, and until then there's nothing to follow.
+        if(this.state.followCar) {
+            const sp = this._spectated;
+            if(sp && !sp.crashed) {
+                this.state.view.panX = sp.x;
+                this.state.view.panY = sp.y;
+                this._clampView();
+            }
+        }
+
         // The one extra transform zoom/pan needs: everything below already
         // draws in world (1200x900) coordinates, so composing it in here once
         // is the whole change. Minimum zoom is 1 and pan is clamped to the
@@ -1221,8 +1309,13 @@ const app = {
         ctx.setTransform(v.z, 0, 0, v.z, v.e, v.f);
 
         // Given in world units, not pixels, so the cache can be any
-        // resolution and still land exactly over the map.
-        if(this.state.bgCanvas) ctx.drawImage(this.state.bgCanvas, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        // resolution and still land exactly over the map. Offset/sized to
+        // the same cover margin cacheBackgroundRender() rasterised it with
+        // (0,0,CANVAS_WIDTH,CANVAS_HEIGHT exactly when there is no margin).
+        if(this.state.bgCanvas) {
+            const marginX = (this._viewportW - CANVAS_WIDTH) / 2, marginY = (this._viewportH - CANVAS_HEIGHT) / 2;
+            ctx.drawImage(this.state.bgCanvas, -marginX, -marginY, this._viewportW, this._viewportH);
+        }
 
         // Render ALL cars persistently, no color flashing, no hiding.
         // Telemetry/highlight follows a manually-clicked car, or else
@@ -1304,13 +1397,21 @@ const app = {
 
     // Telemetry is six DOM writes; doing them unconditionally meant six style
     // invalidations per frame for bars that mostly had not moved a pixel.
+    // Written to the sidebar panel AND its compact mirror in the mobile
+    // control bar (see tel-panel-m in index.html) from the same dirty-check,
+    // since both always show the same spectated car.
     _tel: { label: '', manual: null, steerL: '', steerR: '', gas: '', brake: '', speed: '', speedVal: '' },
     _drawTelemetry: function(spectated, isManual) {
         const t = this._tel;
         const label = spectated
             ? (isManual ? `Spectating Car #${spectated.id} (Manual)` : 'Live Telemetry (Auto — Fastest)')
             : 'Live Telemetry';
-        if(ui.telemetryLabel && label !== t.label) { ui.telemetryLabel.textContent = label; t.label = label; }
+        if(label !== t.label) {
+            if(ui.telemetryLabel) ui.telemetryLabel.textContent = label;
+            // The compact bar has room for a word, not a sentence.
+            if(ui.telemetryLabelM) ui.telemetryLabelM.textContent = spectated ? (isManual ? `#${spectated.id}` : 'Auto') : 'Live';
+            t.label = label;
+        }
         if(ui.btnRelease && isManual !== t.manual) { ui.btnRelease.classList.toggle('hidden', !isManual); t.manual = isManual; }
         if(!spectated || spectated.crashed) return;
 
@@ -1322,12 +1423,36 @@ const app = {
         const brake  = i[1] > 0 ? '0%' : pct(Math.abs(i[1])*100);
         const speed  = pct(Math.min((spectated.speed / this.state.physics.maxSpeed)*100, 100));
         const speedVal = String(Math.round(spectated.speed));
-        if(steerL !== t.steerL) { ui.telSteerL.style.width = steerL; t.steerL = steerL; }
-        if(steerR !== t.steerR) { ui.telSteerR.style.width = steerR; t.steerR = steerR; }
-        if(gas !== t.gas)       { ui.telGas.style.width = gas; t.gas = gas; }
-        if(brake !== t.brake)   { ui.telBrake.style.width = brake; t.brake = brake; }
-        if(speed !== t.speed)   { ui.telSpeed.style.width = speed; t.speed = speed; }
-        if(speedVal !== t.speedVal) { ui.telSpeedVal.textContent = speedVal; t.speedVal = speedVal; }
+        if(steerL !== t.steerL) {
+            if(ui.telSteerL) ui.telSteerL.style.width = steerL;
+            if(ui.telSteerLM) ui.telSteerLM.style.width = steerL;
+            t.steerL = steerL;
+        }
+        if(steerR !== t.steerR) {
+            if(ui.telSteerR) ui.telSteerR.style.width = steerR;
+            if(ui.telSteerRM) ui.telSteerRM.style.width = steerR;
+            t.steerR = steerR;
+        }
+        if(gas !== t.gas) {
+            if(ui.telGas) ui.telGas.style.width = gas;
+            if(ui.telGasM) ui.telGasM.style.width = gas;
+            t.gas = gas;
+        }
+        if(brake !== t.brake) {
+            if(ui.telBrake) ui.telBrake.style.width = brake;
+            if(ui.telBrakeM) ui.telBrakeM.style.width = brake;
+            t.brake = brake;
+        }
+        if(speed !== t.speed) {
+            if(ui.telSpeed) ui.telSpeed.style.width = speed;
+            if(ui.telSpeedM) ui.telSpeedM.style.width = speed;
+            t.speed = speed;
+        }
+        if(speedVal !== t.speedVal) {
+            if(ui.telSpeedVal) ui.telSpeedVal.textContent = speedVal;
+            if(ui.telSpeedValM) ui.telSpeedValM.textContent = speedVal;
+            t.speedVal = speedVal;
+        }
     },
 
     toggleRun: function() { 
@@ -1382,6 +1507,23 @@ const app = {
         if(ui.btnFps60) ui.btnFps60.className = on30 ? OFF : ON;
     },
 
+    // Camera-follow toggle. Independent of zoom by design: at zoom 1
+    // _clampView pins the centre regardless of what draw() sets panX/panY
+    // to, so this only visibly does anything once zoomed in — exactly where
+    // following is actually useful — and never fights the clamp otherwise.
+    toggleFollowCar: function() {
+        this.state.followCar = !this.state.followCar;
+        this._syncFollowCarUI();
+        this._needsDraw = true;
+    },
+    _syncFollowCarUI: function() {
+        if(!ui.btnFollowCar) return;
+        const ON = 'w-7 h-7 flex items-center justify-center rounded text-sm leading-none bg-blue-600 text-white transition-colors';
+        const OFF = 'w-7 h-7 flex items-center justify-center rounded text-sm leading-none text-slate-300 hover:text-white hover:bg-slate-700 transition-colors';
+        ui.btnFollowCar.className = this.state.followCar ? ON : OFF;
+        ui.btnFollowCar.setAttribute('aria-pressed', this.state.followCar ? 'true' : 'false');
+    },
+
     reset: function() {
         this.state.isRunning=false; this.state.generation=1; this.state.stats=[];
         this.state.bestTimes={gen:null,all:null}; this.state.lapHistory=[]; this.state.spectateCarId=null;
@@ -1423,6 +1565,24 @@ const app = {
         // same as the JS edition.
         Engine.pushConfig(this.state);
     },
+    // A checkbox, not a slider, so it gets its own handler rather than
+    // squeezing into updateConfig's number-only parsing. Reaches wasm the
+    // same way every other per-run config value does — no reset needed, since
+    // evolve() reads it fresh every generation.
+    updateNudgeMode: function(checked) {
+        this.state.nudgeMode = !!checked;
+        Engine.pushConfig(this.state);
+    },
+    // Not a wasm setting — Engine.setCoreCount resizes the WORKER POOL
+    // itself. Applied live: a shrink lands the moment the in-flight round
+    // finishes (never mid-round — see Engine._maybeResizePool for why), a
+    // grow starts spinning a worker up in the background immediately. The
+    // label is refreshed from updateUI()'s dirty check, not here, since the
+    // pool doesn't actually reach the requested count until the resize —
+    // synchronous for a shrink, asynchronous for a grow — finishes.
+    updateCoreCount: function(v) {
+        Engine.setCoreCount(parseInt(v, 10));
+    },
     syncSettingsUI: function() {
         const st = this.state;
         const apply = (inputId, val, labelId, fmt) => {
@@ -1440,6 +1600,21 @@ const app = {
         apply('cfg-acceleration', st.physics.acceleration, 'val-accel');
         apply('cfg-turnSpeed', st.physics.turnSpeed, 'val-turn');
         apply('cfg-brakeStrength', st.physics.brakeStrength, 'val-brakeStrength');
+        const nudgeBox = document.getElementById('cfg-nudgeMode'); if(nudgeBox) nudgeBox.checked = !!st.nudgeMode;
+        apply('cfg-coreCount', Engine.coreCount || 1, 'val-cores', v => v + ' / ' + (Engine.hardwareCores || v));
+    },
+    // The slider's range is device-dependent (1..every logical core the
+    // machine reports), so unlike every other setting it can't ship a fixed
+    // min/max in the markup — it's set here, once Engine.ready() has actually
+    // asked the browser how many cores exist.
+    _initCoreCountSlider: function() {
+        const inp = document.getElementById('cfg-coreCount');
+        if(!inp) return;
+        inp.min = 1;
+        inp.max = Engine.hardwareCores || Engine.coreCount || 1;
+        inp.value = Engine.coreCount || 1;
+        const lbl = document.getElementById('val-cores');
+        if(lbl) lbl.innerText = inp.value + ' / ' + inp.max;
     },
 
     showInfo: function(k) {
@@ -1471,6 +1646,17 @@ const app = {
             if(ui.statAllBest) ui.statAllBest.textContent = allBestStr;
             if(ui.statAllBestM) ui.statAllBestM.textContent = allBestStr;
             _ui_allBest = allBestStr;
+        }
+
+        // Live worker count — a slider can shrink the pool synchronously but
+        // grows it in the background (see Engine.setCoreCount), so the badge
+        // only actually reflects reality once the resize has landed, not the
+        // instant it's requested. Cheap enough to just poll here every frame
+        // rather than have engine.js reach into the DOM itself.
+        const cores = Engine.workers ? Engine.workers.length : 0;
+        if(_ui_cores !== cores && cores > 0) {
+            if(ui.coreCount) ui.coreCount.innerHTML = Engine.coreLabelHTML();
+            _ui_cores = cores;
         }
     },
 
@@ -1513,7 +1699,7 @@ const app = {
                 populationSize: st.populationSize, eliteClones: st.eliteClones,
                 targetLaps: st.targetLaps, focusPct: st.focusPct,
                 hiddenLayers: st.hiddenLayers, initialTTL: st.initialTTL,
-                speedMultiplier: st.speedMultiplier,
+                speedMultiplier: st.speedMultiplier, nudgeMode: !!st.nudgeMode,
                 physics: { ...st.physics }
             },
             trackName: this.currentTrack ? this.currentTrack.name : null,
@@ -1546,6 +1732,7 @@ const app = {
             for(const k of ['populationSize','eliteClones','targetLaps','focusPct','hiddenLayers','initialTTL','speedMultiplier']) {
                 if(typeof cfg[k] === 'number') st[k] = cfg[k];
             }
+            st.nudgeMode = !!cfg.nudgeMode;
             if(cfg.physics) for(const k in cfg.physics) {
                 if(typeof cfg.physics[k] === 'number') st.physics[k] = cfg.physics[k];
             }

@@ -86,7 +86,7 @@ const STOPPED_SPEED = 0.05;   // mirrors sim.c
 // 1. A stopped car cannot turn.
 // ---------------------------------------------------------------------------
 {
-    w.set_config(10, 0.05, 0.5, 0.3, 1000, 99, 0.15, H);   // exaggerated turnSpeed=0.5: any leak would be obvious
+    w.set_config(10, 0.05, 0.5, 0.3, 1000, 99, 0.15, H, 0);   // exaggerated turnSpeed=0.5: any leak would be obvious
     w.pop_init(1, 0, H, 1);
     setBiasBrain(0, BIG, 0);   // steer = full lock, throttle = 0 (never accelerates, never brakes)
     w.pop_reset();
@@ -116,7 +116,7 @@ const STOPPED_SPEED = 0.05;   // mirrors sim.c
 //     mid-track is out the same as one that never left the line.
 // ---------------------------------------------------------------------------
 {
-    w.set_config(20, 1.0, 0.04, 0.5, 1000, 99, 0.15, H);
+    w.set_config(20, 1.0, 0.04, 0.5, 1000, 99, 0.15, H, 0);
     w.pop_init(1, 0, H, 7);
     setBiasBrain(0, BIG, BIG);   // full steer AND full throttle
     w.pop_reset();
@@ -147,7 +147,7 @@ const STOPPED_SPEED = 0.05;   // mirrors sim.c
 // ---------------------------------------------------------------------------
 {
     const BRAKE_STRENGTH = 0.3;
-    w.set_config(20, 1.0, 0.04, BRAKE_STRENGTH, 1000, 99, 0.15, H);
+    w.set_config(20, 1.0, 0.04, BRAKE_STRENGTH, 1000, 99, 0.15, H, 0);
     w.pop_init(2, 0, H, 2);
     // Both cars: full throttle, no steering, for one frame — a single big
     // jump in speed rather than a long straight-line run, so the whole test
@@ -201,7 +201,7 @@ const STOPPED_SPEED = 0.05;   // mirrors sim.c
 //    the old (0.2 + 0.8*speedFactor) curve did.
 // ---------------------------------------------------------------------------
 function sampleTurnDelta(turnSpeed, jumpAccel, targetSpeedLabel) {
-    w.set_config(50, jumpAccel, turnSpeed, 0.3, 1000, 99, 0.15, H);
+    w.set_config(50, jumpAccel, turnSpeed, 0.3, 1000, 99, 0.15, H, 0);
     w.pop_init(1, 0, H, 3);
     setBiasBrain(0, 0, BIG);   // one frame of huge accel = a single clean jump to a known speed
     w.pop_reset();

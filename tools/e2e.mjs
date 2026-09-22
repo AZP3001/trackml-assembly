@@ -127,6 +127,51 @@ check(afterGen.gen > genStart, 'generation advanced', `gen ${genStart} -> ${afte
 check(afterGen.stats > 0 && Number.isFinite(afterGen.best), 'fitness recorded', `best=${Math.round(afterGen.best)}`);
 check(afterGen.cars === boot.cars, 'population size held', `${afterGen.cars} cars`);
 
+// --- worker-count slider --------------------------------------------------
+// Drives the real slider (a real 'input' event, proving the data-input
+// wiring, not a hand call to Engine.setCoreCount) down to one core, confirms
+// training keeps working — no hang, no lost cars — on the smaller pool, then
+// back up to the full hardware count and confirms the same there. Shrinking
+// only lands between rounds and growing happens in the background (see
+// Engine._maybeResizePool), so both are given a moment to actually land
+// before being checked.
+{
+    const bounds = await page.evaluate(() => {
+        const el = document.getElementById('cfg-coreCount');
+        return { min: +el.min, max: +el.max, value: +el.value, hw: Engine.hardwareCores };
+    });
+    check(bounds.min === 1 && bounds.max === bounds.hw && bounds.value === boot.cores,
+        'the cores slider is bounded to the hardware and starts at the stock default',
+        `min ${bounds.min}, max ${bounds.max}, value ${bounds.value} (hardware ${bounds.hw})`);
+
+    const setCores = n => page.evaluate((v) => {
+        const el = document.getElementById('cfg-coreCount');
+        el.value = v;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+    }, n);
+
+    await setCores(1);
+    await page.waitForFunction(() => Engine.workers.length === 1, null, { timeout: 15000 });
+    const genAtOne = await page.evaluate(() => app.state.generation);
+    await page.waitForFunction(g => app.state.generation > g, genAtOne, { timeout: 60000 });
+    const shrunk = await page.evaluate(() => ({ workers: Engine.workers.length, cars: app.state.cars.length }));
+    check(shrunk.workers === 1, 'shrinking the slider to 1 drops the pool to a single worker',
+        `${shrunk.workers} worker(s)`);
+    check(shrunk.cars === boot.cars, 'and training keeps going on it, population intact',
+        `${shrunk.cars} cars`);
+
+    const target = bounds.hw > 1 ? bounds.hw : 1;
+    await setCores(target);
+    await page.waitForFunction(t => Engine.workers.length === t, target, { timeout: 15000 });
+    const genAtFull = await page.evaluate(() => app.state.generation);
+    await page.waitForFunction(g => app.state.generation > g, genAtFull, { timeout: 60000 });
+    const grown = await page.evaluate(() => ({ workers: Engine.workers.length, cars: app.state.cars.length }));
+    check(grown.workers === target, 'and growing it back rebuilds the pool up to the hardware count',
+        `${grown.workers}/${target} workers`);
+    check(grown.cars === boot.cars, 'training still advances afterwards, population still intact',
+        `${grown.cars} cars`);
+}
+
 // The mutation-settle/focus-mode bookkeeping (see script.js: app.evolve) ran
 // at least once as part of the generation above with no page error, which is
 // most of what matters — a wrong argument order into the new 4-arg
@@ -590,14 +635,24 @@ await page.evaluate(() => { if (app.state.isEditing) editor.cancel(); });
 
         return {
             w: c.width, h: c.height, scale: app._renderScale,
+            rectW: r.width, rectH: r.height,
+            viewportW: app._viewportW, viewportH: app._viewportH,
             bg: app.state.bgCanvas ? app.state.bgCanvas.width : 0,
             atRest, zoomed, dragErr
         };
     });
-    check(geom.w > 0 && geom.w <= 1200 && geom.h === Math.round(geom.w * 0.75),
-        'the backing store is sized in whole pixels, in the world aspect',
-        `${geom.w}x${geom.h} backing store (scale ${geom.scale.toFixed(3)})`);
-    check(geom.scale === 1, 'and on a desktop it is the full 1200x900, unchanged');
+    // The backing store is no longer forced to the world's own 4:3 — it's
+    // sized (and its cover-viewport widened) to match whatever box the
+    // canvas actually sits in, which on a real page is essentially never
+    // exactly 4:3, so this is exactly the letterbox-bar fix landing.
+    check(geom.w > 0 && geom.h > 0 && Math.abs(geom.w / geom.h - geom.rectW / geom.rectH) < 0.01,
+        'the backing store is sized in whole pixels, matching the container aspect (no letterbox bars)',
+        `${geom.w}x${geom.h} backing store for a ${geom.rectW.toFixed(0)}x${geom.rectH.toFixed(0)} box (scale ${geom.scale.toFixed(3)})`);
+    check(geom.viewportW >= 1200 - 0.5 && geom.viewportH >= 900 - 0.5,
+        'and it reveals at least the full 1200x900 world — never less',
+        `viewport ${geom.viewportW.toFixed(1)}x${geom.viewportH.toFixed(1)}`);
+    check(Math.abs(geom.scale - 1) < 0.01, 'and on a desktop it rasterises close to 1:1 — no mobile downscale',
+        `scale ${geom.scale.toFixed(4)}`);
     check(geom.bg === geom.w, 'the cached background matches it exactly, so it blits 1:1',
         `background ${geom.bg}px wide`);
     check(geom.atRest < 0.5, 'a pointer lands on the world point it is over',
@@ -628,6 +683,47 @@ await page.evaluate(() => { if (app.state.isEditing) editor.cancel(); });
     check(afterA.hz === 30 && /bg-blue-600/.test(afterA.btn30) && !/bg-blue-600/.test(afterA.btn60),
         'the 30fps button switches the rate and highlights itself', `now ${afterA.hz}fps`);
     check(afterB === 60, 'and the 60fps button switches it back', `now ${afterB}fps`);
+}
+
+// --- camera follow-car toggle ---------------------------------------------
+// Clicks the real button (proving the data-click wiring, not just a hand
+// call to toggleFollowCar), then forces a frame and checks the pan actually
+// landed on the spectated car — not just that the button relabelled itself.
+{
+    const carId = await page.evaluate(() => {
+        app.resetView(); app.releaseSpectate();
+        const c = app.state.cars.find(c => !c.crashed);
+        app.state.spectateCarId = c.id;
+        app._spectated = app._pickSpectated();
+        return c.id;
+    });
+    const before = await page.evaluate(() => {
+        app.state.view.zoom = 4;
+        app.state.view.panX = 900; app.state.view.panY = 200;   // deliberately off the car
+        app._clampView();
+        return {
+            panX: app.state.view.panX, panY: app.state.view.panY,
+            followBtn: document.getElementById('btn-follow-car').className
+        };
+    });
+    await page.click('#btn-follow-car');
+    const after = await page.evaluate(() => {
+        app.draw();
+        const c = app.state.cars.find(c => c.id === app.state.spectateCarId);
+        return {
+            panX: app.state.view.panX, panY: app.state.view.panY, carX: c.x, carY: c.y,
+            followBtn: document.getElementById('btn-follow-car').className
+        };
+    });
+    await page.evaluate(() => { app.toggleFollowCar(); app.resetView(); app.releaseSpectate(); });
+    check(carId !== undefined && !/bg-blue-600/.test(before.followBtn), 'follow-car toggle starts off');
+    check(/bg-blue-600/.test(after.followBtn), 'clicking it highlights the button', after.followBtn);
+    check(Math.abs(after.panX - before.panX) > 1 || Math.abs(after.panY - before.panY) > 1,
+        'and the next frame re-centres the camera on the spectated car',
+        `pan moved from (${before.panX.toFixed(1)}, ${before.panY.toFixed(1)}) to (${after.panX.toFixed(1)}, ${after.panY.toFixed(1)})`);
+    check(Math.abs(after.panX - after.carX) < 0.01 && Math.abs(after.panY - after.carY) < 0.01,
+        'landing exactly on the car — well inside the zoomed-in clamp bounds, so unclamped',
+        `pan (${after.panX.toFixed(2)}, ${after.panY.toFixed(2)}) vs car (${after.carX.toFixed(2)}, ${after.carY.toFixed(2)})`);
 }
 
 // --- canvas actually drew something ------------------------------------

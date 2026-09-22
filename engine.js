@@ -73,6 +73,8 @@ function engineIsMobile() {
     return typeof IS_MOBILE !== 'undefined' ? !!IS_MOBILE : false;
 }
 
+const CORE_ICON_SVG = '<svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v2"></path><path d="M12 2v2"></path><path d="M17 20v2"></path><path d="M17 2v2"></path><path d="M2 12h2"></path><path d="M2 17h2"></path><path d="M2 7h2"></path><path d="M20 12h2"></path><path d="M20 17h2"></path><path d="M20 7h2"></path><path d="M7 20v2"></path><path d="M7 2v2"></path><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="8" y="8" width="8" height="8" rx="1"></rect></svg>';
+
 const Engine = {
     module: null,        // compiled WebAssembly.Module, cloned out to workers
     master: null,        // { exports, memory } on the main thread
@@ -111,7 +113,7 @@ const Engine = {
 
             this.hardwareCores = navigator.hardwareConcurrency || 4;
             this.coreCount = workerCountFor(this.hardwareCores, engineIsMobile());
-            this._pendingCoreLabel = `<svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v2"></path><path d="M12 2v2"></path><path d="M17 20v2"></path><path d="M17 2v2"></path><path d="M2 12h2"></path><path d="M2 17h2"></path><path d="M2 7h2"></path><path d="M20 12h2"></path><path d="M20 17h2"></path><path d="M20 7h2"></path><path d="M7 20v2"></path><path d="M7 2v2"></path><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="8" y="8" width="8" height="8" rx="1"></rect></svg> ${this.coreCount}${this.coreCount < this.hardwareCores ? '/' + this.hardwareCores : ''} Cores · WASM${this.usingSimd ? '+SIMD' : ''}`;
+            this._pendingCoreLabel = this.coreLabelHTML();
 
             await this._spawnWorkers();
             return this;
@@ -144,6 +146,88 @@ const Engine = {
             w.postMessage({ type: 'init', module: this.module, index: i });
             this.workers.push(w);
         })));
+    },
+
+    // The badge in the top bar (and the settings slider's label) both build
+    // this fresh off current state rather than caching it, so a resize never
+    // leaves a stale number on screen.
+    coreLabelHTML: function() {
+        const n = this.workers.length, m = this.hardwareCores || n;
+        return `${CORE_ICON_SVG} ${n}${n < m ? '/' + m : ''} Cores · WASM${this.usingSimd ? '+SIMD' : ''}`;
+    },
+
+    // ---- live worker-pool resizing --------------------------------------
+    // The population never has to be regenerated to change this — the pool
+    // just gets a different number of slices of the SAME population array on
+    // the master, which is exactly what _sliceUp()/_shipBrains() already
+    // recompute every generation. Only the pool itself (spawning/terminating
+    // Workers) needs care, for one hazard: killing a worker while a round is
+    // in flight would leave its 'done' response uncounted, and run()'s
+    // promise (awaited by script.js's main loop) would then never resolve —
+    // the whole simulation would just freeze. So a shrink only actually
+    // happens once _runState is null, i.e. between rounds — see
+    // _maybeResizePool(). Growing has no such hazard: a worker that finishes
+    // its handshake mid-round is simply not one run() already dispatched to
+    // (it read workers.length before this one existed), so it sits idle for
+    // the rest of that round and joins in on the next one.
+    _targetCoreCount: null,
+    _resizing: false,
+    setCoreCount: function(n) {
+        const cap = this.hardwareCores || this.workers.length || 1;
+        this._targetCoreCount = Math.max(1, Math.min(cap, n | 0));
+        this._maybeResizePool();
+    },
+    _maybeResizePool: function() {
+        if (this._resizing || this._targetCoreCount == null) return;
+        if (this._targetCoreCount > this.workers.length) {
+            this._resizing = true;
+            this._growOneWorker().then(() => {
+                this._resizing = false;
+                this._maybeResizePool();   // one at a time — see _growOneWorker
+            });
+        } else if (this._targetCoreCount < this.workers.length) {
+            if (this._runState) return;   // mid-round; evolve() retries this at the next generation boundary
+            // From the tail only. Every worker's own `index` (assigned once,
+            // at spawn) has to keep matching its position in `workers` —
+            // _rate and _sliceUp both trust that alignment — and only
+            // dropping the tail leaves everyone before it un-renumbered.
+            const dead = this.workers.pop();
+            dead.terminate();
+            if (this._rate.length > this.workers.length) this._rate.length = this.workers.length;
+            this.coreCount = this.workers.length;
+            this._maybeResizePool();
+        }
+    },
+    // Spawns exactly one worker and resolves once its init handshake is
+    // done — sequentially, not N at once, because the position it lands at
+    // in `workers` (assigned the moment it's pushed) has to equal the
+    // `index` it was created with, and two handshakes racing each other
+    // could finish in either order.
+    _growOneWorker: function() {
+        const index = this.workers.length;
+        return new Promise((resolve, reject) => {
+            const w = new Worker(`./sim-worker.js?v=${ASSET_VERSION}`);
+            w.onerror = e => { console.error('Worker error:', e.message); reject(new Error(e.message)); };
+            w.onmessage = e => {
+                if (e.data.type === 'ready') {
+                    w.onmessage = ev => this._handleWorkerMessage(ev.data);
+                    // Every other worker already has the current track built
+                    // and the current config set (setTrack()/pushConfig()
+                    // broadcast to whichever workers existed at the time) —
+                    // replay the latest of both so this one isn't simulating
+                    // against an empty, never-built track on its first 'pop'.
+                    if (this._lastTrackMsg) {
+                        w.postMessage({ type: 'track', def: this._lastTrackMsg.def, config: this._lastTrackMsg.config });
+                    }
+                    this.workers.push(w);
+                    this.coreCount = this.workers.length;
+                    resolve();
+                    return;
+                }
+                this._handleWorkerMessage(e.data);
+            };
+            w.postMessage({ type: 'init', module: this.module, index });
+        });
     },
 
     // A wasm instance's memory can be detached and replaced when it grows, so a
@@ -245,12 +329,22 @@ const Engine = {
         return this.master ? this.master.ex.sensor_len() : 180;
     },
 
+    // The most recent {def, config} sent to every worker via setTrack(),
+    // config kept current by pushConfig() too — replayed at a freshly grown
+    // worker (see _growOneWorker) so it starts from the same track and
+    // config as everyone else instead of an empty, unbuilt instance. Null
+    // until the first setTrack(), which every startup reaches before the
+    // pool could ever be resized.
+    _lastTrackMsg: null,
+
     pushConfig: function(state) {
         const p = state.physics;
         const args = [p.maxSpeed, p.acceleration, p.turnSpeed, p.brakeStrength,
-                      state.initialTTL, state.targetLaps, state.focusPct, state.hiddenLayers];
+                      state.initialTTL, state.targetLaps, state.focusPct, state.hiddenLayers,
+                      state.nudgeMode ? 1 : 0];
         if (this.master) this.master.ex.set_config(...args);
         this.workers.forEach(w => w.postMessage({ type: 'config', args }));
+        if (this._lastTrackMsg) this._lastTrackMsg.config = args;
     },
 
     // Hand every worker the raw track definition and let it rebuild the geometry
@@ -269,9 +363,11 @@ const Engine = {
         };
         const p = state.physics;
         const config = [p.maxSpeed, p.acceleration, p.turnSpeed, p.brakeStrength,
-                        state.initialTTL, state.targetLaps, state.focusPct, state.hiddenLayers];
+                        state.initialTTL, state.targetLaps, state.focusPct, state.hiddenLayers,
+                        state.nudgeMode ? 1 : 0];
         if (this.master) this.master.ex.set_config(...config);
         this.workers.forEach(w => w.postMessage({ type: 'track', def, config }));
+        this._lastTrackMsg = { def, config };
     },
 
     // ---- population ----------------------------------------------------
@@ -499,7 +595,11 @@ const Engine = {
         ex.evolve(eliteClones, this._hasGlobalBest ? 1 : 0, sigmaGen | 0, lapCompletions | 0);
         // A generation boundary is the one moment the partition can move: every
         // worker is idle and about to be handed a fresh slice anyway, so
-        // resizing them here costs nothing beyond the arithmetic.
+        // resizing them here costs nothing beyond the arithmetic. Also the
+        // retry point for a shrink the user asked for while a round was still
+        // in flight (_maybeResizePool declines to kill a worker mid-round —
+        // see there — so it needs a later, guaranteed-idle moment to land).
+        this._maybeResizePool();
         this._sliceUp();
         this._shipBrains();
         return { bestFitness: bestFit, globalBest: this._globalBestFitness };

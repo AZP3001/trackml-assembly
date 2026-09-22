@@ -80,7 +80,7 @@ const IN_N = 11, OUT_N = 2;
     const POP = 400;
     // focusPct high and eliteClones 0, so almost the whole population is
     // focused clones — maximising the sample count this measurement gets.
-    w.set_config(10, 0.05, 0.02, 0.05, 750, 3, 0.8, H);
+    w.set_config(10, 0.05, 0.02, 0.05, 750, 3, 0.8, H, 0);
     w.pop_init(POP, 0, H, 20260922);
     const stride = w.brain_stride();
 
@@ -154,7 +154,7 @@ const IN_N = 11, OUT_N = 2;
 // says unambiguously which source evolve() actually read.
 // ---------------------------------------------------------------------------
 {
-    w.set_config(10, 0.05, 0.02, 0.05, 750, 3, 0.2, H);
+    w.set_config(10, 0.05, 0.02, 0.05, 750, 3, 0.2, H, 0);
     w.pop_init(50, 0, H, 20260923);
     const stride = w.brain_stride();
     f32(w.brains_ptr() + w.stash_slot() * stride * 4, stride).fill(0);
@@ -191,6 +191,47 @@ const IN_N = 11, OUT_N = 2;
 }
 
 // ---------------------------------------------------------------------------
+// 2.5. Nudge mode: focused clones are the stash byte-for-byte except one
+// pushed weight (the throttle output bias), cycling through NUDGE_TABLE —
+// never the isotropic Gaussian noise the default (nudgeMode=0) mode uses.
+// ---------------------------------------------------------------------------
+{
+    w.set_config(10, 0.05, 0.02, 0.05, 750, 3, 0.5, H, 1);   // nudgeMode=1
+    w.pop_init(20, 0, H, 20260925);
+    const stride = w.brain_stride();
+    const offBO = 11 * H + H * 2 + H;   // IN_N*h + h*OUT_N + h — matches offBO in sim.c
+    const stash = f32(w.brains_ptr() + w.stash_slot() * stride * 4, stride);
+    for (let j = 0; j < stride; j++) stash[j] = j * 0.01 + 0.001;   // distinctive, all-nonzero
+    i32(w.crash_count_ptr(), w.max_gates()).fill(0);
+    i32(w.crash_count_ptr(), w.max_gates())[3] = 100;
+
+    w.evolve(0, 1, 0, 0);
+
+    const focused = i32(w.car_focused_ptr(), 20);
+    const brains = f32(w.brains_ptr(), 20 * stride);
+    const NUDGE_TABLE = [0.15, -0.15, 0.35, -0.35, 0.6, -0.6];
+    let n = 0, wrongWeight = 0, wrongDelta = 0, tableIdx = 0;
+    for (let c = 0; c < 20; c++) {
+        if (!focused[c]) continue;
+        let diffs = 0, diffIdx = -1;
+        for (let j = 0; j < stride; j++) {
+            if (Math.abs(brains[c * stride + j] - stash[j]) > 1e-6) { diffs++; diffIdx = j; }
+        }
+        if (diffs !== 1 || diffIdx !== offBO + 1) wrongWeight++;
+        else {
+            const delta = brains[c * stride + diffIdx] - stash[diffIdx];
+            if (Math.abs(delta - NUDGE_TABLE[tableIdx % NUDGE_TABLE.length]) > 1e-4) wrongDelta++;
+        }
+        tableIdx++; n++;
+    }
+    check(n >= 8, 'enough nudge clones bred to check the table', `${n} focused clones`);
+    check(wrongWeight === 0, 'a nudge clone changes exactly one weight — the throttle output bias',
+        wrongWeight === 0 ? 'every clone matched' : `${wrongWeight}/${n} touched the wrong weight(s)`);
+    check(wrongDelta === 0, 'and the pushes cycle through NUDGE_TABLE in order',
+        wrongDelta === 0 ? 'every delta matched' : `${wrongDelta}/${n} did not match the table`);
+}
+
+// ---------------------------------------------------------------------------
 // 3. The per-frame reward is flat — braking doesn't cost it.
 //
 // Two cars, same synthetic-brain technique as carphysics.mjs: zero every
@@ -201,7 +242,7 @@ const IN_N = 11, OUT_N = 2;
 // difference between them, if any, is this one term.
 // ---------------------------------------------------------------------------
 {
-    w.set_config(10, 0.05, 0.02, 0.3, 5000, 99, 0.15, H);
+    w.set_config(10, 0.05, 0.02, 0.3, 5000, 99, 0.15, H, 0);
     w.pop_init(2, 0, H, 20260924);
     const stride = w.brain_stride();
     const offBiasO = IN_N * H + H * OUT_N + H;

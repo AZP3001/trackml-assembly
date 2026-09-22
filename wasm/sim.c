@@ -1449,6 +1449,17 @@ static i32   cfg_initialTTL = 750, cfg_targetLaps = 3;
 // comment on MUT_SIGMA_* near evolve().
 static float cfg_focusPct = 0.20f;
 static i32   cfg_hidden = 5;
+// How the focused sub-population (above) is actually perturbed. 0 (default):
+// the original behaviour, a random Gaussian nudge on every weight, same as
+// the rest of the bred population. 1: every weight EXCEPT the throttle
+// output bias is left byte-identical to the stash, and that one weight is
+// pushed by a fixed amount from a small preset table — some clones a bit
+// more throttle, some a bit less (which is also a bit more brake, since
+// they share one output) — cycling through the table so the focus window
+// gets several different, purely behavioural variations tried against it
+// in the same generation, instead of the same isotropic noise landing
+// somewhere random in weight space. See evolve() for the table itself.
+static i32   cfg_nudgeMode = 0;
 
 // Lateral grip used to cancel sideways slip and keep the car's velocity
 // tracking its heading (see updateCar). It used to be a user-facing slider,
@@ -1476,11 +1487,12 @@ static void recompute_sensor_len(void) {
 
 __attribute__((export_name("set_config")))
 void set_config(float maxSpeed, float accel, float turnSpeed, float brakeStrength,
-                i32 initialTTL, i32 targetLaps, float focusPct, i32 hidden) {
+                i32 initialTTL, i32 targetLaps, float focusPct, i32 hidden, i32 nudgeMode) {
     cfg_maxSpeed = maxSpeed; cfg_accel = accel; cfg_turnSpeed = turnSpeed; cfg_brakeStrength = brakeStrength;
     cfg_initialTTL = initialTTL; cfg_targetLaps = targetLaps;
     cfg_focusPct = focusPct;
     cfg_hidden = hidden < 1 ? 1 : (hidden > MAX_HIDDEN ? MAX_HIDDEN : hidden);
+    cfg_nudgeMode = nudgeMode ? 1 : 0;
     recompute_sensor_len();
 }
 
@@ -2601,6 +2613,15 @@ static inline float gauss01(void) { return rnd11() + rnd11() + rnd11(); }
 // slowest (gate_ratio) — see the branch below.
 #define FEW_LAPS_THRESHOLD 3
 
+// The fixed pushes a nudge clone tries on the throttle output bias — see
+// cfg_nudgeMode above. Both directions, at three magnitudes, so a section
+// that needs a bit more aggression and one that needs a bit more caution are
+// equally reachable in the same generation; which one (if either) actually
+// helps is left entirely to selection, same as everything else here — this
+// table only decides what gets TRIED, never what wins.
+static const float NUDGE_TABLE[6] = { 0.15f, -0.15f, 0.35f, -0.35f, 0.6f, -0.6f };
+#define NUDGE_TABLE_LEN 6
+
 __attribute__((export_name("evolve")))
 void evolve(i32 eliteClones, i32 hasGlobalBest, i32 sigmaGen, i32 lapCompletions) {
     sort_by_fitness();
@@ -2675,12 +2696,24 @@ void evolve(i32 eliteClones, i32 hasGlobalBest, i32 sigmaGen, i32 lapCompletions
     float sigma = MUT_SIGMA_FLOOR + (MUT_SIGMA_START - MUT_SIGMA_FLOOR)
                   * (float)exp_d(-(double)(sigmaGen < 0 ? 0 : sigmaGen) / (double)MUT_SIGMA_TAU);
 
-    // The focused sub-population: mutated clones of the stash, same sigma as
-    // everything else, flagged so updateCar can boost their reward through
-    // the window above. Only spawned once there is both a stash to clone and
-    // an actual weak spot to aim at — on an early generation, or a track
-    // short enough that the window would cover the whole lap, this is 0 and
-    // every slot breeds normally below.
+    // The focused sub-population: clones of the stash, flagged so updateCar
+    // can boost their reward through the window above. Only spawned once
+    // there is both a stash to clone and an actual weak spot to aim at — on
+    // an early generation, or a track short enough that the window would
+    // cover the whole lap, this is 0 and every slot breeds normally below.
+    //
+    // How each clone differs from the stash depends on cfg_nudgeMode:
+    //   0 (default): the original behaviour — every weight gets the same
+    //     random Gaussian nudge as the rest of the bred population.
+    //   1: every weight is left BYTE-IDENTICAL to the stash except the
+    //     throttle output bias, which is pushed by one entry of
+    //     NUDGE_TABLE (cycling, so a handful of different pushes all get
+    //     tried against this generation's focus window). This is a pure
+    //     behavioural probe — "does this stretch just want a bit more
+    //     throttle, or a bit less?" — rather than random exploration in
+    //     weight space, and it is why it needs the focus window active:
+    //     nudging the whole brain's throttle bias helps nothing if there is
+    //     no known weak stretch to test it against.
     i32 focusCount = 0;
     if (hasGlobalBest && focus_lo >= 0) {
         focusCount = (i32)(cfg_focusPct * (float)pop_n + 0.5f);
@@ -2690,7 +2723,12 @@ void evolve(i32 eliteClones, i32 hasGlobalBest, i32 sigmaGen, i32 lapCompletions
         for (i32 k = 0; k < focusCount; k++) {
             i32 idx = written + k;
             float *dst = &brains_next[idx * stride];
-            for (i32 j = 0; j < stride; j++) dst[j] = stashSrc[j] + gauss01() * sigma;
+            if (cfg_nudgeMode) {
+                for (i32 j = 0; j < stride; j++) dst[j] = stashSrc[j];
+                dst[offBO + 1] += NUDGE_TABLE[k % NUDGE_TABLE_LEN];
+            } else {
+                for (i32 j = 0; j < stride; j++) dst[j] = stashSrc[j] + gauss01() * sigma;
+            }
             car_focused[idx] = 1;
         }
         written += focusCount;
