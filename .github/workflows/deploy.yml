@@ -31,13 +31,20 @@ jobs:
   # can never quietly drift from their source.
   verify-wasm:
     if: github.ref_name == github.event.repository.default_branch
-    runs-on: ubuntu-latest
+    # Pinned: the committed .wasm must be byte-identical to a rebuild, and a
+    # newer image's clang-18 compiles to different bytes (ubuntu-latest moved).
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install clang and lld
-        run: sudo apt-get update && sudo apt-get install -y clang lld
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/wasm-ld wasm-ld /usr/bin/wasm-ld-18 100
+          clang --version
 
       - name: Record committed checksums
         run: sha256sum wasm/sim.wasm wasm/sim-simd.wasm | tee committed.sha256

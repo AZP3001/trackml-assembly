@@ -10,7 +10,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # see deploy.yml: pinned so the wasm rebuild is byte-identical
     steps:
       # fetch-depth: 0 — versioncheck.mjs below walks full git history
       # (git rev-list --count from the WebAssembly-port commit), which a
