@@ -25,6 +25,7 @@ const SETTING_DESCRIPTIONS = {
     hiddenLayers: "Brain complexity. More layers = smarter but heavier computation.",
     initialTTL: "Time to Live. Frames allowed before death if no checkpoint is reached.",
     targetLaps: "Laps needed to trigger the next generation automatically.",
+    profile: "Explore: get round the track at all — a generation ends at the first finished lap, with wide mutations. Optimize: cut lap time — more laps per generation, small careful mutations, more elites. Explore hands over to Optimize by itself the first time a car finishes; a new track or Reset goes back to Explore.",
     maxSpeed: "Top speed. Higher speeds require faster AI reaction times.",
     acceleration: "Engine power.", turnSpeed: "Steering sensitivity. Cars turn tightest at low speed and lose authority as they speed up, same as a real car's grip limit.",
     brakeStrength: "How hard the brake pedal bites. Braking now scales with how hard the AI presses it, instead of every negative throttle snapping speed down by the same flat amount.",
@@ -99,22 +100,34 @@ const IS_MOBILE = detectMobileDevice();
 // Starting settings. Everything here is a slider the moment the page is up —
 // this is where the sliders START, not where they are allowed to be.
 //
-// The mobile column is not a watered-down version of the desktop one for its
-// own sake; each number is there because of what it costs per frame. Population
-// is the direct multiplier on every per-car cost there is. Target Laps decides
-// how long a generation runs before it is scored, and two laps on a phone gets
-// you a result while you are still looking at it. Elite Clones tracks the
-// population so the carried-forward band stays the same tenth of the field it
-// is on desktop rather than becoming a fifth of it. And one hidden unit fewer
-// is not a rounding-down: the hidden layer is evaluated four units at a time on
-// the SIMD build, so five units cost two passes and four cost one — dropping
-// the fifth halves the network's share of the step rather than shaving a fifth
-// off it.
+// Measured with tools/train.mjs (README: Training profiles). 150 cars needed
+// the least total work to finish ordinary tracks — fewer cars took more
+// generations, more cars cost more per generation than they saved — which is
+// what a phone, bound by CPU, wants. 300 cost ~1.5x that on ordinary tracks but
+// finished the hardest ones (Thin Eight, Switchbacks, Autocross) more often,
+// cheaper and in half the race time, and a computer has the throughput; 500
+// lost on both counts. Four hidden units beat 3, 6 and 8, and the SIMD build
+// evaluates the hidden layer four units at a time, so a fifth costs a whole
+// second pass. Elite Clones and Target Laps come from the training profile.
 const DEFAULT_SETTINGS = {
-    desktop: { populationSize: 500, eliteClones: 30, targetLaps: 3, hiddenLayers: 5 },
-    mobile:  { populationSize: 150, eliteClones: 15, targetLaps: 2, hiddenLayers: 4 }
+    desktop: { populationSize: 300, hiddenLayers: 4 },
+    mobile:  { populationSize: 150, hiddenLayers: 4 }
 };
 const DEVICE_DEFAULTS = IS_MOBILE ? DEFAULT_SETTINGS.mobile : DEFAULT_SETTINGS.desktop;
+
+// Training goals, each tuned separately with tools/train.mjs (README:
+// Training profiles). Explore ends a generation at the first finished lap —
+// half the cost of two, and finishing is all it is for — and keeps a tenth of
+// the field as elites so a lucky line isn't lost. Optimize runs two laps (the
+// second is a flying lap, the one worth timing) and keeps only ~3% elites:
+// more room for new lines beat protecting old ones. Smaller mutations, focus
+// mutants and 3-lap generations all measured WORSE for lap time per unit of
+// work, so the mutation size stays the same in both.
+// eliteFrac is a share of the population, so it scales with Pop Size.
+const PROFILES = {
+    explore:  { targetLaps: 1, eliteFrac: 0.10, mutRate: 0.15, sigma: 0.5, sigmaFloor: 0.05, focusPct: 0 },
+    optimize: { targetLaps: 2, eliteFrac: 0.03, mutRate: 0.15, sigma: 0.5, sigmaFloor: 0.05, focusPct: 0 }
+};
 
 // How many pixels the canvas actually rasterises, as a fraction of the fixed
 // 1200x900 world the whole app draws in.
@@ -309,8 +322,10 @@ const app = {
         // DEVICE_DEFAULTS, which is the desktop set unless this is a phone or
         // a tablet. Everything else is the same on both.
         populationSize: DEVICE_DEFAULTS.populationSize,
-        eliteClones: DEVICE_DEFAULTS.eliteClones,
-        targetLaps: DEVICE_DEFAULTS.targetLaps,
+        eliteClones: Math.round(PROFILES.explore.eliteFrac * DEVICE_DEFAULTS.populationSize),
+        targetLaps: PROFILES.explore.targetLaps,
+        profile: 'explore',
+        mutRate: PROFILES.explore.mutRate, sigma: PROFILES.explore.sigma, sigmaFloor: PROFILES.explore.sigmaFloor,
         hiddenLayers: DEVICE_DEFAULTS.hiddenLayers,
         focusPct: 0, initialTTL: 750,
         // How the Focus % mutants are perturbed — false (stock) is the same
@@ -977,6 +992,8 @@ const app = {
             if(this._firstLapGen === null) this._firstLapGen = this.state.generation;
             this._lapCompletionCount++;
         }
+        // The track is solved: breed the next generation for lap time.
+        if(this.state.profile === 'explore' && maxLapsThisGen >= this.state.targetLaps) this.setProfile('optimize');
         const sigmaGen = this._firstLapGen === null ? 0
             : Math.max(0, this.state.generation - this._firstLapGen - this.SETTLE_GENERATIONS);
 
@@ -1550,7 +1567,21 @@ const app = {
         ui.btnFollowCar.setAttribute('aria-pressed', this.state.followCar ? 'true' : 'false');
     },
 
+    // Applies a PROFILES entry over the current settings; the sliders stay
+    // free to tweak afterwards.
+    setProfile: function(name) {
+        const p = PROFILES[name]; if(!p) return;
+        const st = this.state;
+        st.profile = name;
+        st.targetLaps = p.targetLaps; st.focusPct = p.focusPct;
+        st.mutRate = p.mutRate; st.sigma = p.sigma; st.sigmaFloor = p.sigmaFloor;
+        st.eliteClones = Math.max(1, Math.round(p.eliteFrac * st.populationSize));
+        this.syncSettingsUI();
+        Engine.pushConfig(st);
+    },
+
     reset: function() {
+        this.setProfile('explore');
         this.state.isRunning=false; this.state.generation=1; this.state.stats=[];
         this.state.bestTimes={gen:null,all:null}; this.state.lapHistory=[]; this.state.spectateCarId=null;
         this._statRes = 1; this._recent = [];
@@ -1672,6 +1703,12 @@ const app = {
         apply('cfg-hiddenLayers', st.hiddenLayers, 'val-hidden');
         apply('cfg-initialTTL', st.initialTTL, 'val-ttl');
         apply('cfg-targetLaps', st.targetLaps, 'val-laps');
+        const ON = 'px-2.5 py-1 text-[10px] font-bold rounded bg-blue-600 text-white transition-colors';
+        const OFF = 'px-2.5 py-1 text-[10px] font-bold rounded text-slate-400 hover:bg-slate-600 transition-colors';
+        for(const n of Object.keys(PROFILES)) {
+            const b = document.getElementById('btn-profile-' + n);
+            if(b) { b.className = st.profile === n ? ON : OFF; b.setAttribute('aria-pressed', st.profile === n ? 'true' : 'false'); }
+        }
         apply('cfg-maxSpeed', st.physics.maxSpeed, 'val-maxSpeed');
         apply('cfg-acceleration', st.physics.acceleration, 'val-accel');
         apply('cfg-turnSpeed', st.physics.turnSpeed, 'val-turn');
@@ -1786,6 +1823,7 @@ const app = {
                 targetLaps: st.targetLaps, focusPct: st.focusPct,
                 hiddenLayers: st.hiddenLayers, initialTTL: st.initialTTL,
                 speedMultiplier: st.speedMultiplier, nudgeMode: !!st.nudgeMode,
+                profile: st.profile, mutRate: st.mutRate, sigma: st.sigma, sigmaFloor: st.sigmaFloor,
                 physics: { ...st.physics }
             },
             trackName: this.currentTrack ? this.currentTrack.name : null,
@@ -1815,7 +1853,8 @@ const app = {
             const st = this.state;
             st.isRunning = false;
             const cfg = j.settings || {};
-            for(const k of ['populationSize','eliteClones','targetLaps','focusPct','hiddenLayers','initialTTL','speedMultiplier']) {
+            if(PROFILES[cfg.profile]) st.profile = cfg.profile;
+            for(const k of ['populationSize','eliteClones','targetLaps','focusPct','hiddenLayers','initialTTL','speedMultiplier','mutRate','sigma','sigmaFloor']) {
                 if(typeof cfg[k] === 'number') st[k] = cfg[k];
             }
             st.nudgeMode = !!cfg.nudgeMode;
@@ -1992,6 +2031,7 @@ const app = {
         // lapped yet" — the whole point of settling the mutation-rate decay
         // on that is that it's per-TRACK, not per-run in the abstract.
         this._firstLapGen = null; this._lapCompletionCount = 0;
+        this.setProfile('explore');
         this._runToken++; this._needsDraw = true;
         const sel = document.getElementById('track-dropdown'); if(sel) sel.value = i;
         const t = this.state.tracks[i];

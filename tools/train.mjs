@@ -28,6 +28,13 @@ const SEEDS = Number(opt('--seeds', 3));
 const QUIET = args.includes('--quiet'), REQUIRE = args.includes('--require-solved');
 const POP = Number(opt('--pop', 150)), ELITE = Number(opt('--elite', 15)), TARGET = Number(opt('--laps', 2)), HIDDEN = Number(opt('--hidden', 4));
 const TURN = Number(opt('--turn', 0.02));
+const MUT = [Number(opt('--mut-rate', 0.15)), Number(opt('--sigma', 0.5)), Number(opt('--sigma-floor', 0.05))];
+const FOCUS = Number(opt('--focus', 0)), TTL = Number(opt('--ttl', 750));
+const JSON_OUT = args.includes('--json');
+// --opt "elite=30,mut-rate=0.1,sigma=0.2,sigma-floor=0.05,focus=0.2,laps=3":
+// settings switched to the generation after a car first completes the target
+// laps — the app's Explore -> Optimize hand-over.
+const OPT = Object.fromEntries((opt('--opt', '') || '').split(',').filter(Boolean).map(kv => { const [k, v] = kv.split('='); return [k, Number(v)]; }));
 const SETTLE = 15;   // app.SETTLE_GENERATIONS
 const CHUNK = 2500;  // HYPER_CHUNK
 
@@ -55,7 +62,8 @@ function setup(def) {
     const zIn = f32(w.zone_in_ptr(), Math.max(1, zones.length * 5));
     zones.forEach((z, i) => { zIn.set([z.x, z.y, z.radius, ZID[z.type] ?? -1, z.killTimer ?? 150], i * 5); });
     const hasStart = def.startPos ? 1 : 0, hasAngle = def.startAngle != null ? 1 : 0;
-    w.set_config(10, 0.05, TURN, 0.05, 750, TARGET, 0, HIDDEN, 0);
+    w.set_config(10, 0.05, TURN, 0.05, TTL, TARGET, FOCUS, HIDDEN, 0);
+    w.set_mutation(...MUT);
     if (!w.track_build(w.path_in_ptr(), def.path.length, def.width, hasStart, hasStart ? def.startPos.x : 0,
         hasStart ? def.startPos.y : 0, hasAngle, hasAngle ? def.startAngle : 0, w.zone_in_ptr(), zones.length, 0, 0)) {
         throw new Error(`track_build failed: ${def.name}`);
@@ -72,12 +80,16 @@ function train(def, seed) {
     w.pop_randomize_brains();
     w.pop_reset();
     let globalBest = -Infinity, firstLap = null, solved = null, lapGens = 0, problems = [];
-    const bests = [];
+    const bests = [], trace = [];
+    let wallMs = 0, carSteps = 0, frames = 0, bestLapEver = Infinity;
+    let elite = ELITE, target = TARGET, switchGen = null;
     for (let gen = 1; gen <= GENS; gen++) {
         let maxLaps = 0;
+        const t0 = performance.now();
         for (let guard = 0; guard < 100; guard++) {
             maxLaps = w.run(CHUNK);
-            if (w.all_crashed() === 1 || maxLaps >= TARGET) break;
+            carSteps += w.car_steps(); frames += w.run_iters();
+            if (w.all_crashed() === 1 || maxLaps >= target) break;
         }
         w.write_fitness();
         const stride = w.fitness_stride();
@@ -88,6 +100,7 @@ function train(def, seed) {
             ev[i] = fb[i * stride];
             if (ev[i] > best) { best = ev[i]; bestIdx = i; }
             laps = Math.max(laps, fb[i * stride + 1]);
+            if (fb[i * stride + 1] >= 1 && fb[i * stride + 2] > 0) bestLapEver = Math.min(bestLapEver, fb[i * stride + 2]);
         }
         if (!allFinite(ev)) problems.push(`gen ${gen}: non-finite fitness`);
         w.pack_state();
@@ -95,16 +108,25 @@ function train(def, seed) {
             problems.push(`gen ${gen}: non-finite car state`);
         if (laps >= 1) { if (firstLap === null) firstLap = gen; lapGens++; }
         if (laps >= TARGET && solved === null) solved = gen;
+        if (solved !== null && switchGen === null && Object.keys(OPT).length) {
+            switchGen = gen;
+            const o = { elite: ELITE, 'mut-rate': MUT[0], sigma: MUT[1], 'sigma-floor': MUT[2], focus: FOCUS, laps: TARGET, ttl: TTL, ...OPT };
+            elite = o.elite; target = o.laps;
+            w.set_mutation(o['mut-rate'], o.sigma, o['sigma-floor']);
+            w.set_config(10, 0.05, TURN, 0.05, o.ttl, target, o.focus, HIDDEN, 0);
+        }
         if (best > globalBest) { w.copy_brain(bestIdx, w.stash_slot()); globalBest = best; }
         bests.push(globalBest);
         const sigmaGen = firstLap === null ? 0 : Math.max(0, gen - firstLap - SETTLE);
-        w.evolve(ELITE, 1, sigmaGen);
+        w.evolve(elite, 1, sigmaGen);
         if (!allFinite(f32(w.brains_ptr(), (w.max_cars() + 1) * w.brain_stride()).subarray(0, POP * w.brain_stride())))
             problems.push(`gen ${gen}: non-finite weights`);
         w.pop_reset();
+        wallMs += performance.now() - t0;
+        trace.push({ gen, wallMs, carSteps, frames, laps, bestLap: Number.isFinite(bestLapEver) ? bestLapEver : null });
     }
     for (let i = 1; i < bests.length; i++) if (bests[i] < bests[i - 1]) problems.push(`all-time best fell at gen ${i + 1}`);
-    return { firstLap, solved, best: globalBest, bests, problems };
+    return { firstLap, solved, switchGen, best: globalBest, bests, problems, trace };
 }
 
 let failures = 0;
@@ -123,10 +145,11 @@ for (const ti of trackIdx) {
     summary.push({ name: def.name, runs });
     if (!QUIET) console.log(line);
 }
+if (JSON_OUT) console.log('JSON ' + JSON.stringify(summary.map(s => ({ name: s.name, runs: s.runs.map(r => ({ solved: r.solved, switchGen: r.switchGen, trace: r.trace })) }))));
 const solvedRuns = summary.flatMap(s => s.runs).filter(r => r.solved !== null);
 const total = summary.length * SEEDS;
 const med = (a) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[s.length >> 1] : null; };
 console.log(`\nsolved ${solvedRuns.length}/${total} runs; median generation to a ${TARGET}-lap finish: ${med(solvedRuns.map(r => r.solved))}; median first lap: ${med(summary.flatMap(s => s.runs).filter(r => r.firstLap !== null).map(r => r.firstLap))}`);
 if (REQUIRE && solvedRuns.length < total) { failures++; console.log(`FAIL  ${total - solvedRuns.length} run(s) did not finish within ${GENS} generations`); }
 console.log(failures ? `\n${failures} problem(s)` : '\nno NaN/Inf, all-time best monotone in every run');
-process.exit(failures ? 1 : 0);
+process.exitCode = failures ? 1 : 0;

@@ -183,17 +183,76 @@ machine.
 ## Configuration & Settings
 Fine-tune the simulation and the learning process using the built-in settings.
 
-Four of them start in a different place on a phone or a tablet — see
+Two of them start in a different place on a phone or a tablet — see
 [On a phone or tablet](#on-a-phone-or-tablet) below. They are the same sliders with the same range
 either way; only where the handle starts differs.
 
+### Training profiles
+
+Finishing a track and making it fast are different jobs, so there are two profiles (**Goal** in the
+settings). A run starts in **Explore**; the first generation in which a car completes the track hands
+over to **Optimize** by itself. Reset or a new track goes back to Explore, and either button can be
+pressed at any time. Every slider still works on top of whichever profile is active.
+
+| | Explore — just finish it | Optimize — lap time |
+| --- | --- | --- |
+| Target Laps | **1**: a generation ends at the first finished lap | **2**: the second is a flying lap, the one worth timing |
+| Elite Clones | 10% of the field, so a lucky line isn't lost | 3%: more room for new lines beat protecting old ones |
+| Mutation | 15% of weights, sigma 0.5 | same |
+
+How they were chosen: `tools/train.mjs` runs the real wasm headless and records, per generation,
+total car-steps (CPU work — divide by the car-steps/s readout for seconds on your device), simulated
+frames (how long you'd watch at 1x) and best lap. Settings were varied one at a time over 9–13
+tracks x 3 seeds.
+
+**Exploring** (cost to the first finished lap; unfinished runs counted at twice their total):
+
+| | finished | CPU (M car-steps) | race time at 1x |
+| --- | --- | --- | --- |
+| stock (150 cars, 10% elites, 15% mutation, sigma 0.5, 1 lap) | 26/27 | **0.21** | **4.4 min** |
+| 50 / 100 / 250 / 400 cars | 15 / 19 / 26 / 25 | 0.31 / 0.31 / 0.32 / 0.42 | 7.4 / 5.9 / 4.6 / 4.8 |
+| 3 / 6 / 8 hidden units | 22 / 24 / 24 | 0.32 / 0.24 / 0.25 | 5.9 / 5.2 / 5.9 |
+| 5% / 30% / 50% of weights mutated | 22 / 23 / 24 | 0.35 / 0.31 / 0.28 | 4.9 / 6.6 / 6.8 |
+| sigma 0.25 / 1.0 | 23 / 26 | 0.31 / 0.22 | 4.5 / 5.0 |
+| 2 laps per generation | 26 | 0.25 | 6.4 |
+
+**Optimizing** (geometric-mean best lap over 9 tracks x 3 seeds, after the same Explore start):
+
+| after the hand-over | best lap at 5M car-steps | at 10M |
+| --- | --- | --- |
+| **2 laps, 3% elites, sigma 0.5** | **24.0 s** | **22.4 s** |
+| 2 laps, 10% elites, sigma 0.5 | 24.9 s | 23.1 s |
+| sigma 0.2 / 0.1 / 0.05 | 26.1 / 27.9 / 30.3 s | |
+| 20% elites, sigma 0.2 | 26.7 s | |
+| 30% / 50% Focus % mutants of the best (sigma 0.2 / 0.1) | 26.6 / 29.0 s | |
+| 3 laps per generation, sigma 0.2 | 27.3 s | |
+| 80 / 300 cars | 28.8 / 28.1 s | 27.6 / 25.9 s |
+
+Smaller, more "careful" mutations were worse for lap time at every budget measured, which is why
+the mutation size doesn't change between the profiles.
+
+**Population per device** (13 tracks including the four hardest, Explore phase):
+
+| | finished | CPU (M car-steps) | race time at 1x |
+| --- | --- | --- | --- |
+| 150 cars, 4 hidden — **phone** | 35/39 | **0.26** | 4.9 min |
+| 150 cars, 5 hidden | 32/39 | 0.33 | 5.9 min |
+| 300 cars, 4 hidden — **computer** | **36/39** | 0.32 | **3.7 min** |
+| 300 cars, 5 hidden | 35/39 | 0.42 | 4.9 min |
+| 500 cars, 5 hidden (the old desktop default) | 35/39 | 0.43 | 4.0 min |
+
+A phone is bound by CPU, and 150 cars is the least work per finished track. A computer has the
+throughput to spend ~25% more work for the fastest finish in race time and the best hit rate on hard
+tracks.
+
 ### AI & Evolutionary Parameters
-* **Pop Size** (default 500, up to 2000; **150** on mobile)**:** The number of agents generated per generation.
-* **Elite Clones** (default 30; **15** on mobile)**:** Number of top-performing agents preserved exactly for the next generation (prevents regression): the all-time best, then the best *distinct* brains of the generation just run. These used to be that many copies of the all-time best — but the simulation is deterministic, so every copy drove the identical race and all but one slot was wasted. Fewer than a handful and a generation can occasionally lose ground it had already made — around 30 is enough that the population doesn't "forget" a solution it found. It tracks the population rather than being an absolute: a sixth of a 150-car field is the same share of it that 30 is of 500.
+* **Goal: Explore / Optimize:** which training profile is active — see [Training profiles](#training-profiles). Explore hands over to Optimize by itself.
+* **Pop Size** (default 300, up to 2000; **150** on mobile)**:** The number of agents generated per generation.
+* **Elite Clones** (set by the profile: 10% of Pop Size while exploring, 3% while optimizing)**:** Number of top-performing agents preserved exactly for the next generation (prevents regression): the all-time best, then the best *distinct* brains of the generation just run. These used to be that many copies of the all-time best — but the simulation is deterministic, so every copy drove the identical race and all but one slot was wasted. Fewer than a handful and a generation can occasionally lose ground it had already made — around 30 is enough that the population doesn't "forget" a solution it found. It tracks the population rather than being an absolute: a sixth of a 150-car field is the same share of it that 30 is of 500.
 * **Focus %** (default 0%)**:** Fraction of the population bred as mutants of the all-time best instead of by crossover. It used to come with a fitness boost through a "weakest stretch" window — but the boosted score was compared raw against the all-time best, so a boosted car could take the champion's place with a score no honest run could beat, and the champion then never updated again. The boost is gone; in testing (`tools/train.mjs`), leaving this at 0 learned fastest.
-* **Hidden Layers** (default 5; **4** on mobile)**:** Adjust the complexity of the AI's "brain" by changing the number of internal neurons. The one fewer on mobile is not a rounding-down — the hidden layer is evaluated four units at a time on the SIMD build, so five units cost two passes and four cost one.
+* **Hidden Layers** (default 4)**:** Adjust the complexity of the AI's "brain" by changing the number of internal neurons. Four beat 3, 5, 6 and 8 in testing, and the SIMD build evaluates the hidden layer four units at a time, so a fifth costs a whole second pass.
 * **Initial TTL (Time-To-Live):** A countdown for each agent, **reset in full every time it reaches a checkpoint**. It used to top the clock up by 150 frames and clamp it to 600, which quietly made the slider a lie — set it to 10,000 and the very first gate cut the car back to 600.
-* **Target Laps** (default 3; **2** on mobile)**:** Defines the goalpost for a successful generation before moving to the next stage of evolution.
+* **Target Laps** (set by the profile: 1 while exploring, 2 while optimizing)**:** Defines the goalpost for a successful generation before moving to the next stage of evolution.
 
 How a generation is bred, for the curious: parents are drawn from the top fifth of the field
 **rank-weighted**, so the leader parents far more often than the hundredth car rather than equally.
@@ -290,16 +349,15 @@ escape hatch — it clears storage and the browser's cached copy of the app and 
 
 ## On a phone or tablet
 
-The page checks once, at load, whether it is running on a phone or a tablet, and if it is, four
-things start somewhere different. Nothing is taken away — every one of them is still the same
+The page checks once, at load, whether it is running on a phone or a tablet, and if it is, the
+population starts smaller (see [Training profiles](#training-profiles) for why). Nothing is taken away — every one of them is still the same
 slider with the same range, and every one can be pushed back up.
 
 | | desktop | phone / tablet |
 | --- | --- | --- |
-| Pop Size | 500 | **150** |
-| Elite Clones | 30 | **15** |
-| Target Laps | 3 | **2** |
-| Hidden Layers | 5 | **4** |
+| Pop Size | 300 | **150** |
+| Elite Clones | 30 → 9 | **15 → 5** (Explore → Optimize) |
+| Hidden Layers | 4 | 4 |
 
 Underneath those, three things the sliders don't show:
 

@@ -2647,8 +2647,9 @@ static inline float gauss01(void) { return rnd11() + rnd11() + rnd11(); }
 // sigmaGen counts up from 0 the same way the old raw generation count did, so
 // a run that finds its feet quickly anneals on close to the same schedule as
 // before.
-#define MUT_SIGMA_START  0.5f
-#define MUT_SIGMA_FLOOR  0.05f
+// Runtime-settable (set_mutation) so the app's Explore/Optimize profiles can
+// change them between generations; these are the defaults.
+static float mut_sigma_start = 0.5f, mut_sigma_floor = 0.05f, mut_rate = 0.15f;
 #define MUT_SIGMA_TAU    150.0f
 
 // Each mutated weight moves by gauss01()*sigma; this is the share of weights
@@ -2658,11 +2659,17 @@ static inline float gauss01(void) { return rnd11() + rnd11() + rnd11(); }
 // tools/train.mjs showed it — 37 of 52 runs solved over 13 tracks in 30
 // generations, against 51 of 52 now. Sparse mutation keeps most of what a
 // parent learned and still tries something new on every child.
-#define MUT_RATE 0.15f
 // Bound on any weight evolution writes. Brains live in [-~3, 3]; this only
 // ever bites on garbage, and a non-finite value becomes 0 rather than
 // spreading through crossover to the whole population.
 #define W_MAX 64.0f
+
+__attribute__((export_name("set_mutation")))
+void set_mutation(float rate, float sigmaStart, float sigmaFloor) {
+    mut_rate = clampf(rate, 0.0f, 1.0f);
+    mut_sigma_start = clampf(sigmaStart, 0.0f, 4.0f);
+    mut_sigma_floor = clampf(sigmaFloor, 0.0f, mut_sigma_start);
+}
 
 static inline float sanitize_w(float v) {
     if (v >= -W_MAX && v <= W_MAX) return v;
@@ -2671,7 +2678,7 @@ static inline float sanitize_w(float v) {
 static void mutate(float *dst, i32 n, float sigma) {
     for (i32 j = 0; j < n; j++) {
         float v = dst[j];
-        if (rnd01() < MUT_RATE) v += gauss01() * sigma;
+        if (rnd01() < mut_rate) v += gauss01() * sigma;
         dst[j] = sanitize_w(v);
     }
 }
@@ -2736,7 +2743,7 @@ void evolve(i32 eliteClones, i32 hasGlobalBest, i32 sigmaGen) {
         }
     }
 
-    float sigma = MUT_SIGMA_FLOOR + (MUT_SIGMA_START - MUT_SIGMA_FLOOR)
+    float sigma = mut_sigma_floor + (mut_sigma_start - mut_sigma_floor)
                   * (float)exp_d(-(double)(sigmaGen < 0 ? 0 : sigmaGen) / (double)MUT_SIGMA_TAU);
 
     if (hasGlobalBest && cfg_focusPct > 0.0f) {
@@ -2800,7 +2807,7 @@ void seed_from_stash(void) {
         float *dst = &brains[i * stride];
         if (i == 0) { for (i32 j = 0; j < stride; j++) dst[j] = src[j]; continue; }
         for (i32 j = 0; j < stride; j++) dst[j] = src[j];
-        mutate(dst, stride, MUT_SIGMA_START);
+        mutate(dst, stride, mut_sigma_start);
     }
 }
 

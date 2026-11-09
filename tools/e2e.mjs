@@ -20,7 +20,7 @@ const BASE = process.argv[2] || 'http://127.0.0.1:8765';
 // a test that read the value out of the page could not tell the difference
 // between "the mobile defaults are applied" and "the mobile defaults are
 // whatever the page happens to be doing".
-const DEFAULTS_MOBILE = { pop: 150, elite: 15, laps: 2, hidden: 4 };
+const DEFAULTS_MOBILE = { pop: 150, elite: 15, laps: 1, hidden: 4 };   // laps: the Explore profile
 let failures = 0;
 const check = (ok, name, detail) => {
     if (!ok) failures++;
@@ -794,6 +794,28 @@ await page.evaluate(() => { if (app.state.isEditing) editor.cancel(); });
     check(afterA.hz === 30 && /bg-blue-600/.test(afterA.btn30) && !/bg-blue-600/.test(afterA.btn60),
         'the 30fps button switches the rate and highlights itself', `now ${afterA.hz}fps`);
     check(afterB === 60, 'and the 60fps button switches it back', `now ${afterB}fps`);
+}
+
+// --- training profiles --------------------------------------------------------
+// Explore ends a generation at one lap; the first generation that finishes it
+// hands over to Optimize (two laps, fewer elites) by itself, and the buttons
+// switch either way.
+{
+    const r = await page.evaluate(async () => {
+        app.setProfile('explore');
+        const before = { profile: app.state.profile, laps: app.state.targetLaps, elite: app.state.eliteClones };
+        // A finished lap in the generation being scored is what triggers it.
+        app.state.cars[0].completedLaps = 1;
+        app.evolve();
+        const after = { profile: app.state.profile, laps: app.state.targetLaps, elite: app.state.eliteClones,
+                        btn: document.getElementById('btn-profile-optimize').getAttribute('aria-pressed') };
+        document.getElementById('btn-profile-explore').click();
+        return { before, after, back: app.state.profile, pop: app.state.populationSize };
+    });
+    check(r.before.profile === 'explore' && r.before.laps === 1, 'Explore runs one-lap generations', `laps ${r.before.laps}`);
+    check(r.after.profile === 'optimize' && r.after.laps === 2 && r.after.elite === Math.max(1, Math.round(r.pop * 0.03)) && r.after.btn === 'true',
+        'the first finished lap hands over to Optimize by itself', `laps ${r.after.laps}, elite ${r.after.elite} of ${r.pop}`);
+    check(r.back === 'explore', 'and the Explore button switches back');
 }
 
 // --- 1x world speed is wall-clock time, not frame rate ----------------------

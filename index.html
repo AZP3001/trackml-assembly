@@ -187,9 +187,16 @@
                 </div>
 
                 <h4 class="text-[10px] font-bold text-slate-400 uppercase tracking-wide border-b border-slate-600 pb-1 mt-2">Evolution & Brain</h4>
+                <div class="flex items-center justify-between gap-2" data-enter="app.showInfo|profile" data-leave="app.showInfo">
+                    <span class="text-[10px] text-slate-500">Goal</span>
+                    <div class="flex bg-slate-700 rounded p-0.5 gap-0.5" role="group" aria-label="Training goal">
+                        <button id="btn-profile-explore" data-click="app.setProfile|explore" aria-pressed="true" class="px-2.5 py-1 text-[10px] font-bold rounded bg-blue-600 text-white transition-colors">Explore</button>
+                        <button id="btn-profile-optimize" data-click="app.setProfile|optimize" aria-pressed="false" class="px-2.5 py-1 text-[10px] font-bold rounded text-slate-400 hover:bg-slate-600 transition-colors">Optimize</button>
+                    </div>
+                </div>
                 <div data-enter="app.showInfo|populationSize" data-leave="app.showInfo">
-                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Pop Size</span><span id="val-pop">500</span></label>
-                    <input id="cfg-populationSize" type="range" min="20" max="2000" step="10" value="500" data-input="app.updateConfig|populationSize|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Pop Size</span><span id="val-pop">300</span></label>
+                    <input id="cfg-populationSize" type="range" min="20" max="2000" step="10" value="300" data-input="app.updateConfig|populationSize|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                 <div data-enter="app.showInfo|eliteClones" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Elite Clones</span><span id="val-elite">30</span></label>
@@ -206,16 +213,16 @@
                     </label>
                 </div>
                  <div data-enter="app.showInfo|hiddenLayers" data-leave="app.showInfo">
-                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Hidden Layers</span><span id="val-hidden">5</span></label>
-                    <input id="cfg-hiddenLayers" type="range" min="1" max="9" step="1" value="5" data-change="app.reset" data-input="app.updateConfig|hiddenLayers|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Hidden Layers</span><span id="val-hidden">4</span></label>
+                    <input id="cfg-hiddenLayers" type="range" min="1" max="9" step="1" value="4" data-change="app.reset" data-input="app.updateConfig|hiddenLayers|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                  <div data-enter="app.showInfo|initialTTL" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Initial TTL</span><span id="val-ttl">750</span></label>
                     <input id="cfg-initialTTL" type="range" min="100" max="1400" step="50" value="750" data-input="app.updateConfig|initialTTL|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                 <div data-enter="app.showInfo|targetLaps" data-leave="app.showInfo">
-                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Target Laps</span><span id="val-laps">3</span></label>
-                    <input id="cfg-targetLaps" type="range" min="1" max="5" step="1" value="3" data-input="app.updateConfig|targetLaps|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Target Laps</span><span id="val-laps">1</span></label>
+                    <input id="cfg-targetLaps" type="range" min="1" max="5" step="1" value="1" data-input="app.updateConfig|targetLaps|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
 
                 <h4 class="text-[10px] font-bold text-slate-400 uppercase tracking-wide border-b border-slate-600 pb-1 mt-2">Physics</h4>

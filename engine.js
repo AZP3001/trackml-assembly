@@ -509,12 +509,17 @@ const Engine = {
     // while one is coming up has to reach it too.
     _allWorkers: function() { return this._incoming.length ? this.workers.concat(this._incoming) : this.workers; },
 
+    // Mutation settings only matter where evolve() runs: the master.
+    _pushMutation: function(state) {
+        if (state.mutRate !== undefined) this.master.ex.set_mutation(state.mutRate, state.sigma, state.sigmaFloor);
+    },
+
     pushConfig: function(state) {
         const p = state.physics;
         const args = [p.maxSpeed, p.acceleration, p.turnSpeed, p.brakeStrength,
                       state.initialTTL, state.targetLaps, state.focusPct, state.hiddenLayers,
                       state.nudgeMode ? 1 : 0];
-        if (this.master) this.master.ex.set_config(...args);
+        if (this.master) { this.master.ex.set_config(...args); this._pushMutation(state); }
         this._allWorkers().forEach(w => w.postMessage({ type: 'config', args }));
         this._lastConfig = args;
         if (this._lastTrackMsg) this._lastTrackMsg.config = args;
@@ -538,7 +543,7 @@ const Engine = {
         const config = [p.maxSpeed, p.acceleration, p.turnSpeed, p.brakeStrength,
                         state.initialTTL, state.targetLaps, state.focusPct, state.hiddenLayers,
                         state.nudgeMode ? 1 : 0];
-        if (this.master) this.master.ex.set_config(...config);
+        if (this.master) { this.master.ex.set_config(...config); this._pushMutation(state); }
         this._allWorkers().forEach(w => w.postMessage({ type: 'track', def, config }));
         this._lastTrackMsg = { def, config };
         this._lastConfig = config;
