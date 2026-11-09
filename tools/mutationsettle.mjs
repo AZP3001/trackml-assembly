@@ -10,12 +10,10 @@
 //      script.js, not here, because it needs a whole run's history that a
 //      wasm instance never sees. This only proves the wasm side does the
 //      right thing with whatever sigmaGen it's handed.
-//   2. Below FEW_LAPS_THRESHOLD completed-lap generations, evolve() aims the
-//      focus window at wherever the population is dying (crash_count); at or
-//      above it, at wherever the current best is slowest (gate_ratio). Both
-//      are poked directly through their exported pointers so the test
-//      controls exactly which gate "wins" each way, rather than depending on
-//      an actual population finding its way there.
+//      Mutation is sparse: about MUT_RATE (15%) of a child's weights move.
+//   2. Elites are the stash (slot 0) then the best DISTINCT brains of the
+//      generation, all unmutated, and no weight evolve() writes is ever
+//      non-finite, even when a parent's is.
 //   3. The per-frame progress reward no longer scales with speed — a car
 //      that brakes partway through the window scores exactly the same as one
 //      that never lifts, as long as it never drops below STOPPED_SPEED. It
@@ -41,7 +39,7 @@ const check = (ok, name, detail) => {
     console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
 };
 
-console.log(`mutation settle / focus mode / braking test (${wasmPath})\n`);
+console.log(`mutation settle / elites / braking test (${wasmPath})\n`);
 
 // A loop sized to fit inside the world's own hard bounds (roughly -100..1300
 // x, -100..1000 y — see updateCar's off-canvas check in sim.c, which fires on
@@ -89,26 +87,23 @@ const IN_N = 11, OUT_N = 2;
         // last round's bred population is now sitting where the stash lives
         // unless it's explicitly overwritten again.
         f32(w.brains_ptr() + w.stash_slot() * stride * 4, stride).fill(0);
-        i32(w.crash_count_ptr(), w.max_gates()).fill(0);
-        // Gate 3 "kills" every car, every time — guarantees focus_lo/hi
-        // activate regardless of sigmaGen, via the failure-focus path
-        // (lapCompletions=0), so this measurement never depends on the
-        // gate_ratio path also being exercised correctly.
-        i32(w.crash_count_ptr(), w.max_gates())[3] = 999;
-        w.evolve(0, 1, sigmaGen, 0);
+        w.evolve(0, 1, sigmaGen);
 
         const focused = i32(w.car_focused_ptr(), POP);
         const brains = f32(w.brains_ptr(), POP * stride);
-        let sum = 0, sumSq = 0, n = 0;
+        // Only the touched weights are sigma samples; the rest stay exactly 0.
+        let sum = 0, sumSq = 0, n = 0, total = 0;
         for (let c = 0; c < POP; c++) {
             if (!focused[c]) continue;
             for (let j = 0; j < stride; j++) {
                 const v = brains[c * stride + j];
+                total++;
+                if (v === 0) continue;
                 sum += v; sumSq += v * v; n++;
             }
         }
         const mean = sum / n;
-        return { sigma: Math.sqrt(sumSq / n - mean * mean), n };
+        return { sigma: Math.sqrt(sumSq / n - mean * mean), n, rate: n / total };
     }
 
     const early = measureSigma(0);       // no settle elapsed: full exploration
@@ -118,8 +113,10 @@ const IN_N = 11, OUT_N = 2;
     // that read them out of the module could not tell "matches the formula"
     // from "matches whatever the formula happens to say today".
     const START = 0.5, FLOOR = 0.05;
-    check(early.n > 5000, 'enough focused-clone weight samples to measure sigma',
+    check(early.n > 2000, 'enough focused-clone weight samples to measure sigma',
         `${early.n} samples at sigmaGen=0`);
+    check(Math.abs(early.rate - 0.15) < 0.02, 'mutation is sparse: ~15% of weights move per child',
+        `${(early.rate * 100).toFixed(1)}%`);
     check(Math.abs(early.sigma - START) < START * 0.15,
         'sigmaGen=0 anneals to MUT_SIGMA_START — full exploration',
         `measured sigma ${early.sigma.toFixed(3)}, expected ~${START}`);
@@ -145,49 +142,34 @@ const IN_N = 11, OUT_N = 2;
 }
 
 // ---------------------------------------------------------------------------
-// 2. Focus mode: crash_count below FEW_LAPS_THRESHOLD, gate_ratio at/above.
-//
-// Gate 3 is made the clear "worst" by crash count, a gate on the far side of
-// the loop the clear "worst" by pace ratio — two gates far enough apart that
-// their focus spans (roughly +-18 gates at this track's size, see evolve()'s
-// span calculation) can never overlap, so whichever one the window lands on
-// says unambiguously which source evolve() actually read.
+// 2. Elites and the non-finite guard.
 // ---------------------------------------------------------------------------
 {
-    w.set_config(10, 0.05, 0.02, 0.05, 750, 3, 0.2, H, 0);
-    w.pop_init(50, 0, H, 20260923);
+    const POP = 40, E = 6;
+    w.set_config(10, 0.05, 0.02, 0.05, 750, 3, 0, H, 0);
+    w.pop_init(POP, 0, H, 20260923);
     const stride = w.brain_stride();
-    f32(w.brains_ptr() + w.stash_slot() * stride * 4, stride).fill(0);
-    const FAR_GATE = Math.floor(CP_N / 2);   // opposite side of the loop from gate 3
-
-    i32(w.crash_count_ptr(), w.max_gates()).fill(0);
-    i32(w.crash_count_ptr(), w.max_gates())[3] = 500;
-    const gr = f32(w.gate_ratio_ptr(), w.max_gates());
-    gr.fill(-1);
-    gr[FAR_GATE] = 0.1;   // far the slowest — every other reached gate would be -1 (unreached) or faster
-
-    const inWindow = (g) => {
-        const lo = w.focus_lo(), hi = w.focus_hi();
-        if (lo < 0) return false;
-        return lo <= hi ? (g >= lo && g <= hi) : (g >= lo || g <= hi);
-    };
-
-    w.evolve(0, 1, 0, 0);   // lapCompletions=0: below threshold -> crash_count
-    check(inWindow(3) && !inWindow(FAR_GATE), 'below the lap threshold, focus aims at where it keeps dying',
-        `window [${w.focus_lo()}, ${w.focus_hi()}] of ${CP_N} gates`);
-
-    w.evolve(0, 1, 0, 3);   // lapCompletions=3: at threshold -> gate_ratio
-    check(inWindow(FAR_GATE) && !inWindow(3), 'at the lap threshold, focus goes back to the slowest gate',
-        `window [${w.focus_lo()}, ${w.focus_hi()}] of ${CP_N} gates`);
-
-    // And with nothing dying and nothing reached either, there's nothing to
-    // aim at — the window should stay inactive rather than pick an arbitrary
-    // gate 0 out of an all-empty array.
-    i32(w.crash_count_ptr(), w.max_gates()).fill(0);
-    gr.fill(-1);
-    w.evolve(0, 1, 0, 0);
-    check(w.focus_lo() < 0, 'and with no data either way, the window stays off',
-        `focus_lo=${w.focus_lo()}`);
+    const brains = () => f32(w.brains_ptr(), (POP + 1) * stride);
+    const live = brains();
+    // Car c's brain is all c; cars 0..2 are copies of the stash (value -1)
+    // and score highest, then 7 ties with 6, then descending.
+    for (let c = 0; c < POP; c++) live.subarray(c * stride, (c + 1) * stride).fill(c < 3 ? -1 : c);
+    f32(w.brains_ptr() + w.stash_slot() * stride * 4, stride).fill(-1);
+    const ev = f32(w.ev_fitness_ptr(), POP);
+    for (let c = 0; c < POP; c++) ev[c] = c < 3 ? 1000 : 500 - c;
+    ev[7] = ev[6];
+    live[20 * stride] = NaN; live[21 * stride + 1] = Infinity;   // poison two parents
+    w.evolve(E, 1, 0);
+    const next = f32(w.brains_ptr(), POP * stride);
+    const val = (c) => next[c * stride + 3];
+    const exact = (c) => { for (let j = 1; j < stride; j++) if (next[c * stride + j] !== next[c * stride]) return false; return true; };
+    check(val(0) === -1 && exact(0), 'elite slot 0 is the stash, unmutated', `slot 0 = ${val(0)}`);
+    const got = [1, 2, 3, 4, 5].map(val);
+    check(JSON.stringify(got) === JSON.stringify([3, 4, 5, 6, 8]) && [1, 2, 3, 4, 5].every(exact),
+        'then the best distinct brains, unmutated, skipping stash copies and same-score twins', `slots 1-5 = ${got}`);
+    let bad = 0;
+    for (let k = 0; k < POP * stride; k++) if (!Number.isFinite(next[k])) bad++;
+    check(bad === 0, 'no non-finite weight survives evolve(), even from a poisoned parent', `${bad} non-finite`);
 }
 
 // ---------------------------------------------------------------------------
@@ -202,10 +184,8 @@ const IN_N = 11, OUT_N = 2;
     const offBO = 11 * H + H * 2 + H;   // IN_N*h + h*OUT_N + h — matches offBO in sim.c
     const stash = f32(w.brains_ptr() + w.stash_slot() * stride * 4, stride);
     for (let j = 0; j < stride; j++) stash[j] = j * 0.01 + 0.001;   // distinctive, all-nonzero
-    i32(w.crash_count_ptr(), w.max_gates()).fill(0);
-    i32(w.crash_count_ptr(), w.max_gates())[3] = 100;
 
-    w.evolve(0, 1, 0, 0);
+    w.evolve(0, 1, 0);
 
     const focused = i32(w.car_focused_ptr(), 20);
     const brains = f32(w.brains_ptr(), 20 * stride);
@@ -304,4 +284,4 @@ const IN_N = 11, OUT_N = 2;
 
 console.log();
 if (failures) { console.error(`${failures} check(s) failed.`); process.exit(1); }
-console.log('mutation settles on schedule, focus aims at the right thing, and braking is free.');
+console.log('mutation settles on schedule, elites are exact and distinct, and braking is free.');

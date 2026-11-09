@@ -1442,23 +1442,16 @@ __attribute__((export_name("track_start_cp"))) i32 track_start_cp(void) { return
 // ---------------------------------------------------------------------------
 static float cfg_maxSpeed = 10.0f, cfg_accel = 0.05f, cfg_turnSpeed = 0.02f, cfg_brakeStrength = 0.05f;
 static i32   cfg_initialTTL = 750, cfg_targetLaps = 3;
-// Fraction of the population spawned each generation as mutated clones of the
-// stash, reward-boosted specifically through whichever stretch of track the
-// stash is currently slowest on (see evolve()/inFocusWindow() below). Not a
-// probability like the old mutation-rate knob was — that one is gone; see the
-// comment on MUT_SIGMA_* near evolve().
-static float cfg_focusPct = 0.20f;
+// Fraction of the population bred each generation as mutants of the stash
+// (the all-time best) rather than by crossover — see evolve(). Off by default.
+static float cfg_focusPct = 0.0f;
 static i32   cfg_hidden = 5;
-// How the focused sub-population (above) is actually perturbed. 0 (default):
-// the original behaviour, a random Gaussian nudge on every weight, same as
-// the rest of the bred population. 1: every weight EXCEPT the throttle
-// output bias is left byte-identical to the stash, and that one weight is
-// pushed by a fixed amount from a small preset table — some clones a bit
-// more throttle, some a bit less (which is also a bit more brake, since
-// they share one output) — cycling through the table so the focus window
-// gets several different, purely behavioural variations tried against it
-// in the same generation, instead of the same isotropic noise landing
-// somewhere random in weight space. See evolve() for the table itself.
+// How the Focus % mutants (above) are perturbed. 0 (default): the same sparse
+// Gaussian mutation as the rest of the bred population. 1: every weight
+// EXCEPT the throttle output bias is left byte-identical to the stash, and
+// that one weight is pushed by a fixed amount from a small preset table —
+// some clones a bit more throttle, some a bit less (which is also a bit more
+// brake, since they share one output). See evolve() for the table itself.
 static i32   cfg_nudgeMode = 0;
 
 // Lateral grip used to cancel sideways slip and keep the car's velocity
@@ -1496,57 +1489,25 @@ void set_config(float maxSpeed, float accel, float turnSpeed, float brakeStrengt
     recompute_sensor_len();
 }
 
-// Absolute checkpoint-index window the focused sub-population's reward is
-// boosted inside — see evolve(). -1 means inactive (no stash yet, or the
-// window would cover the whole lap). Set on the master by evolve() and
-// shipped to every worker instance each generation, exactly like the brains.
-static i32 focus_lo = -1, focus_hi = -1;
-__attribute__((export_name("focus_lo"))) i32 focus_lo_(void) { return focus_lo; }
-__attribute__((export_name("focus_hi"))) i32 focus_hi_(void) { return focus_hi; }
-__attribute__((export_name("set_focus_window")))
-void set_focus_window(i32 lo, i32 hi) { focus_lo = lo; focus_hi = hi; }
-
 // Per-gate pace of car 0's run this generation, as idealCp/dtCp (>1 means
 // faster than the track's "ideal" pace at Max Speed, <1 slower; -1 = not
 // reached this run). Car 0 mirrors the stash exactly whenever there is one —
 // same deterministic track, same weights, same starting state — so this is
 // effectively free telemetry on the current all-time-best brain, gathered by
-// the ordinary run instead of a dedicated evaluation pass. Populated in
-// updateCar, read by evolve() (after the master's copy is refreshed from
-// worker 0 in engine.js — the master itself never simulates a car).
+// the ordinary run instead of a dedicated evaluation pass. Telemetry only:
+// it used to aim a reward-boost window in evolve(), which is gone.
 static float gate_ratio[MAX_GATES];
 __attribute__((export_name("gate_ratio_ptr"))) i32 gate_ratio_ptr(void) { return (i32)(unsigned long)gate_ratio; }
 __attribute__((export_name("max_gates"))) i32 max_gates(void) { return MAX_GATES; }
 static void reset_gate_ratio(void) { for (i32 g = 0; g < MAX_GATES; g++) gate_ratio[g] = -1.0f; }
 
-// How many cars, THIS GENERATION, died while heading for gate g — the other
-// half of what evolve() needs to aim the focus window, and the half
-// gate_ratio structurally cannot provide: a gate a car never reaches leaves
-// no ratio behind (it stays at its -1 reset value), so a corner the whole
-// population dies at is invisible to gate_ratio no matter how often it kills
-// them. This is population-wide (every worker's every car, not just car 0 —
-// there is no "the stash" worth mirroring yet in the phase this is for) and
-// summed across workers by engine.js before evolve() reads it, the same way
-// gate_ratio is refreshed into master memory first, just added instead of
-// copied. Reset with gate_ratio, once per generation.
+// How many cars, THIS GENERATION, died while heading for gate g, population-
+// wide. Telemetry only, like gate_ratio. Reset with it, once per generation.
 static i32 crash_count[MAX_GATES];
 __attribute__((export_name("crash_count_ptr"))) i32 crash_count_ptr(void) { return (i32)(unsigned long)crash_count; }
 static void reset_crash_count(void) { for (i32 g = 0; g < MAX_GATES; g++) crash_count[g] = 0; }
 // recordCrash() itself lives further down, by run() — it reads car_nextCP,
 // which is not declared until the population arrays below.
-
-static inline i32 inFocusWindow(i32 g) {
-    if (focus_lo < 0) return 0;
-    if (focus_lo <= focus_hi) return g >= focus_lo && g <= focus_hi;
-    return g >= focus_lo || g <= focus_hi;   // window wraps past gate 0
-}
-
-// How much harder the focused sub-population's reward hits inside its
-// window. It is a multiplier on top of the ordinary reward, never a
-// replacement for it — a focused car still scores normally everywhere else,
-// so nothing stops it finishing the rest of the lap while it explores the
-// one stretch selection is currently prioritising there.
-static const float FOCUS_BOOST = 3.0f;
 
 // ---------------------------------------------------------------------------
 // Population. Struct-of-arrays; nothing here is ever allocated per generation.
@@ -1648,7 +1609,6 @@ i32 pop_init(i32 count, i32 id_offset, i32 hidden, u32 seed) {
     rebuild_active();
     reset_gate_ratio();
     reset_crash_count();
-    focus_lo = -1; focus_hi = -1;
     return pop_n;
 }
 
@@ -2054,8 +2014,7 @@ static void updateCar(i32 i) {
     // tracks speed or not. Still requires actual motion (STOPPED_SPEED), so a
     // parked car earns nothing just for sitting inside the window.
     if (car_frames[i] - car_lastCpFrame[i] < PROGRESS_WINDOW_FRAMES && speed > STOPPED_SPEED) {
-        float progressMult = (car_focused[i] && inFocusWindow(car_nextCP[i])) ? FOCUS_BOOST : 1.0f;
-        car_fitness[i] += 0.1f * progressMult;
+        car_fitness[i] += 0.1f;
     }
 
     if (car_x[i] < -100.0f || car_x[i] > 1300.0f || car_y[i] < -100.0f || car_y[i] > 1000.0f) { car_crashed[i] = 1; return; }
@@ -2288,8 +2247,7 @@ static void updateCar(i32 i) {
                 // above for why that alone is enough to track the stash's pace.
                 if (i == 0 && gAbs >= 0 && gAbs < MAX_GATES) gate_ratio[gAbs] = idealCp / maxf(dtCp, idealCp);
 
-                float gateMult = (car_focused[i] && inFocusWindow(gAbs)) ? FOCUS_BOOST : 1.0f;
-                car_fitness[i] += 500.0f * (1.0f + 3.0f * (idealCp / maxf(dtCp, idealCp))) * fitMult * gateMult;
+                car_fitness[i] += 500.0f * (1.0f + 3.0f * (idealCp / maxf(dtCp, idealCp))) * fitMult;
 
                 // A lap is complete when the car is back at the gate it
                 // started from — not when the index happens to wrap past zero,
@@ -2408,6 +2366,12 @@ static void updateCar(i32 i) {
 // marshalling, so hyper mode can run thousands of steps per crossing.
 // ---------------------------------------------------------------------------
 static i32 last_all_crashed = 1;
+// Steps the last run() actually took. It stops early once every car is out or
+// one has reached the target; engine.js lines the workers up on the earliest
+// finish so no slice drives on past the end of the generation.
+static i32 last_iters = 0;
+__attribute__((export_name("run_iters")))
+i32 run_iters(void) { return last_iters; }
 // Cars actually stepped by the last run() — the exact count of updateCar calls,
 // not the population size. engine.js divides the worker's wall-clock time by it
 // to get a real throughput figure, which is the only honest way to compare two
@@ -2431,7 +2395,8 @@ i32 run(i32 iters) {
     i32 maxLaps = 0;
     i32 allCrashed = 1;
     i32 steps = 0;
-    for (i32 it = 0; it < iters; it++) {
+    i32 it = 0;
+    for (; it < iters; it++) {
         i32 n = active_n;
         allCrashed = (n == 0);
         if (allCrashed) break;
@@ -2446,8 +2411,9 @@ i32 run(i32 iters) {
             if (car_crashed[c]) recordCrash(c); else active[keep++] = c;
         }
         active_n = keep;
-        if (maxLaps >= cfg_targetLaps) break;
+        if (maxLaps >= cfg_targetLaps) { it++; break; }
     }
+    last_iters = it;
     last_all_crashed = allCrashed;
     last_car_steps = steps;
     return maxLaps;
@@ -2685,150 +2651,103 @@ static inline float gauss01(void) { return rnd11() + rnd11() + rnd11(); }
 #define MUT_SIGMA_FLOOR  0.05f
 #define MUT_SIGMA_TAU    150.0f
 
-// Node-level crossover, then annealed Gaussian mutation. The elite clones come
-// from the stash (the all-time best), not from this generation's winner, which
-// is what stops a bad generation regressing.
-//
-// Crossover works a hidden unit at a time — all of a unit's incoming weights,
-// its bias and its outgoing weights are taken from the SAME parent. Picking
-// each weight independently (what this used to do) splits up groups of weights
-// that only mean anything together, so two parents that both drive well
-// routinely produced a child that drove into a wall.
-//
-// Every weight is mutated, always — there is no per-weight probability here
-// any more. There used to be (the old "Mutation Rate" setting), sitting
-// alongside sigma, which already controls how BIG each nudge is and already
-// anneals it from exploring to polishing over the run. A rate on top of that
-// just skipped some weights on a coin flip; once sigma has shrunk toward its
-// floor late in a run, touching every weight with a tiny nudge and touching a
-// random 30% of them with the same tiny nudge land in essentially the same
-// place, so the extra knob was a second control for the one job sigma
-// already does alone. Dropping it also means one less setting to tune.
-// A run "reliably" finishes once it has completed a lap this many separate
-// generations, not just once — one lucky lap is easy to get from a fluke
-// line through one easy corner and says nothing about the rest of the track.
-// Below this, evolve() points the focus window at wherever cars are actually
-// dying (crash_count); at and above it, survival is no longer the
-// bottleneck and it goes back to pointing at wherever the current best is
-// slowest (gate_ratio) — see the branch below.
-#define FEW_LAPS_THRESHOLD 3
+// Each mutated weight moves by gauss01()*sigma; this is the share of weights
+// touched per child. It used to be every weight, always: at sigma 0.5 that
+// moved each weight ~0.5 rms per generation, about 4.5x the JS edition's
+// 15%-of-weights uniform nudge, so the bred field was close to random, and
+// tools/train.mjs showed it — 37 of 52 runs solved over 13 tracks in 30
+// generations, against 51 of 52 now. Sparse mutation keeps most of what a
+// parent learned and still tries something new on every child.
+#define MUT_RATE 0.15f
+// Bound on any weight evolution writes. Brains live in [-~3, 3]; this only
+// ever bites on garbage, and a non-finite value becomes 0 rather than
+// spreading through crossover to the whole population.
+#define W_MAX 64.0f
+
+static inline float sanitize_w(float v) {
+    if (v >= -W_MAX && v <= W_MAX) return v;
+    return v > W_MAX ? W_MAX : (v < -W_MAX ? -W_MAX : 0.0f);   // NaN fails every compare
+}
+static void mutate(float *dst, i32 n, float sigma) {
+    for (i32 j = 0; j < n; j++) {
+        float v = dst[j];
+        if (rnd01() < MUT_RATE) v += gauss01() * sigma;
+        dst[j] = sanitize_w(v);
+    }
+}
 
 // The fixed pushes a nudge clone tries on the throttle output bias — see
-// cfg_nudgeMode above. Both directions, at three magnitudes, so a section
-// that needs a bit more aggression and one that needs a bit more caution are
-// equally reachable in the same generation; which one (if either) actually
-// helps is left entirely to selection, same as everything else here — this
-// table only decides what gets TRIED, never what wins.
+// cfg_nudgeMode above. Both directions, at three magnitudes; which one (if
+// either) actually helps is left entirely to selection.
 static const float NUDGE_TABLE[6] = { 0.15f, -0.15f, 0.35f, -0.35f, 0.6f, -0.6f };
 #define NUDGE_TABLE_LEN 6
 
+static i32 same_brain(const float *a, const float *b, i32 n) {
+    for (i32 j = 0; j < n; j++) if (a[j] != b[j]) return 0;
+    return 1;
+}
+
+// Build the next generation into brains_next, then swap.
+//
+//   * Elites, unmutated: slot 0 is the stash (the all-time best, so the
+//     population can never lose it), then the best DISTINCT brains of this
+//     generation. These used to be eliteClones copies of the stash — but the
+//     simulation is deterministic, so every copy drove the identical race and
+//     all but one slot was wasted. Distinct runners-up keep several good
+//     lines alive instead of one.
+//   * Focus % (opt-in): mutants of the stash. There used to be a fitness
+//     boost for these inside a "weakest stretch" window; it was compared raw
+//     against the all-time best, so an inflated score could take the stash
+//     from a better brain and then set a bar no honest run could clear. It is
+//     gone — every car is scored the same way.
+//   * Everyone else: node-level crossover from the top fifth (biased toward
+//     the top), then sparse annealed mutation. Crossover takes a hidden
+//     unit's incoming weights, bias and outgoing weights from the SAME
+//     parent, since those only mean anything together.
 __attribute__((export_name("evolve")))
-void evolve(i32 eliteClones, i32 hasGlobalBest, i32 sigmaGen, i32 lapCompletions) {
+void evolve(i32 eliteClones, i32 hasGlobalBest, i32 sigmaGen) {
     sort_by_fitness();
     i32 stride = brain_stride_v;
     i32 h = cfg_hidden;
     i32 offHO = IN_N * h, offBH = offHO + h * OUT_N, offBO = offBH + h;
     i32 written = 0;
+    const float *stash = &brains[STASH_SLOT * stride];
 
     for (i32 c = 0; c < pop_n; c++) car_focused[c] = 0;
 
-    // Where to aim the focus window — one of two different questions
-    // depending on how far the run has actually gotten.
-    //
-    // Below FEW_LAPS_THRESHOLD: "where does it keep dying?" gate_ratio
-    // cannot answer this — a gate the population never reaches leaves no
-    // ratio behind at all, so the corner actually killing every run is
-    // invisible to it no matter how lethal it is. crash_count answers the
-    // right question instead: population-wide (every car that crashed this
-    // generation, not just car 0), summed across every worker by engine.js
-    // and written into this instance's copy right before this call, exactly
-    // like gate_ratio is — just added instead of copied, since this one has
-    // no single car worth mirroring.
-    //
-    // At or above FEW_LAPS_THRESHOLD: survival is no longer the problem, so
-    // this goes back to the original question — where is the current best
-    // slowest? — using car 0's per-gate pace this generation (gate_ratio),
-    // refreshed from worker 0 the same way. Car 0 mirrors the stash exactly
-    // whenever there is one, since the track and the starting state are both
-    // deterministic.
-    i32 worst = -1;
-    i32 gateLimit = mini(tk_cp_n, MAX_GATES);
-    if (lapCompletions < FEW_LAPS_THRESHOLD) {
-        i32 worstCount = 0;
-        for (i32 g = 0; g < gateLimit; g++) {
-            if (crash_count[g] > worstCount) { worstCount = crash_count[g]; worst = g; }
-        }
-    } else {
-        float worstRatio = 1.0e30f;
-        for (i32 g = 0; g < gateLimit; g++) {
-            if (gate_ratio[g] >= 0.0f && gate_ratio[g] < worstRatio) { worstRatio = gate_ratio[g]; worst = g; }
-        }
-    }
-    focus_lo = -1; focus_hi = -1;
-    if (hasGlobalBest && worst >= 0 && tk_cp_n > 2) {
-        float meanGap = tk_len / (float)maxi(tk_cp_n, 1);
-        float idealCp = meanGap / maxf(cfg_maxSpeed, 0.001f);
-        // +-1 second either side of the worst gate, in gates rather than
-        // frames — TRACK_CP_SPACING gates take idealCp frames apiece at Max
-        // Speed, so 60 frames (one second at the fixed 60fps this project
-        // has always assumed for lap times) is 60/idealCp of them.
-        i32 span = (i32)(60.0f / maxf(idealCp, 1.0f) + 0.5f);
-        if (span < 1) span = 1;
-        if (span * 2 + 1 < tk_cp_n) {
-            focus_lo = ((worst - span) % tk_cp_n + tk_cp_n) % tk_cp_n;
-            focus_hi = (worst + span) % tk_cp_n;
-        }
-        // else the window would already cover the whole lap — nothing left
-        // to prioritise over anything else, so leave it inactive.
-    }
-
     if (hasGlobalBest) {
-        i32 clones = mini(eliteClones, pop_n);
-        if (clones < 0) clones = 0;
-        const float *src = &brains[STASH_SLOT * stride];
-        for (i32 k = 0; k < clones; k++) {
-            float *dst = &brains_next[k * stride];
-            for (i32 j = 0; j < stride; j++) dst[j] = src[j];
+        i32 clones = mini(maxi(eliteClones, 0), pop_n);
+        if (clones > 0) {
+            for (i32 j = 0; j < stride; j++) brains_next[j] = stash[j];
+            written = 1;
         }
-        written = clones;
+        float lastF = 0.0f;
+        for (i32 r = 0; r < pop_n && written < clones; r++) {
+            i32 c = order[r];
+            const float *src = &brains[c * stride];
+            // Equal score from the deterministic sim means the same brain;
+            // the brain compare is the exact check against the stash.
+            if (written > 1 && ev_fitness[c] == lastF) continue;
+            if (same_brain(src, stash, stride)) continue;
+            float *dst = &brains_next[written * stride];
+            for (i32 j = 0; j < stride; j++) dst[j] = src[j];
+            lastF = ev_fitness[c];
+            written++;
+        }
     }
 
     float sigma = MUT_SIGMA_FLOOR + (MUT_SIGMA_START - MUT_SIGMA_FLOOR)
                   * (float)exp_d(-(double)(sigmaGen < 0 ? 0 : sigmaGen) / (double)MUT_SIGMA_TAU);
 
-    // The focused sub-population: clones of the stash, flagged so updateCar
-    // can boost their reward through the window above. Only spawned once
-    // there is both a stash to clone and an actual weak spot to aim at — on
-    // an early generation, or a track short enough that the window would
-    // cover the whole lap, this is 0 and every slot breeds normally below.
-    //
-    // How each clone differs from the stash depends on cfg_nudgeMode:
-    //   0 (default): the original behaviour — every weight gets the same
-    //     random Gaussian nudge as the rest of the bred population.
-    //   1: every weight is left BYTE-IDENTICAL to the stash except the
-    //     throttle output bias, which is pushed by one entry of
-    //     NUDGE_TABLE (cycling, so a handful of different pushes all get
-    //     tried against this generation's focus window). This is a pure
-    //     behavioural probe — "does this stretch just want a bit more
-    //     throttle, or a bit less?" — rather than random exploration in
-    //     weight space, and it is why it needs the focus window active:
-    //     nudging the whole brain's throttle bias helps nothing if there is
-    //     no known weak stretch to test it against.
-    i32 focusCount = 0;
-    if (hasGlobalBest && focus_lo >= 0) {
-        focusCount = (i32)(cfg_focusPct * (float)pop_n + 0.5f);
+    if (hasGlobalBest && cfg_focusPct > 0.0f) {
+        i32 focusCount = (i32)(cfg_focusPct * (float)pop_n + 0.5f);
         if (focusCount > pop_n - written) focusCount = pop_n - written;
-        if (focusCount < 0) focusCount = 0;
-        const float *stashSrc = &brains[STASH_SLOT * stride];
         for (i32 k = 0; k < focusCount; k++) {
             i32 idx = written + k;
             float *dst = &brains_next[idx * stride];
-            if (cfg_nudgeMode) {
-                for (i32 j = 0; j < stride; j++) dst[j] = stashSrc[j];
-                dst[offBO + 1] += NUDGE_TABLE[k % NUDGE_TABLE_LEN];
-            } else {
-                for (i32 j = 0; j < stride; j++) dst[j] = stashSrc[j] + gauss01() * sigma;
-            }
+            for (i32 j = 0; j < stride; j++) dst[j] = stash[j];
+            if (cfg_nudgeMode) dst[offBO + 1] = sanitize_w(dst[offBO + 1] + NUDGE_TABLE[k % NUDGE_TABLE_LEN]);
+            else mutate(dst, stride, sigma);
             car_focused[idx] = 1;
         }
         written += focusCount;
@@ -2851,21 +2770,17 @@ void evolve(i32 eliteClones, i32 hasGlobalBest, i32 sigmaGen, i32 lapCompletions
             const float *src = rnd01() < 0.5f ? p1 : p2;
             dst[offBO + m] = src[offBO + m];
         }
-
-        for (i32 j = 0; j < stride; j++) dst[j] += gauss01() * sigma;
+        mutate(dst, stride, sigma);
     }
 
-    // Swap the buffers rather than copying the whole population back. Only the
-    // stash has to travel, because it lives past the end of the live slots and
-    // the next generation still has to be able to clone from it.
+    // Swap generations. The stash slot rides along in whichever buffer is
+    // live, so copy it across.
     float *tmp = brains; brains = brains_next; brains_next = tmp;
     const float *stashSrc = &brains_next[STASH_SLOT * stride];
     float *stashDst = &brains[STASH_SLOT * stride];
     for (i32 j = 0; j < stride; j++) stashDst[j] = stashSrc[j];
 }
 
-// Copy a brain between slots — used to park this generation's winner in the
-// stash, and to pull a stashed/imported brain back into the live population.
 __attribute__((export_name("copy_brain")))
 void copy_brain(i32 from, i32 to) {
     i32 stride = brain_stride_v;
@@ -2884,7 +2799,8 @@ void seed_from_stash(void) {
     for (i32 i = 0; i < pop_n; i++) {
         float *dst = &brains[i * stride];
         if (i == 0) { for (i32 j = 0; j < stride; j++) dst[j] = src[j]; continue; }
-        for (i32 j = 0; j < stride; j++) dst[j] = src[j] + rnd11() * 0.5f;
+        for (i32 j = 0; j < stride; j++) dst[j] = src[j];
+        mutate(dst, stride, MUT_SIGMA_START);
     }
 }
 

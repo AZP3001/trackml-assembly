@@ -17,11 +17,11 @@ const ui = {};
 let _ui_gen = -1, _ui_alive = -1, _ui_allBest = null, _ui_pool = '', _ui_tpAt = 0;
 
 const SETTING_DESCRIPTIONS = {
-    speedMultiplier: "Simulation cycles per frame. High values train extremely fast.",
+    speedMultiplier: "Simulation steps per 1/60 s of real time. High values train extremely fast.",
     populationSize: "Number of cars per generation. Scales perfectly via multi-threading.",
-    eliteClones: "Top performers copied to the next generation without mutation. Prevents regression.",
-    focusPct: "Fraction of the population spent as mutated clones of the current best, reward-boosted specifically through whichever stretch of track it's currently slowest on (roughly ±1 second either side). Helps it stop getting stuck taking one corner badly instead of spreading every mutation evenly over a lap that mostly already works.",
-    nudgeMode: "How the Focus % clones are perturbed. Off (stock): a random nudge across every weight, same as the rest of the population. On: each clone stays identical to the best brain except one push on the throttle bias — a bit more throttle (also a bit less brake) or the reverse — tried directly against the section Focus % is currently aimed at, instead of random noise in weight space.",
+    eliteClones: "Top performers copied to the next generation without mutation: the all-time best, then the best distinct brains of this generation. Prevents regression.",
+    focusPct: "Fraction of the population bred as mutants of the all-time best instead of by crossover. Off by default: in testing, crossover from the top fifth learned faster.",
+    nudgeMode: "How the Focus % clones are perturbed. Off (stock): the same sparse random mutation as the rest of the population. On: each clone stays identical to the best brain except one push on the throttle bias — a bit more throttle (also a bit less brake) or the reverse.",
     hiddenLayers: "Brain complexity. More layers = smarter but heavier computation.",
     initialTTL: "Time to Live. Frames allowed before death if no checkpoint is reached.",
     targetLaps: "Laps needed to trigger the next generation automatically.",
@@ -45,8 +45,8 @@ const GPU_API = typeof navigator !== 'undefined' && !!navigator.gpu;
 // wasted work.
 const HYPER_CHUNK = 2500;
 
-// Canvas repaint ceiling. The simulation is not capped by this — it steps on
-// every animation frame regardless — only the drawing is.
+// Canvas repaint ceiling. The simulation is not capped by this — it steps at
+// SimClock's fixed 60 Hz regardless (clock.js) — only the drawing is.
 //
 // 60 by default everywhere, desktop and phone alike — it's a ceiling, not a
 // target, so it costs nothing on a screen or a tab that can't reach it. A
@@ -312,14 +312,11 @@ const app = {
         eliteClones: DEVICE_DEFAULTS.eliteClones,
         targetLaps: DEVICE_DEFAULTS.targetLaps,
         hiddenLayers: DEVICE_DEFAULTS.hiddenLayers,
-        focusPct: 0.20, initialTTL: 750,
-        // How the focused sub-population (Focus %) is perturbed — false
-        // (stock) is the original random-Gaussian nudge on every weight;
-        // true is the behavioural-nudge mode, where each focused clone stays
+        focusPct: 0, initialTTL: 750,
+        // How the Focus % mutants are perturbed — false (stock) is the same
+        // sparse Gaussian mutation as everyone else; true leaves each clone
         // byte-identical to the stash except a small, fixed push on the
-        // throttle bias (more throttle / less brake, or the reverse), tried
-        // specifically against whichever stretch the focus window is
-        // currently aimed at. See NUDGE_TABLE in sim.c.
+        // throttle bias. See NUDGE_TABLE in sim.c.
         nudgeMode: false,
         physics: { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.02, brakeStrength: 0.05 },
         // Canvas repaint ceiling — 60 or 30, user-settable, see setRenderHz.
@@ -952,13 +949,8 @@ const app = {
     // to 1 — see reset(), loadBrain(), switchTrack() — and re-derived from
     // the loaded run's own history on loadSession().
     _firstLapGen: null,
-    // How many SEPARATE generations have completed at least one lap, not how
-    // many laps in total — also what decides evolve()'s focus target in
-    // sim.c (see FEW_LAPS_THRESHOLD there): below it, the focus window aims
-    // at wherever the population is actually dying; at and above it, survival
-    // is no longer the bottleneck and it goes back to aiming at wherever the
-    // current best is slowest. One lucky lap says nothing about the rest of
-    // the track, which is exactly why this counts generations, not laps.
+    // How many SEPARATE generations have completed at least one lap (a run
+    // statistic; saved sessions restore it).
     _lapCompletionCount: 0,
 
     evolve: function() {
@@ -1003,7 +995,7 @@ const app = {
         let s10 = 0; for(let i=0; i<n10; i++) s10 += sorted[n - 1 - i];
         const top1 = s1 / n1, top10 = s10 / n10;
 
-        const res = Engine.evolve(fitness, this.state.eliteClones, sigmaGen, this._lapCompletionCount);
+        const res = Engine.evolve(fitness, this.state.eliteClones, sigmaGen);
         this.state.globalBest = { fitness: res.globalBest };
 
         const avg = sum / cars.length;
@@ -1192,65 +1184,83 @@ const app = {
     _runToken: 0,
     _pending: null,
     _pendingToken: -1,
-    _lastDraw: 0,
     // Set by anything that changes what the canvas should show. A paused,
     // untouched screen repaints zero times instead of sixty times a second.
     _needsDraw: true,
+    // Hyper mode keeps breeding round after round inside one animation frame
+    // for up to this long, so short generations aren't paced by the display.
+    _HYPER_BUDGET_MS: 14,
 
-    // Bound once. `this.loop.bind(this)` inside the loop allocated a fresh
-    // closure sixty times a second for the garbage collector to deal with,
-    // which on a phone is a minor cost with a major multiplier.
-    _loopBound: null,
-    loop: async function() {
-        const running = this.state.isRunning && !this.state.isEditing;
-
+    // Land the round in flight, if any, and start the next one if the clock
+    // says steps are due. Returns whether a round was dispatched.
+    _cycle: async function(hyper) {
         if(this._pending) {
             const st = await this._pending;
             const token = this._pendingToken;
             this._pending = null;
-            if(token === this._runToken && running) {
+            // Applied even if the user paused while it was in flight: the
+            // workers have already advanced their cars, so dropping it would
+            // leave the screen (and any lap or generation end it carried) a
+            // round behind the simulation.
+            if(token === this._runToken) {
                 this._applyResults(st);
                 if(st.allCrashed || st.maxLaps >= this.state.targetLaps) this.evolve();
+            } else {
+                for(const r of st.rows) Engine.recycle(r.index, r.buffer.buffer);
             }
         }
+        const running = this.state.isRunning && !this.state.isEditing;
+        if(!running || this._pending) return false;
+        // Started BEFORE the UI work in loop(), so the workers compute the
+        // next round while the main thread paints the previous one.
+        const iters = hyper ? HYPER_CHUNK : SimClock.take() * this.state.speedMultiplier;
+        if(iters <= 0) return false;
+        this._pendingToken = this._runToken;
+        this._pending = Engine.run(iters, !hyper);
+        return true;
+    },
 
-        if(running && !this._pending) {
-            // Start the next chunk BEFORE the UI work below rather than after
-            // it. The workers used to sit idle through every updateUI/draw —
-            // a hard barrier once per frame — and now they compute the next
-            // chunk while the main thread paints the previous one.
+    // One chain only: started once from init(), and every pass schedules
+    // exactly one successor (even if a round threw), so no setting, toggle or
+    // track switch can ever leave two loops racing each other.
+    _loopBound: null,
+    _rafId: 0,
+    loop: async function(rafNow) {
+        try {
+            const now = typeof rafNow === 'number' ? rafNow : performance.now();
             const hyper = this.state.hyperMode;
-            const iters = hyper ? HYPER_CHUNK : this.state.speedMultiplier;
-            this._pendingToken = this._runToken;
-            this._pending = Engine.run(iters, !hyper);
-        }
+            const running = this.state.isRunning && !this.state.isEditing;
+            SimClock.advance(now, running && !hyper);
 
-        this.updateUI();
+            await this._cycle(hyper);
+            if(hyper) {
+                const end = performance.now() + this._HYPER_BUDGET_MS;
+                while(this._pending && this.state.hyperMode && performance.now() < end) await this._cycle(true);
+            }
 
-        // What gets painted, and how often:
-        //   * the editor draws every frame, so dragging a point stays smooth;
-        //   * hyper mode draws NOTHING at all, not even the cached background,
-        //     because the whole point of it is that the screen is not the
-        //     output;
-        //   * everything else is capped at the repaint ceiling and skipped when
-        //     nothing has changed. The simulation still steps on every
-        //     animation frame — only the painting is throttled.
-        if(this.state.isEditing) {
-            this.draw();
-        } else if(!this.state.hyperMode && this._needsDraw) {
-            const now = performance.now();
-            // -1 so a 60Hz frame clock still lands on every other frame rather
-            // than every third, computed fresh since the toggle can change it
-            // mid-session.
-            const renderMinMs = 1000 / this.state.renderHz - 1;
-            if(now - this._lastDraw >= renderMinMs) {
-                this._lastDraw = now;
+            this.updateUI();
+
+            // What gets painted, and how often:
+            //   * the editor draws every frame, so dragging a point stays smooth;
+            //   * hyper mode draws NOTHING at all, not even the cached background,
+            //     because the whole point of it is that the screen is not the
+            //     output;
+            //   * everything else is capped at the repaint ceiling and skipped
+            //     when nothing has changed. Only the painting is capped — the
+            //     simulation runs on SimClock's fixed 60 Hz either way.
+            if(this.state.isEditing) {
+                this.draw();
+            } else if(!this.state.hyperMode && this._needsDraw && SimClock.renderDue(performance.now(), this.state.renderHz)) {
                 this._needsDraw = false;
                 this.draw();
             }
+        } catch (e) {
+            console.error('Loop error:', e);
+        } finally {
+            if(!this._loopBound) this._loopBound = this.loop.bind(this);
+            cancelAnimationFrame(this._rafId);
+            this._rafId = requestAnimationFrame(this._loopBound);
         }
-        if(!this._loopBound) this._loopBound = this.loop.bind(this);
-        requestAnimationFrame(this._loopBound);
     },
 
     cacheBackgroundRender: function() {
@@ -1512,7 +1522,7 @@ const app = {
         const target = Number(hz) === 30 ? 30 : 60;
         if(this.state.renderHz === target) return;
         this.state.renderHz = target;
-        this._lastDraw = 0;   // don't make the first frame at the new rate wait out the old interval
+        SimClock.resetRender();   // don't make the first frame at the new rate wait out the old interval
         this._syncRenderHzUI();
     },
     _syncRenderHzUI: function() {
@@ -1831,11 +1841,8 @@ const app = {
             // settle window for a while — setting firstLapGen to 1 makes the
             // sigmaGen math (generation - firstLapGen - SETTLE_GENERATIONS)
             // land wherever a run resumed at this generation naturally would,
-            // rather than restarting the settle wait on a resume. 3 mirrors
-            // FEW_LAPS_THRESHOLD in sim.c, so evolve() also picks up in
-            // slowest-bit focus mode rather than re-treating a mature run as
-            // still finding its feet. A session with no recorded lap gets the
-            // same fresh start a new run would.
+            // rather than restarting the settle wait on a resume. A session
+            // with no recorded lap gets the same fresh start a new run would.
             if (st.bestTimes && st.bestTimes.all) {
                 this._firstLapGen = 1;
                 this._lapCompletionCount = 3;

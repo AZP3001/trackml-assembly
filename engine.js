@@ -114,7 +114,6 @@ const Engine = {
             this.hardwareCores = navigator.hardwareConcurrency || 4;
             this.coreCount = workerCountFor(this.hardwareCores, engineIsMobile());
             this._target = { mode: 'cpu', cores: this.coreCount };
-            this._crashBase = new Int32Array(this.master.ex.max_gates());
 
             this.workers = await this._spawnPool('cpu', this.coreCount, 0);
             this._incoming = [];
@@ -177,9 +176,6 @@ const Engine = {
     // that sees it change while it was collecting cars knows those cars are
     // stale and ships the new population instead.
     _popEpoch: 0,
-    // Crash tallies from workers that have since been retired (or had their
-    // cars migrated), folded in so evolve() still sees the whole generation.
-    _crashBase: null,
     _lastConfig: null,
 
     // Spawns `count` workers of one kind with indices firstIndex.., resolves
@@ -302,12 +298,8 @@ const Engine = {
             this._spare = [];
             const fresh = !exported || epoch !== this._popEpoch;
             if (!fresh) {
-                for (const e of exported) {
-                    for (let g = 0; g < this._crashBase.length; g++) this._crashBase[g] += e.crashCount[g];
-                    if (e.gateRatio) this._lastGateRatio = e.gateRatio;
-                }
+                for (const e of exported) if (e.gateRatio) this._lastGateRatio = e.gateRatio;
             }
-            this._crashCountByWorker = [];
             if (this._popSize > 0) {
                 this._sliceUp();
                 if (fresh) this._shipBrains(); else this._importState(exported);
@@ -359,7 +351,6 @@ const Engine = {
         for (const e of exported) if (e.count > 0) all.set(e.state.subarray(0, e.count * W), e.start * W);
         const stride = ex.brain_stride();
         const brains = this._f32(this.master, ex.brains_ptr(), (ex.max_cars() + 1) * stride);
-        const focusLo = ex.focus_lo(), focusHi = ex.focus_hi();
         this.workers.forEach((w, i) => {
             const s = this.slices[i];
             const b = brains.slice(s.start * stride, (s.start + s.count) * stride);
@@ -369,7 +360,7 @@ const Engine = {
             if (gateRatio) transfer.push(gateRatio.buffer);
             w.postMessage({
                 type: 'import', start: s.start, count: s.count, hidden: this._hidden,
-                seed: (Math.random() * 0xffffffff) >>> 0, brains: b, focusLo, focusHi, state, gateRatio
+                seed: (Math.random() * 0xffffffff) >>> 0, brains: b, state, gateRatio
             }, transfer);
         });
     },
@@ -563,8 +554,6 @@ const Engine = {
         this._hasGlobalBest = false;
         this._globalBestFitness = -Infinity;
         this._lastGateRatio = null;
-        this._crashCountByWorker = [];
-        this._crashBase.fill(0);
         this._popEpoch++;
         // _rate is deliberately NOT cleared here: it describes the machine,
         // not the population, and a Reset would otherwise throw away the one
@@ -653,13 +642,8 @@ const Engine = {
         const ex = this.master.ex;
         const stride = ex.brain_stride();
         const all = this._f32(this.master, ex.brains_ptr(), (ex.max_cars() + 1) * stride);
-        // Which slots evolve() bred as focused clones, and the track window
-        // their reward is boosted inside — both computed on the master (the
-        // only instance holding the whole population and the only one that
-        // calls evolve()) and shipped out alongside the brains, exactly like
-        // config. Workers never breed, so they have no other way to know.
+        // Which slots evolve() bred as Focus % mutants (shown on screen).
         const allFocused = this._i32(this.master, ex.car_focused_ptr(), ex.max_cars());
-        const focusLo = ex.focus_lo(), focusHi = ex.focus_hi();
         this.workers.forEach((w, i) => {
             const s = this.slices[i];
             const blob = all.slice(s.start * stride, (s.start + s.count) * stride);
@@ -669,7 +653,7 @@ const Engine = {
                 start: s.start, count: s.count,
                 hidden: this._hidden,
                 seed: (Math.random() * 0xffffffff) >>> 0,
-                brains: blob, focused, focusLo, focusHi
+                brains: blob, focused
             }, [blob.buffer, focused.buffer]);
         });
     },
@@ -699,11 +683,38 @@ const Engine = {
             for (let i = 0; i < this.workers.length; i++) {
                 const spare = this._spare[i];
                 this._spare[i] = null;
-                const msg = { type: 'run', iters, wantRender };
+                const msg = { type: 'run', iters, wantRender, snapshot: this.workers.length > 1 };
                 if (spare) { msg.recycle = spare; this.workers[i].postMessage(msg, [spare]); }
                 else this.workers[i].postMessage(msg);
             }
         });
+    },
+
+    // A generation ends at the step the first car anywhere reaches the target
+    // lap count, but each worker only stops for its OWN cars. In hyper mode a
+    // round is 2500 steps, so without this every other slice drove on for up
+    // to 2499 frames past the real finish, banking score no car in the
+    // finisher's slice had time to earn — enough to take the stash with an
+    // inflated all-time best that fair runs then could never beat, and a
+    // result that depended on how many cores the population was split over.
+    // Any slice that ran past the earliest finish is rewound to the round's
+    // start (sim-worker.js keeps it) and replayed to exactly that step; the
+    // simulation is deterministic, so the replay is exact. Returns true while
+    // replays are in flight.
+    _alignFinish: function(st) {
+        const target = this._lastConfig ? this._lastConfig[5] : Infinity;
+        let k = Infinity;
+        for (const r of st.rows) if (r.maxLaps >= target && r.iters < k) k = r.iters;
+        if (!(k < Infinity)) return false;
+        const over = st.rows.filter(r => typeof r.iters === 'number' && r.iters > k);
+        if (!over.length) return false;
+        st.rows = st.rows.filter(r => !over.includes(r));
+        st.completed -= over.length;
+        for (const r of over) {
+            const buf = r.buffer.buffer;
+            this.workers[r.index].postMessage({ type: 'rerun', iters: k, wantRender: st.wantRender, recycle: buf }, [buf]);
+        }
+        return true;
     },
 
     // Hand a consumed buffer back to the worker that produced it.
@@ -717,17 +728,17 @@ const Engine = {
         const st = this._runState;
         if (!st || data.type !== 'done') return;
         this._noteWorkerTiming(data);
-        if (data.maxLaps > st.maxLaps) st.maxLaps = data.maxLaps;
-        if (!data.allCrashed) st.allCrashed = false;
         if (data.gateRatio) this._lastGateRatio = data.gateRatio;
-        // Overwritten, not accumulated: each worker's array is already the
-        // running total of ITS crashes so far this generation (sim.c only
-        // resets it once per generation, at pop_reset), so the latest message
-        // from a given worker is already its correct cumulative count. evolve()
-        // sums across the per-worker entries once, at generation boundary.
-        if (data.crashCount) this._crashCountByWorker[data.index] = data.crashCount;
         st.rows.push(data);
         if (++st.completed === st.total) {
+            if (this._alignFinish(st)) return;
+            // Recomputed from the final rows: a replayed slice replaces its
+            // overshooting report.
+            st.maxLaps = 0; st.allCrashed = true;
+            for (const r of st.rows) {
+                if (r.maxLaps > st.maxLaps) st.maxLaps = r.maxLaps;
+                if (!r.allCrashed) st.allCrashed = false;
+            }
             this._runState = null;
             this._noteThroughput(st);
             st.resolve(st);
@@ -740,24 +751,13 @@ const Engine = {
     // ---- evolution -----------------------------------------------------
     // Selection is global, so it happens here on the master, which is the one
     // instance holding every brain. Workers never breed.
-    // Set from worker 0's last 'done' message (see _handleWorkerMessage) —
-    // that worker owns global car 0, and car 0 mirrors the stash exactly
-    // whenever one exists, so its per-gate pace this generation is exactly
-    // the telemetry evolve() needs to find the stash's weakest stretch. The
-    // master itself never simulates a car, so it has no other way to see it.
+    // Worker 0's per-gate pace telemetry for car 0 (sim.c gate_ratio), carried
+    // across a pool change so a migrated race keeps it.
     _lastGateRatio: null,
-    // One entry per worker, each that worker's own crash_count array (see
-    // sim.c) as of its last report. Unlike gate_ratio this is population-wide
-    // — every worker's every car, not one worker's car 0 — so evolve() sums
-    // ACROSS entries rather than taking the newest one.
-    _crashCountByWorker: [],
 
-    // sigmaGen and lapCompletions are computed by the caller (app.evolve in
-    // script.js), not here: they both need the whole run's history (has a lap
-    // EVER completed, how many separate generations has it happened in), and
-    // this object only ever sees one generation at a time. See the comment on
-    // MUT_SIGMA_* and FEW_LAPS_THRESHOLD in sim.c for what each one controls.
-    evolve: function(fitness, eliteClones, sigmaGen, lapCompletions) {
+    // sigmaGen is computed by the caller (app.evolve in script.js): it needs
+    // the whole run's history, and this object only sees one generation.
+    evolve: function(fitness, eliteClones, sigmaGen) {
         const ex = this.master.ex;
         const ev = this._f32(this.master, ex.ev_fitness_ptr(), ex.max_cars());
         let bestIdx = 0, bestFit = -Infinity;
@@ -773,20 +773,7 @@ const Engine = {
             this._globalBestFitness = bestFit;
             this._hasGlobalBest = true;
         }
-        if (this._lastGateRatio) {
-            this._f32(this.master, ex.gate_ratio_ptr(), ex.max_gates()).set(this._lastGateRatio);
-        }
-        {
-            const maxGates = ex.max_gates();
-            const sum = this._i32(this.master, ex.crash_count_ptr(), maxGates);
-            sum.set(this._crashBase);
-            for (const wc of this._crashCountByWorker) {
-                if (!wc) continue;
-                for (let g = 0; g < maxGates; g++) sum[g] += wc[g];
-            }
-        }
-        ex.evolve(eliteClones, this._hasGlobalBest ? 1 : 0, sigmaGen | 0, lapCompletions | 0);
-        this._crashBase.fill(0);
+        ex.evolve(eliteClones, this._hasGlobalBest ? 1 : 0, sigmaGen | 0);
         this._popEpoch++;
         // A generation boundary is the one moment the partition can move for
         // free: every worker is idle and about to be handed a fresh slice
@@ -797,7 +784,6 @@ const Engine = {
     },
 
     resetPopulation: function() {
-        this._crashBase.fill(0);
         this._popEpoch++;
         this.workers.forEach(w => w.postMessage({ type: 'reset' }));
     },
@@ -932,7 +918,6 @@ const Engine = {
         this._hasGlobalBest = !!p.hasGlobalBest;
         this._globalBestFitness = typeof p.globalBestFitness === 'number' ? p.globalBestFitness : -Infinity;
         this._lastGateRatio = null;
-        this._crashCountByWorker = [];
 
         this._sliceUp();
         this._shipBrains();

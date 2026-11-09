@@ -796,6 +796,38 @@ await page.evaluate(() => { if (app.state.isEditing) editor.cancel(); });
     check(afterB === 60, 'and the 60fps button switches it back', `now ${afterB}fps`);
 }
 
+// --- 1x world speed is wall-clock time, not frame rate ----------------------
+// Counts the steps the real loop asks the workers for at 1x, at each repaint
+// cap, and again after hammering the hyper and fps toggles: always ~60 per
+// second (SimClock in clock.js), never a second loop stacked on the first.
+{
+    const stepsPerSec = (hz) => page.evaluate(async (hz) => {
+        if (app.state.hyperMode) app.toggleHyper();
+        if (!app.state.isRunning) app.toggleRun();
+        app.setRenderHz(hz);
+        const real = Engine.run;
+        let steps = 0;
+        Engine.run = function(iters, wantRender) { if (wantRender) steps += iters; return real.call(this, iters, wantRender); };
+        await new Promise(r => setTimeout(r, 300));
+        steps = 0;
+        const t0 = performance.now();
+        await new Promise(r => setTimeout(r, 2000));
+        const s = steps * 1000 / (performance.now() - t0);
+        Engine.run = real;
+        return s;
+    }, hz);
+    const at60 = await stepsPerSec(60), at30 = await stepsPerSec(30);
+    for (let k = 0; k < 10; k++) {
+        await page.click('#btn-hyper');
+        await page.click(k % 2 ? '#btn-fps-60' : '#btn-fps-30');
+    }
+    await page.evaluate(() => { if (app.state.hyperMode) app.toggleHyper(); });
+    const after = await stepsPerSec(60);
+    const near60 = (v) => v > 45 && v < 66;
+    check(near60(at60) && near60(at30), '1x runs ~60 steps/s at both repaint caps', `${at60.toFixed(1)} at 60fps, ${at30.toFixed(1)} at 30fps`);
+    check(near60(after), 'and still ~60 after toggling hyper and fps 10 times — no stacked loop', `${after.toFixed(1)} steps/s`);
+}
+
 // --- camera follow-car toggle ---------------------------------------------
 // Clicks the real button (proving the data-click wiring, not just a hand
 // call to toggleFollowCar), then forces a frame and checks the pan actually

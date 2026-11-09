@@ -82,7 +82,6 @@ const STOPPED_GRACE_FRAMES: i32 = 15;
 const PROGRESS_WINDOW_FRAMES: i32 = 180;
 const TURN_GRIP_REF_SPEED: f32 = 3.0;
 const CAR_LAT_GRIP: f32 = 0.93;
-const FOCUS_BOOST: f32 = 3.0;
 const PI_F: f32 = 3.14159265358979323846;
 const C30: f32 = 0.86602540378443864676;
 const S30: f32 = 0.5;
@@ -93,7 +92,7 @@ struct Params {
   gridOx: f32, gridOy: f32, fpad0: f32, fpad1: f32,
   initialTTL: i32, targetLaps: i32, cpN: i32, startCp: i32,
   zoneN: i32, centerN: i32, gridNx: i32, gridNy: i32,
-  focusLo: i32, focusHi: i32, popN: i32, hidden: i32,
+  ipad1: i32, ipad2: i32, popN: i32, hidden: i32,
   stride: i32, cpOff: i32, zoneOff: i32, ctrOff: i32,
   wOff: i32, gsOff: i32, giOff: i32, hasGrid: i32,
   hasBuckets: i32, tiOff: i32, brOff: i32, ipad0: i32,
@@ -192,12 +191,6 @@ fn nnTanh(x: f32) -> f32 {
   p = p * f + 1.0;
   let e = p * bitcast<f32>((i32(n) + 127) << 23u);
   return (e - 1.0) / (e + 1.0);
-}
-
-fn inFocus(g: i32) -> bool {
-  if (P.focusLo < 0) { return false; }
-  if (P.focusLo <= P.focusHi) { return g >= P.focusLo && g <= P.focusHi; }
-  return g >= P.focusLo || g <= P.focusHi;
 }
 
 fn pointSegDist2(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
@@ -317,8 +310,7 @@ fn prePhase(c: ptr<function, Car>, trig: ptr<function, vec2<f32>>, prev: ptr<fun
   (*c).x += vx;
   (*c).y += vy;
   if ((*c).frames - (*c).lastCpFrame < PROGRESS_WINDOW_FRAMES && speed > STOPPED_SPEED) {
-    let mult = select(1.0, FOCUS_BOOST, (*c).focused != 0 && inFocus((*c).nextCP));
-    (*c).fitness += 0.1 * mult;
+    (*c).fitness += 0.1;
   }
   let x = (*c).x;
   let y = (*c).y;
@@ -468,8 +460,7 @@ fn tailPhase(c: ptr<function, Car>, ci: i32, trig: vec2<f32>, prev: vec2<f32>, b
     (*c).lastCpFrame = (*c).frames;
     let gAbs = ((*c).nextCP - 1 + P.cpN) % P.cpN;
     if (ci == 0 && gAbs >= 0 && gAbs < MAX_GATES) { aux.gate[gAbs] = idealCp / max(dtCp, idealCp); }
-    let gateMult = select(1.0, FOCUS_BOOST, (*c).focused != 0 && inFocus(gAbs));
-    (*c).fitness += 500.0 * (1.0 + 3.0 * (idealCp / max(dtCp, idealCp))) * fitMult * gateMult;
+    (*c).fitness += 500.0 * (1.0 + 3.0 * (idealCp / max(dtCp, idealCp))) * fitMult;
     if ((*c).nextCP == (P.startCp + 1) % P.cpN && P.cpN > 2) {
       (*c).laps += 1;
       let lapFrames = f32((*c).frames - (*c).prevLapFrame);
@@ -564,7 +555,6 @@ let stateStaging = null, auxStaging = null;
 const probePool = [];
 
 let popN = 0, popStart = 0, hidden = 5, stride = 0, lanes = 1;
-let focusLo = -1, focusHi = -1;
 let mirror = new Uint32Array(0);  // the population as of the last readback
 let crashMirror = new Int32Array(MAX_GATES);
 let gateMirror = new Float32Array(MAX_GATES).fill(-1);
@@ -593,7 +583,7 @@ function writeParams() {
     pf[8] = trk.gridOx; pf[9] = trk.gridOy; pf[10] = 0; pf[11] = 0;
     pi[12] = cfg.initialTTL; pi[13] = cfg.targetLaps; pi[14] = trk.cpN; pi[15] = trk.startCp;
     pi[16] = trk.zoneN; pi[17] = trk.centerN; pi[18] = trk.gridNx; pi[19] = trk.gridNy;
-    pi[20] = focusLo; pi[21] = focusHi; pi[22] = popN; pi[23] = hidden;
+    pi[20] = 0; pi[21] = 0; pi[22] = popN; pi[23] = hidden;
     pi[24] = stride; pi[25] = 0; pi[26] = trk.zoneOff; pi[27] = trk.ctrOff;
     pi[28] = trk.wOff; pi[29] = trk.gsOff; pi[30] = trk.giOff; pi[31] = trk.hasGrid;
     pi[32] = trk.hasBuckets; pi[33] = trackTiOff; pi[34] = trackTD.length; pi[35] = 0;
@@ -979,9 +969,6 @@ async function handle(msg) {
             popStart = msg.start; popN = msg.count; hidden = msg.hidden;
             ex.pop_init(popN, popStart, hidden, msg.seed);
             if (msg.focused) i32v(ex.car_focused_ptr(), popN).set(msg.focused.subarray(0, popN));
-            focusLo = msg.focusLo === undefined ? -1 : msg.focusLo;
-            focusHi = msg.focusHi === undefined ? -1 : msg.focusHi;
-            ex.set_focus_window(focusLo, focusHi);
             ex.pop_reset();
             lastBrains = msg.brains.slice(0, popN * ex.brain_stride());
             uploadPopulation(lastBrains, packFromWasm(), popN, null, msg.lanes);
@@ -994,9 +981,6 @@ async function handle(msg) {
         case 'import': {
             popStart = msg.start; popN = msg.count; hidden = msg.hidden;
             ex.pop_init(popN, popStart, hidden, msg.seed);
-            focusLo = msg.focusLo === undefined ? -1 : msg.focusLo;
-            focusHi = msg.focusHi === undefined ? -1 : msg.focusHi;
-            ex.set_focus_window(focusLo, focusHi);
             // Mirror the imported cars into wasm too, so a later 'reset'
             // (which rebuilds the start state there) keeps their focus flags.
             new Uint32Array(memory.buffer, ex.state_ptr(), popN * STATE_WORDS).set(msg.state);

@@ -149,12 +149,12 @@ await page.evaluate(() => {
             const focused = new Int32Array(n);
             for (let c = 0; c < n; c++) focused[c] = c % 3 === 0 ? 1 : 0;
             w.post({ type: 'pop', start: 0, count: n, hidden: P.H, seed: 1, brains: brains.slice(), focused,
-                     focusLo: 10, focusHi: 30, ...(extra || {}) });
+                     ...(extra || {}) });
         },
         async state(w) { w.post({ type: 'export' }); return (await w.next('exported')).state; },
         importState(w, n, brains, state, extra) {
             w.post({ type: 'import', start: 0, count: n, hidden: P.H, seed: 1, brains: brains.slice(),
-                     focusLo: 10, focusHi: 30, state: state.slice(), gateRatio: null, ...(extra || {}) });
+                     state: state.slice(), gateRatio: null, ...(extra || {}) });
         },
         // A whole chunk, however long it takes — the GPU worker's per-round
         // time budget would otherwise cut SwiftShader's (slow) rounds short.

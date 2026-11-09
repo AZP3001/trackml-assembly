@@ -13,6 +13,7 @@ let memory = null;
 let index = -1;
 let popCount = 0;
 let popStart = 0;
+let snapshot = null;    // car state at the start of the current round
 
 // A wasm memory can be detached and replaced when it grows, so views are
 // derived per use rather than cached.
@@ -80,12 +81,8 @@ self.onmessage = async (e) => {
             ex.pop_init(popCount, popStart, msg.hidden, msg.seed);
             const stride = ex.brain_stride();
             f32(ex.brains_ptr(), popCount * stride).set(msg.brains.subarray(0, popCount * stride));
-            // Which of this slice's cars evolve() bred as focused clones, and
-            // the checkpoint window their reward is boosted inside. Bred and
-            // computed on the master; this worker never breeds, so it has no
-            // other way to know either one.
+            // Which of this slice's cars evolve() bred as Focus % mutants.
             if (msg.focused) i32(ex.car_focused_ptr(), popCount).set(msg.focused);
-            ex.set_focus_window(msg.focusLo === undefined ? -1 : msg.focusLo, msg.focusHi === undefined ? -1 : msg.focusHi);
             ex.pop_reset();
             break;
         }
@@ -112,29 +109,35 @@ self.onmessage = async (e) => {
         }
 
         // Incoming half: take over a slice mid-generation. Same as 'pop' up to
-        // the brains and focus window, then the cars are overwritten with the
-        // state they had wherever they were before, instead of being reset to
-        // the start line. The crash tally starts from zero here — the master
-        // folded every old worker's count into its own running total before
-        // handing the cars out.
+        // the brains, then the cars are overwritten with the state they had
+        // wherever they were before, instead of being reset to the start line.
         case 'import': {
             popStart = msg.start;
             popCount = msg.count;
             ex.pop_init(popCount, popStart, msg.hidden, msg.seed);
             const stride = ex.brain_stride();
             f32(ex.brains_ptr(), popCount * stride).set(msg.brains.subarray(0, popCount * stride));
-            ex.set_focus_window(msg.focusLo === undefined ? -1 : msg.focusLo, msg.focusHi === undefined ? -1 : msg.focusHi);
             new Uint32Array(memory.buffer, ex.state_ptr(), popCount * ex.state_words()).set(msg.state);
             ex.unpack_state();
             if (msg.gateRatio) f32(ex.gate_ratio_ptr(), ex.max_gates()).set(msg.gateRatio);
             break;
         }
 
+        // The round's starting state is kept when the master asks (more than
+        // one worker), so a slice that drove past the generation's real end —
+        // another worker's car reached the target first — can be put back
+        // and replayed to exactly that step. See Engine._alignFinish.
+        case 'rerun':
+            new Uint32Array(memory.buffer, ex.state_ptr(), snapshot.length).set(snapshot);
+            ex.unpack_state();
+            // falls through
         case 'run': {
-            // Timed, so the master can see how fast THIS worker's core really
-            // is. On a phone the pool is spread over cores that differ by a
-            // factor of three, and the master divides this by the car-steps
-            // below to size the next generation's slices accordingly.
+            if (msg.type === 'run' && msg.snapshot) {
+                ex.pack_state();
+                const n = popCount * ex.state_words();
+                if (!snapshot || snapshot.length !== n) snapshot = new Uint32Array(n);
+                snapshot.set(new Uint32Array(memory.buffer, ex.state_ptr(), n));
+            }
             const t0 = performance.now();
             const maxLaps = ex.run(msg.iters);
             const busyMs = performance.now() - t0;
@@ -182,7 +185,7 @@ self.onmessage = async (e) => {
             if (gateRatio) transfer.push(gateRatio.buffer);
             self.postMessage({
                 type: 'done', index, start: popStart, count: popCount,
-                maxLaps, allCrashed, alive: ex.alive_count(), busyMs, carSteps, crashCount,
+                maxLaps, allCrashed, alive: ex.alive_count(), busyMs, carSteps, crashCount, iters: ex.run_iters(),
                 render: !!msg.wantRender, stride: ex.fitness_stride(), buffer, gateRatio
             }, transfer);
             break;

@@ -103,16 +103,27 @@ jobs:
           node tools/carphysics.mjs wasm/sim-simd.wasm
 
       # Mutation sigma follows sigmaGen against the exp(-sigmaGen/TAU) curve
-      # in sim.c, evolve()'s focus window aims at crash_count (where the
-      # population is dying) below FEW_LAPS_THRESHOLD completed-lap
-      # generations and at gate_ratio (the slowest reached gate) at or above
-      # it, and the per-frame progress reward is flat rather than
+      # in sim.c and touches ~15% of weights, elites are the stash plus the
+      # best distinct brains (unmutated), no non-finite weight survives
+      # evolve(), and the per-frame progress reward is flat rather than
       # speed-proportional — a car that brakes partway through the window
       # scores exactly the same as one that never lifts.
-      - name: Evolution tuning (mutation settle, focus targeting, braking)
+      - name: Evolution tuning (mutation settle, elites, braking)
         run: |
           node tools/mutationsettle.mjs wasm/sim.wasm
           node tools/mutationsettle.mjs wasm/sim-simd.wasm
+
+      # Real training, headless: three tracks (Monaco never finished inside
+      # 30 generations before the mutation/elite fixes) must each finish
+      # their laps, the all-time best must never fall, and nothing may go
+      # NaN/Inf.
+      - name: Training convergence
+        run: node tools/train.mjs wasm/sim-simd.wasm --tracks 1,4,5 --gens 30 --seeds 2 --require-solved
+
+      # 1x world speed is 60 ticks per second of wall clock on any display
+      # rate or repaint cap, and toggling hyper/fps never bursts.
+      - name: Fixed-timestep loop clock
+        run: node tools/looptest.mjs
 
       # The worker pool can change shape mid-generation (the cores slider, the
       # CPU/GPU toggle): every car is packed out of one wasm instance and

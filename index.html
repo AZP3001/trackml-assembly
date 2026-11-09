@@ -196,8 +196,8 @@
                     <input id="cfg-eliteClones" type="range" min="0" max="60" step="1" value="30" data-input="app.updateConfig|eliteClones|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                  <div data-enter="app.showInfo|focusPct" data-leave="app.showInfo">
-                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Focus %</span><span id="val-focus">20%</span></label>
-                    <input id="cfg-focusPct" type="range" min="0.00" max="0.40" step="0.01" value="0.20" data-input="app.updateConfig|focusPct|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Focus %</span><span id="val-focus">0%</span></label>
+                    <input id="cfg-focusPct" type="range" min="0.00" max="0.40" step="0.01" value="0" data-input="app.updateConfig|focusPct|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                 <div data-enter="app.showInfo|nudgeMode" data-leave="app.showInfo" class="-mt-1">
                     <label class="flex items-center gap-1.5 text-[10px] text-slate-500 cursor-pointer">
@@ -493,6 +493,7 @@
 <!-- engine.js owns the WebAssembly backend: it compiles wasm/sim.wasm, brings
      up the worker pool, and exposes generateTrackFromPath. It has to load
      before tracks.js, which calls that generator at startup. -->
+<script src="./clock.js?v=dev"></script>
 <script src="./engine.js?v=dev"></script>
 <script src="tracks.js?v=dev"></script>
 <script src="./script.js?v=dev"></script>

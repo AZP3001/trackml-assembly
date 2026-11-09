@@ -121,9 +121,16 @@ hand-over pauses the race — a message round trip, typically a few milliseconds
 within a frame or two. `tools/statemigrate.mjs` holds it to byte-identical: cars moved to a new
 instance, or split across two, finish exactly where an instance that never moved them does.
 
-At 1x speed the race is paced by the screen (one step per frame), so a faster backend doesn't make
-it visibly faster; the difference shows in hyper mode, and in the **car-steps/s** readout under the
-slider, which measures what the pool is actually doing.
+At 1x speed the race is paced by wall-clock time — a fixed 60 steps a second (`clock.js`), on a 30,
+60 or 120 Hz screen alike and whatever the repaint cap — so a faster backend doesn't make it visibly
+faster; the difference shows in hyper mode, and in the **car-steps/s** readout under the slider,
+which measures what the pool is actually doing.
+
+A generation ends at the step the first car anywhere reaches the target lap count. Each worker only
+stops for its own cars, so a slice that ran on past that step (in hyper mode, up to a whole
+2500-step round) is rewound to the start of the round and replayed to exactly that step — the
+simulation is deterministic, so no slice ever scores frames the others didn't get, and the result
+doesn't depend on how many cores the field was split over.
 
 ## The GPU backend (WebGPU)
 
@@ -182,8 +189,8 @@ either way; only where the handle starts differs.
 
 ### AI & Evolutionary Parameters
 * **Pop Size** (default 500, up to 2000; **150** on mobile)**:** The number of agents generated per generation.
-* **Elite Clones** (default 30; **15** on mobile)**:** Number of top-performing agents preserved exactly for the next generation (prevents regression). Fewer than a handful and a generation can occasionally lose ground it had already made — around 30 is enough that the population doesn't "forget" a solution it found. It tracks the population rather than being an absolute: a sixth of a 150-car field is the same share of it that 30 is of 500.
-* **Focus %** (default 20%)**:** Fraction of the population spent each generation as mutated clones of the current best, with their reward specifically boosted through whichever stretch of track needs it most (roughly ±1 second either side). *Which* stretch depends on how the run is going: until the population has finished a lap in several separate generations, that's wherever cars are actually dying — one corner killing every run over and over is a far bigger problem than a corner it already gets through a bit slowly, and the old version, which only ever looked at gates the current best had actually reached, couldn't see a corner it never got past at all. Once finishing is no longer the bottleneck, it goes back to targeting the slowest stretch, same as before — going fast where it's *already* near top speed has little room left to improve.
+* **Elite Clones** (default 30; **15** on mobile)**:** Number of top-performing agents preserved exactly for the next generation (prevents regression): the all-time best, then the best *distinct* brains of the generation just run. These used to be that many copies of the all-time best — but the simulation is deterministic, so every copy drove the identical race and all but one slot was wasted. Fewer than a handful and a generation can occasionally lose ground it had already made — around 30 is enough that the population doesn't "forget" a solution it found. It tracks the population rather than being an absolute: a sixth of a 150-car field is the same share of it that 30 is of 500.
+* **Focus %** (default 0%)**:** Fraction of the population bred as mutants of the all-time best instead of by crossover. It used to come with a fitness boost through a "weakest stretch" window — but the boosted score was compared raw against the all-time best, so a boosted car could take the champion's place with a score no honest run could beat, and the champion then never updated again. The boost is gone; in testing (`tools/train.mjs`), leaving this at 0 learned fastest.
 * **Hidden Layers** (default 5; **4** on mobile)**:** Adjust the complexity of the AI's "brain" by changing the number of internal neurons. The one fewer on mobile is not a rounding-down — the hidden layer is evaluated four units at a time on the SIMD build, so five units cost two passes and four cost one.
 * **Initial TTL (Time-To-Live):** A countdown for each agent, **reset in full every time it reaches a checkpoint**. It used to top the clock up by 150 frames and clamp it to 600, which quietly made the slider a lie — set it to 10,000 and the very first gate cut the car back to 600.
 * **Target Laps** (default 3; **2** on mobile)**:** Defines the goalpost for a successful generation before moving to the next stage of evolution.
@@ -197,12 +204,13 @@ produced a child that drove into a wall. New populations start with fan-in scale
 a flat `[-1,1]`, which stopped the first few dozen generations being spent climbing back out of tanh
 saturation.
 
-There used to be a separate **Mutation Rate** slider controlling how much of each brain got nudged.
-It's gone: every weight is mutated on every generation now, and the *size* of the nudge is a Gaussian
+Each child has about 15% of its weights mutated — the JS edition's default rate — by a Gaussian nudge
 that **shrinks as the run goes on** (annealing from wide exploration early to fine polishing later).
-Once that curve already controls how big a mutation is, gating *whether* a weight gets one at all on a
-coin flip was a second knob doing overlapping work — dropping it is one less setting to tune, not a
-missing feature.
+For a while every weight was mutated on every generation instead; at the starting nudge size that
+moved each weight about 4.5x as far per generation as the JS edition did, which turned most of the
+bred field back into near-random brains. Across the 25 built-in tracks (`tools/train.mjs`, phone
+settings, 30 generations, 3 seeds) going back to sparse mutation, distinct elites and no focus boost
+took the solved runs from 55/75 to 65/75; Monaco went from never to generation 4-5.
 
 That shrinking curve doesn't start counting from generation 1 any more. It used to, which meant a
 genuinely hard track — one the population hadn't finished even once after hundreds of generations —
@@ -230,8 +238,8 @@ than starting near one end of the range.
 * **Hyper Mode:** Simulates as fast as your PC allows, and draws nothing at all while it does.
 
 The canvas repaints at most 60 times a second by default (a button next to the zoom controls drops it
-to 30), and not at all when nothing has changed — the simulation still steps on every animation
-frame, only the painting is throttled. Cars are blitted from a cached sprite per livery instead of
+to 30), and not at all when nothing has changed — the simulation steps at its fixed 60 Hz either
+way, only the painting is throttled. Cars are blitted from a cached sprite per livery instead of
 half a dozen canvas state changes each, which at 500 cars was most of the main thread's paint cost.
 
 On a phone, how many pixels that paint covers is decided at load rather than fixed. Everything draws
@@ -339,7 +347,7 @@ never resets what you were looking at. Zooming in doesn't just make things bigge
 point-editing precision scale with it too, since a fixed distance in track units covers fewer screen
 pixels the further in you are.
 
-The canvas repaint rate — not the simulation, which always steps at full speed regardless — is 60
+The canvas repaint rate — not the simulation, which always steps at a fixed 60 Hz regardless — is 60
 frames a second by default, with a 30 next to it (bottom-left of the canvas) for whoever would rather
 spend that half of the frame budget on training instead of painting.
 
