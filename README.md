@@ -154,7 +154,12 @@ A generation ends at the step the first car anywhere reaches the target lap coun
 stops for its own cars, so a slice that ran on past that step (in hyper mode, up to a whole
 2500-step round) is rewound to the start of the round and replayed to exactly that step — the
 simulation is deterministic, so no slice ever scores frames the others didn't get, and the result
-doesn't depend on how many cores the field was split over.
+doesn't depend on how many cores the field was split over. To keep that replay from costing
+anything, Hyper rounds are sized to end exactly on the frame the last generation finished on: the
+champion sits in slot 0 and drives the identical race, so it finishes there again and every worker
+stops together. With fixed 2500-step rounds, ~40% of all work went into driving past the finish and
+replaying; now it's a few percent, which on Monaco took a trained population from ~4.1M to ~7.2M
+car-steps/s (generations ~1.8x faster).
 
 ## The GPU backend (WebGPU)
 

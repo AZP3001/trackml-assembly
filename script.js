@@ -1226,7 +1226,15 @@ const app = {
             // round behind the simulation.
             if(token === this._runToken) {
                 this._applyResults(st);
-                if(st.allCrashed || st.maxLaps >= this.state.targetLaps) this.evolve();
+                if(this._framesToken !== token) { this._framesToken = token; this._genFrames = 0; this._finishFrame = 0; }
+                let frames = 0;
+                for(const r of st.rows) frames = Math.max(frames, typeof r.iters === 'number' ? r.iters : this._lastIters);
+                this._genFrames += frames;
+                if(st.allCrashed || st.maxLaps >= this.state.targetLaps) {
+                    if(st.maxLaps >= this.state.targetLaps) this._finishFrame = this._genFrames;
+                    this._genFrames = 0;
+                    this.evolve();
+                }
             } else {
                 for(const r of st.rows) Engine.recycle(r.index, r.buffer.buffer);
             }
@@ -1235,11 +1243,29 @@ const app = {
         if(!running || this._pending) return false;
         // Started BEFORE the UI work in loop(), so the workers compute the
         // next round while the main thread paints the previous one.
-        const iters = hyper ? HYPER_CHUNK : SimClock.take() * this.state.speedMultiplier;
+        const iters = hyper ? this._hyperIters() : SimClock.take() * this.state.speedMultiplier;
         if(iters <= 0) return false;
+        this._lastIters = iters;
         this._pendingToken = this._runToken;
         this._pending = Engine.run(iters, !hyper, this.state.generation);
         return true;
+    },
+
+    // Frames into the current generation, and the frame the last generation
+    // that ended on a finish ended at.
+    _genFrames: 0, _finishFrame: 0, _framesToken: -1, _lastIters: 0,
+    // Hyper round size. A generation ends the step the first car reaches the
+    // target, but each worker only stops for its own cars; the others drive on
+    // to the end of the round and are then rewound and replayed to that step
+    // (Engine._alignFinish). With whole 2500-step rounds that threw away ~40%
+    // of all work once generations fit in one round. Slot 0 is the champion
+    // and the race is deterministic, so it finishes on the same frame as last
+    // time: end the round exactly there, and every worker stops together.
+    // Past that frame (nobody finished), short rounds keep any overshoot small.
+    _hyperIters: function() {
+        if(!(this._finishFrame > 0)) return HYPER_CHUNK;
+        const left = this._finishFrame - this._genFrames;
+        return left > 0 ? Math.min(HYPER_CHUNK, left) : 250;
     },
 
     // One chain only: started once from init(), and every pass schedules
@@ -1578,6 +1604,7 @@ const app = {
         const p = PROFILES[name]; if(!p) return;
         const st = this.state;
         st.profile = name;
+        this._finishFrame = 0;   // a different lap target finishes somewhere else
         st.targetLaps = p.targetLaps; st.focusPct = p.focusPct;
         st.mutRate = p.mutRate; st.sigma = p.sigma; st.sigmaFloor = p.sigmaFloor;
         st.eliteClones = Math.max(1, Math.round(p.eliteFrac * st.populationSize));
@@ -1619,6 +1646,7 @@ const app = {
     },
     updateConfig: function(k, v) {
         this.state[k] = parseFloat(v);
+        if(k === 'targetLaps') this._finishFrame = 0;
         let id = 'val-'+(k==='populationSize'?'pop':k==='targetLaps'?'laps':k==='speedMultiplier'?'speed':k==='eliteClones'?'elite':k==='focusPct'?'focus':k==='hiddenLayers'?'hidden':'ttl');
         let d = v; if(k==='speedMultiplier') d+='x'; if(k==='focusPct') d=Math.round(v*100)+'%';
         const el = document.getElementById(id); if(el) el.innerText = d;
