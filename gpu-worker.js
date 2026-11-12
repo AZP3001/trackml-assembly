@@ -561,7 +561,7 @@ let gateMirror = new Float32Array(MAX_GATES).fill(-1);
 
 const params = new ArrayBuffer(144);
 const pf = new Float32Array(params), pi = new Int32Array(params);
-const cfg = { maxSpeed: 10, accel: 0.05, turnSpeed: 0.02, brakeStrength: 0.05, initialTTL: 750, targetLaps: 3 };
+const cfg = { maxSpeed: 10, accel: 0.05, turnSpeed: 0.01, brakeStrength: 0.01, initialTTL: 750, targetLaps: 3 };
 const trk = { cpN: 0, startCp: 0, zoneN: 0, centerN: 0, gridNx: 0, gridNy: 0, hasGrid: 0, hasBuckets: 0,
               gridCell: 1, gridOx: 0, gridOy: 0, trackLen: 0, wMax: 0, zoneOff: 0, ctrOff: 0, wOff: 0, gsOff: 0, giOff: 0 };
 

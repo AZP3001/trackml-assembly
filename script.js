@@ -334,7 +334,7 @@ const app = {
         // byte-identical to the stash except a small, fixed push on the
         // throttle bias. See NUDGE_TABLE in sim.c.
         nudgeMode: false,
-        physics: { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.02, brakeStrength: 0.05 },
+        physics: { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.01, brakeStrength: 0.01 },
         // Canvas repaint ceiling — 60 or 30, user-settable, see setRenderHz.
         renderHz: RENDER_HZ_DEFAULT,
         tracks: [], currentTrackIndex: 1, cars: [], generation: 1, isRunning: false, speedMultiplier: 1, hyperMode: false,

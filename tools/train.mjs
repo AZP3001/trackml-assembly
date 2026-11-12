@@ -27,7 +27,7 @@ const GENS = Number(opt('--gens', 60));
 const SEEDS = Number(opt('--seeds', 3));
 const QUIET = args.includes('--quiet'), REQUIRE = args.includes('--require-solved');
 const POP = Number(opt('--pop', 150)), ELITE = Number(opt('--elite', 15)), TARGET = Number(opt('--laps', 2)), HIDDEN = Number(opt('--hidden', 4));
-const TURN = Number(opt('--turn', 0.02));
+const TURN = Number(opt('--turn', 0.01)), BRAKE = Number(opt('--brake', 0.01));
 const MUT = [Number(opt('--mut-rate', 0.15)), Number(opt('--sigma', 0.5)), Number(opt('--sigma-floor', 0.05))];
 const FOCUS = Number(opt('--focus', 0)), TTL = Number(opt('--ttl', 750));
 const JSON_OUT = args.includes('--json');
@@ -62,7 +62,7 @@ function setup(def) {
     const zIn = f32(w.zone_in_ptr(), Math.max(1, zones.length * 5));
     zones.forEach((z, i) => { zIn.set([z.x, z.y, z.radius, ZID[z.type] ?? -1, z.killTimer ?? 150], i * 5); });
     const hasStart = def.startPos ? 1 : 0, hasAngle = def.startAngle != null ? 1 : 0;
-    w.set_config(10, 0.05, TURN, 0.05, TTL, TARGET, FOCUS, HIDDEN, 0);
+    w.set_config(10, 0.05, TURN, BRAKE, TTL, TARGET, FOCUS, HIDDEN, 0);
     w.set_mutation(...MUT);
     if (!w.track_build(w.path_in_ptr(), def.path.length, def.width, hasStart, hasStart ? def.startPos.x : 0,
         hasStart ? def.startPos.y : 0, hasAngle, hasAngle ? def.startAngle : 0, w.zone_in_ptr(), zones.length, 0, 0)) {
@@ -113,7 +113,7 @@ function train(def, seed) {
             const o = { elite: ELITE, 'mut-rate': MUT[0], sigma: MUT[1], 'sigma-floor': MUT[2], focus: FOCUS, laps: TARGET, ttl: TTL, ...OPT };
             elite = o.elite; target = o.laps;
             w.set_mutation(o['mut-rate'], o.sigma, o['sigma-floor']);
-            w.set_config(10, 0.05, TURN, 0.05, o.ttl, target, o.focus, HIDDEN, 0);
+            w.set_config(10, 0.05, TURN, BRAKE, o.ttl, target, o.focus, HIDDEN, 0);
         }
         if (best > globalBest) { w.copy_brain(bestIdx, w.stash_slot()); globalBest = best; }
         bests.push(globalBest);
