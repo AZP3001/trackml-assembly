@@ -796,6 +796,22 @@ await page.evaluate(() => { if (app.state.isEditing) editor.cancel(); });
     check(afterB === 60, 'and the 60fps button switches it back', `now ${afterB}fps`);
 }
 
+// --- worker slices ---------------------------------------------------------
+// Cars are dealt across workers rather than cut into blocks (elites sit at the
+// front of the field and drive longest): every car exactly once, interleaved.
+{
+    const r = await page.evaluate(() => {
+        const seen = new Int32Array(app.state.populationSize);
+        let blocks = true;
+        for (const s of Engine.slices) {
+            for (const id of s.ids) seen[id]++;
+            if (s.ids.length > 1 && s.ids[s.ids.length - 1] - s.ids[0] !== s.ids.length - 1) blocks = false;
+        }
+        return { once: seen.every(v => v === 1), interleaved: Engine.slices.length < 2 || !blocks, n: Engine.slices.length };
+    });
+    check(r.once && r.interleaved, 'workers drive interleaved slices covering every car exactly once', `${r.n} workers`);
+}
+
 // --- training profiles --------------------------------------------------------
 // Explore ends a generation at one lap; the first generation that finishes it
 // hands over to Optimize (two laps, fewer elites) by itself, and the buttons
@@ -944,8 +960,7 @@ check(realErrors.length === 0, 'no page errors', realErrors.length ? realErrors.
     // 11 inputs x h, plus h x 2 out, plus h hidden biases and 2 output ones.
     check(m.stride === 11 * d.hidden + d.hidden * 2 + d.hidden + 2,
         'the smaller brain reaches wasm, not just the slider', `stride ${m.stride}`);
-    check(m.workers > 0 && m.workers <= 4 && m.workers <= m.cores,
-        'the worker pool is capped rather than one per logical core',
+    check(m.workers === m.cores, 'a phone uses every core too (slices are sized by measured speed)',
         `${m.workers} of ${m.cores}`);
     check(m.canvasW > 0 && m.canvasW < 1200, 'the canvas rasterises fewer pixels than the world',
         `${m.canvasW}px wide backing store`);

@@ -23,25 +23,25 @@
     <link rel="stylesheet" href="./external/tailwind.css?v=dev">
     <link rel="stylesheet" href="styles.css?v=dev">
 </head>
-<body class="flex flex-col xl:flex-row h-screen w-screen relative" style="height:100dvh">
+<body class="flex flex-col wide:flex-row h-screen w-screen relative" style="height:100dvh">
 
     <div id="sidebar-overlay" data-click="app.closeSidebar"></div>
 
-    <div class="xl:hidden bg-slate-800 px-4 py-3 flex justify-between items-center border-b border-slate-700 z-40 relative shrink-0">
+    <div class="wide:hidden bg-slate-800 px-4 py-3 flex justify-between items-center border-b border-slate-700 z-40 relative shrink-0">
         <h1 class="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent leading-none">TrackML&nbsp;Assembly<span class="text-[9px] text-slate-500 font-normal block leading-tight">WASM backend<span class="version-tag-compact"></span></span></h1>
         <button data-click="app.openSidebar" class="text-slate-300 hover:text-white bg-slate-700 rounded-lg px-3 py-2 flex items-center gap-2 text-sm font-bold">
             <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"></path><circle cx="12" cy="12" r="3"></circle></svg> Settings
         </button>
     </div>
 
-    <div id="sidebar" class="w-full xl:w-80 bg-slate-800 p-4 flex flex-col border-r border-slate-700 overflow-y-auto shrink-0 custom-scrollbar shadow-xl">
-        <div class="xl:hidden flex justify-between items-center mb-4 pb-3 border-b border-slate-700">
+    <div id="sidebar" class="w-full wide:w-80 bg-slate-800 p-4 flex flex-col border-r border-slate-700 overflow-y-auto shrink-0 custom-scrollbar shadow-xl">
+        <div class="wide:hidden flex justify-between items-center mb-4 pb-3 border-b border-slate-700">
             <h1 class="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent leading-none">TrackML&nbsp;Assembly<span class="text-[9px] text-slate-500 font-normal block leading-tight">WASM backend<span class="version-tag-compact"></span></span></h1>
             <button id="sidebar-close-btn" data-click="app.closeSidebar" class="text-slate-400 hover:text-white bg-slate-700 rounded-lg p-2 flex items-center gap-1 text-sm font-bold">
                 <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg> Close
             </button>
         </div>
-        <div class="hidden xl:flex justify-between items-center mb-4">
+        <div class="hidden wide:flex justify-between items-center mb-4">
 		<h1 class="text-2xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent leading-tight">TrackML&nbsp;Assembly
                 <span class="text-[11px] text-slate-500 font-normal block leading-snug tracking-wide">WebAssembly backend &middot; <span id="version-tag">dev build</span></span>
             </h1>
@@ -144,7 +144,7 @@
         </div>
 
         <!-- Desktop Start/Hyper — hidden on mobile (they live in the control bar on mobile) -->
-        <div class="hidden xl:flex gap-2 mb-3">
+        <div class="hidden wide:flex gap-2 mb-3">
             <button id="btn-play" data-click="app.toggleRun" class="flex-1 py-2 rounded-lg font-bold flex items-center justify-center gap-2 transition-all border text-sm bg-emerald-500/20 text-emerald-400 border-emerald-500/50 hover:bg-emerald-500/30">
                 <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> <span>Start</span>
             </button>
@@ -259,14 +259,14 @@
         
         <!-- CONTROL BAR — Start/Hyper/Reset, Gen/Alive, the compact telemetry
              mirror and the lap-times strip all in one bar rather than three
-             stacked ones. The three mobile-only groups (xl:hidden — desktop
+             stacked ones. The three mobile-only groups (wide:hidden — desktop
              has their full versions in the sidebar) can add up to wider than
              a phone screen, so the bar scrolls horizontally as one strip
              instead of wrapping; each group is shrink-0 so it scrolls as a
              unit rather than its contents squeezing. -->
         <div class="flex items-center gap-3 bg-slate-800 p-2 md:p-3 rounded-xl border border-slate-700 shrink-0 shadow-lg z-10 overflow-x-auto">
             <!-- Start/Hyper/Reset: mobile only (desktop has them in sidebar) -->
-            <div class="flex items-center gap-2 xl:hidden shrink-0">
+            <div id="run-controls-m" class="flex items-center gap-2 wide:hidden shrink-0">
                 <button id="btn-play-m" data-click="app.toggleRun" class="px-3 py-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-all border text-sm bg-emerald-500/20 text-emerald-400 border-emerald-500/50 hover:bg-emerald-500/30">
                     <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> <span>Start</span>
                 </button>
@@ -277,7 +277,7 @@
                     <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>
                 </button>
             </div>
-            <div class="w-px h-8 bg-slate-700 shrink-0 xl:hidden"></div>
+            <div class="w-px h-8 bg-slate-700 shrink-0 wide:hidden"></div>
             <!-- Gen + Alive: always visible -->
             <div class="flex items-center gap-4 shrink-0">
                 <div class="flex flex-col items-end">
@@ -296,8 +296,8 @@
                  sidebar. Mirrors the full telemetry panel in the sidebar
                  (same ids with -m) rather than replacing it — desktop
                  already has that one always on screen. -->
-            <div class="w-px h-8 bg-slate-700 shrink-0 xl:hidden"></div>
-            <div id="tel-panel-m" class="xl:hidden flex items-center gap-3 shrink-0">
+            <div class="w-px h-8 bg-slate-700 shrink-0 wide:hidden"></div>
+            <div id="tel-panel-m" class="wide:hidden flex items-center gap-3 shrink-0">
                 <span id="telemetry-label-m" class="text-[9px] text-slate-500 uppercase tracking-wide font-bold shrink-0 truncate max-w-[70px]">Live</span>
                 <div class="flex items-center gap-1 shrink-0">
                     <span class="text-[9px] text-slate-500">Str</span>
@@ -319,8 +319,8 @@
             </div>
 
             <!-- LAP TIMES: mobile only -->
-            <div class="w-px h-8 bg-slate-700 shrink-0 xl:hidden"></div>
-            <div id="lap-panel" class="xl:hidden flex items-center gap-3 shrink-0">
+            <div class="w-px h-8 bg-slate-700 shrink-0 wide:hidden"></div>
+            <div id="lap-panel" class="wide:hidden flex items-center gap-3 shrink-0">
                 <div class="flex flex-col shrink-0">
                     <span class="text-[9px] text-slate-500 uppercase tracking-wide font-bold leading-none mb-0.5">Best</span>
                     <span id="stat-all-best-m" class="text-sm font-mono text-purple-400 leading-none">--</span>
@@ -478,7 +478,7 @@
             </div>
         </div>
 
-        <div class="h-28 md:h-36 bg-slate-800 rounded-xl p-2 border border-slate-700 shrink-0 relative hidden xl:flex gap-2">
+        <div id="chart-panel" class="h-28 md:h-36 bg-slate-800 rounded-xl p-2 border border-slate-700 shrink-0 relative hidden wide:flex gap-2">
             <canvas id="fitness-chart" class="block flex-1 h-full min-w-0"></canvas>
             <div class="w-44 shrink-0 h-full overflow-y-auto border-l border-slate-700 pl-2" title="Average fitness change per generation, over the last 1/10/100 generations">
                 <table class="w-full text-[9px] leading-tight">

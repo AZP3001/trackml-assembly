@@ -97,8 +97,15 @@ to find them. Together, on the same work: **2.0x** on the SIMD module, **1.8x** 
 
 Threads inside one wasm instance need `SharedArrayBuffer`, which needs `COOP`/`COEP` response
 headers, which GitHub Pages cannot send. So instead each worker gets its **own** instance with its
-own memory and a contiguous slice of the population. Cars never interact, so the partition is exact,
-it scales across cores the same way, and it needs no special headers.
+own memory and its own slice of the population. Cars never interact, so the partition is exact,
+it scales across cores the same way, and it needs no special headers. Every logical core gets a
+worker, on phones and tablets too.
+
+What runs at the same time: every worker steps its own cars in parallel; the main thread sends the
+next round *before* it draws the last one, so painting overlaps simulation; and breeding (on the
+main thread's own wasm instance) is a fraction of a millisecond once per generation. A browser
+can't pin a thread to a particular core, so "which work goes to which core" is decided the way
+it can be: by how much work each worker is handed.
 
 The slices are **not equal**. Every round ends at a barrier — nothing is drawn or bred until the
 last worker reports — so on cores of different speeds an equal split means everyone waits for the
@@ -106,8 +113,16 @@ slowest, and a phone's little cores are a third the speed of its big ones. Each 
 `run` and reports the exact number of car-steps it did, which gives a real throughput figure rather
 than one distorted by how many of its cars happened to still be alive; the master keeps a rolling
 average of it and resizes the slices at each generation boundary, where every worker is idle and
-about to be handed a fresh slice anyway. Before any timings exist this is exactly the old even
-split.
+about to be handed a fresh slice anyway. Before any timings exist the split is even. That is also
+why every core is used: a little core gets a little slice and finishes with the rest, so it adds
+throughput rather than setting the pace.
+
+The slices are also **dealt**, not cut into blocks. Breeding puts the elites — the cars that drive
+the longest — at the front of the field, so worker 0 used to be left driving them while every other
+core sat idle at the barrier. Each car now goes to the worker furthest below its speed-weighted
+share, which interleaves the field. Measured over a training run with four workers in hyper mode,
+core utilisation went from 57-74% to 74-81% on the harder tracks (The Snake, Neon District,
+Monaco).
 
 ### Changing the pool mid-race
 
@@ -359,15 +374,12 @@ slider with the same range, and every one can be pushed back up.
 | Elite Clones | 30 → 9 | **15 → 5** (Explore → Optimize) |
 | Hidden Layers | 4 | 4 |
 
-Underneath those, three things the sliders don't show:
+Underneath those, two things the sliders don't show:
 
-* **The worker pool is capped**, at roughly the fast half of the reported cores and never more than
-  four. `navigator.hardwareConcurrency` counts logical cores, and on a phone that count is a lie
-  about what they are worth: eight cores usually means four fast and four slow, differing by a
-  factor of three. Every round ends at a barrier, so a slice handed to a slow core sets the pace for
-  the whole pool — past a point, *adding* cores makes it slower. Each worker also carries its own
-  wasm instance, which is memory a tab does not have to spare and heat a phone cannot shed. The core
-  readout in the sidebar shows both numbers ("4/8 Cores") when they differ.
+* **Held sideways, it's the desktop layout**: settings in a panel beside the track instead of a
+  drawer over it — any landscape screen 640px or wider (an iPad, or a phone on its side). On a phone
+  held sideways the panel is narrower, the chart row is left out to keep the track tall, and
+  Start / Hyper / Reset stay above the track. Portrait keeps the drawer.
 * **The canvas rasterises fewer pixels**, sized to the display rather than to the 1200x900 world —
   see the rendering note under Simulation Control. Desktop is untouched.
 

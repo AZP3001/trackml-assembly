@@ -48,29 +48,15 @@ function simdSupported() {
     try { return WebAssembly.validate(SIMD_PROBE); } catch (e) { return false; }
 }
 
-// How many workers to spawn.
+// How many workers to spawn: every logical core, on every device.
 //
-// hardwareConcurrency is a count of logical cores, and on a phone that count
-// is a lie about what they are worth: an eight-core phone is typically four
-// fast cores and four slow ones, and the two kinds can differ by a factor of
-// three. Every round here ends at a barrier — the main thread cannot draw the
-// frame until the LAST worker reports — so a slice handed to a slow core sets
-// the pace for all of them, and adding those cores makes the whole thing
-// slower, not faster. On top of that each worker carries its own wasm instance,
-// and eight of those on a phone is memory the tab does not have to spare and
-// heat it cannot shed.
-//
-// So on a phone or tablet: roughly the fast half, and never more than four.
-// On a desktop, unchanged — every core, as before.
-function workerCountFor(cores, isMobile) {
-    const n = Math.max(1, cores | 0);
-    if (!isMobile) return n;
-    return Math.max(1, Math.min(4, Math.min(n, Math.ceil(n / 2))));
-}
-// script.js decides what counts as a phone; engine.js is loaded first, so it
-// asks rather than deciding again, and falls back to "desktop" on its own.
-function engineIsMobile() {
-    return typeof IS_MOBILE !== 'undefined' ? !!IS_MOBILE : false;
+// Phones used to get roughly the fast half and never more than four, because
+// with equal slices a slow core set the pace at every round's barrier. Slices
+// are now sized by each worker's measured speed (_sliceUp), so a little core
+// gets a little slice and finishes with the rest — it adds throughput instead
+// of holding everyone back. The CPU Cores slider still goes down to 1.
+function workerCountFor(cores) {
+    return Math.max(1, cores | 0);
 }
 
 const CORE_ICON_SVG = '<svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v2"></path><path d="M12 2v2"></path><path d="M17 20v2"></path><path d="M17 2v2"></path><path d="M2 12h2"></path><path d="M2 17h2"></path><path d="M2 7h2"></path><path d="M20 12h2"></path><path d="M20 17h2"></path><path d="M20 7h2"></path><path d="M7 20v2"></path><path d="M7 2v2"></path><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="8" y="8" width="8" height="8" rx="1"></rect></svg>';
@@ -80,7 +66,7 @@ const Engine = {
     master: null,        // { exports, memory } on the main thread
     workers: [],
     coreCount: 1,
-    slices: [],          // { start, count } per worker
+    slices: [],          // { ids, count, start } per worker: the global car ids it drives
     _ready: null,
     _runState: null,
     _pendingCoreLabel: '',
@@ -112,7 +98,7 @@ const Engine = {
             this.master = await this._instantiate();
 
             this.hardwareCores = navigator.hardwareConcurrency || 4;
-            this.coreCount = workerCountFor(this.hardwareCores, engineIsMobile());
+            this.coreCount = workerCountFor(this.hardwareCores);
             this._target = { mode: 'cpu', cores: this.coreCount };
 
             this.workers = await this._spawnPool('cpu', this.coreCount, 0);
@@ -301,8 +287,9 @@ const Engine = {
                 for (const e of exported) if (e.gateRatio) this._lastGateRatio = e.gateRatio;
             }
             if (this._popSize > 0) {
+                const oldSlices = this.slices;
                 this._sliceUp();
-                if (fresh) this._shipBrains(); else this._importState(exported);
+                if (fresh) this._shipBrains(); else this._importState(exported, oldSlices);
             }
         } finally {
             this._openGate();
@@ -343,19 +330,24 @@ const Engine = {
 
     // Hand each worker of the (already re-sliced) pool its cars: the brains
     // and focus window are the master's for this generation, the car state is
-    // whatever the old pool exported, reassembled in car-id order.
-    _importState: function(exported) {
+    // whatever the old pool exported, reassembled in car-id order through the
+    // slicing the old pool was given.
+    _importState: function(exported, oldSlices) {
         const ex = this.master.ex;
         const W = ex.state_words();
         const all = new Uint32Array(this._popSize * W);
-        for (const e of exported) if (e.count > 0) all.set(e.state.subarray(0, e.count * W), e.start * W);
+        for (const e of exported) {
+            const ids = oldSlices[e.index] && oldSlices[e.index].ids;
+            if (!ids) continue;
+            for (let j = 0; j < e.count; j++) all.set(e.state.subarray(j * W, (j + 1) * W), ids[j] * W);
+        }
         const stride = ex.brain_stride();
         const brains = this._f32(this.master, ex.brains_ptr(), (ex.max_cars() + 1) * stride);
         this.workers.forEach((w, i) => {
             const s = this.slices[i];
-            const b = brains.slice(s.start * stride, (s.start + s.count) * stride);
-            const state = all.slice(s.start * W, (s.start + s.count) * W);
-            const gateRatio = s.start === 0 && this._lastGateRatio ? this._lastGateRatio.slice() : null;
+            const b = this._gather(brains, s.ids, stride);
+            const state = this._gather(all, s.ids, W);
+            const gateRatio = i === 0 && this._lastGateRatio ? this._lastGateRatio.slice() : null;
             const transfer = [b.buffer, state.buffer];
             if (gateRatio) transfer.push(gateRatio.buffer);
             w.postMessage({
@@ -598,8 +590,7 @@ const Engine = {
         this._rate[data.index] = prev > 0 ? prev + (r - prev) * this._RATE_ALPHA : r;
     },
 
-    // Partition the population across workers. Slices stay contiguous so a
-    // render row's car id is just `sliceStart + i`.
+    // Partition the population across workers.
     //
     // Sized by measured speed rather than equally. Every round ends at a
     // barrier — nothing can be drawn or bred until the LAST worker reports —
@@ -607,7 +598,14 @@ const Engine = {
     // and a phone's little cores are a third the speed of its big ones. Giving
     // each worker a share proportional to how fast it has actually been makes
     // them finish together, which is the only thing the barrier cares about.
-    // Before any timings exist this is exactly the old equal split.
+    // Before any timings exist this is an even split.
+    //
+    // And dealt, not cut into blocks. evolve() puts the elites — the cars that
+    // drive longest — at the front, so contiguous blocks left worker 0 running
+    // long after the others had no cars left: 57-74% core use on the harder
+    // tracks in tools measurement, 74-81% dealt. Each car goes to whichever
+    // worker is furthest below its speed-weighted share, which interleaves the
+    // field and still hands faster cores proportionally more of it.
     _sliceUp: function() {
         const n = this.workers.length || 1;
         const pop = this._popSize;
@@ -621,22 +619,25 @@ const Engine = {
         // Any worker that has not reported yet, or a pool with no timings at
         // all, falls back to an even share for everyone — mixing measured and
         // assumed weights would hand the unmeasured ones whatever was left.
-        if (!(total > 0) || weights.some(w => w === 0)) {
-            for (let i = 0; i < n; i++) weights[i] = 1;
-            total = n;
-        }
+        if (!(total > 0) || weights.some(w => w === 0)) weights.fill(1);
 
-        this.slices = [];
-        let start = 0;
-        for (let i = 0; i < n; i++) {
-            // The last worker takes the remainder, so rounding can never lose
-            // or duplicate a car.
-            const count = i === n - 1
-                ? pop - start
-                : Math.min(pop - start, Math.max(0, Math.round((pop * weights[i]) / total)));
-            this.slices.push({ start, count: Math.max(0, count) });
-            start += count;
+        const ids = Array.from({ length: n }, () => []);
+        for (let k = 0; k < pop; k++) {
+            let best = 0, bestV = Infinity;
+            for (let i = 0; i < n; i++) {
+                const v = (ids[i].length + 1) / weights[i];
+                if (v < bestV) { bestV = v; best = i; }
+            }
+            ids[best].push(k);
         }
+        this.slices = ids.map(a => ({ ids: Int32Array.from(a), count: a.length, start: a.length ? a[0] : 0 }));
+    },
+
+    // Rows `ids` of a flat array of `width`-sized records, packed in order.
+    _gather: function(src, ids, width) {
+        const out = new src.constructor(ids.length * width);
+        for (let j = 0; j < ids.length; j++) out.set(src.subarray(ids[j] * width, (ids[j] + 1) * width), j * width);
+        return out;
     },
 
     // Copy each worker's slice of the brain array out of master memory and send
@@ -651,8 +652,8 @@ const Engine = {
         const allFocused = this._i32(this.master, ex.car_focused_ptr(), ex.max_cars());
         this.workers.forEach((w, i) => {
             const s = this.slices[i];
-            const blob = all.slice(s.start * stride, (s.start + s.count) * stride);
-            const focused = allFocused.slice(s.start, s.start + s.count);
+            const blob = this._gather(all, s.ids, stride);
+            const focused = this._gather(allFocused, s.ids, 1);
             w.postMessage({
                 type: 'pop',
                 start: s.start, count: s.count,
@@ -734,6 +735,8 @@ const Engine = {
         if (!st || data.type !== 'done') return;
         this._noteWorkerTiming(data);
         if (data.gateRatio) this._lastGateRatio = data.gateRatio;
+        // Row i of this worker's results is global car ids[i].
+        data.ids = this.slices[data.index] ? this.slices[data.index].ids : null;
         st.rows.push(data);
         if (++st.completed === st.total) {
             if (this._alignFinish(st)) return;

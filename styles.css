@@ -13,15 +13,23 @@ body { background-color: #0f172a; color: white; overflow: hidden; margin: 0; fon
         #sidebar { transition: transform 0.3s ease-in-out; z-index: 50; }
         #sidebar-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 49; backdrop-filter: blur(2px); }
         #sidebar-overlay.show { display: block; }
-        /* Matches the xl: breakpoint used throughout index.html (1280px) —
-           was 1024px (lg:), which put tablets in landscape (iPad etc, usually
-           1024-1194px wide) into the "desktop" layout: a persistent 320px
-           sidebar plus a fixed-height chart panel, both crammed onto a small
-           screen and leaving little room for the actual track canvas. */
-        @media (max-width: 1279px) {
+        /* The overlay drawer is everything that is NOT `wide:` (tailwind.config.js):
+           narrower than 640px, or portrait below 1280px. Landscape tablets and
+           phones get the desktop side panel instead. */
+        @media (max-width: 639px), (orientation: portrait) and (max-width: 1279px) {
             #sidebar { position: fixed; top: 0; left: 0; height: 100%; height: 100dvh; width: min(85vw, 340px); transform: translateX(-105%); overflow-y: auto; }
             #sidebar.open { transform: translateX(0); box-shadow: 4px 0 30px rgba(0,0,0,0.5); }
         }
-        @media (max-width: 640px) {
+        @media (max-width: 639px) {
             #sidebar { width: 100vw; }
+        }
+        /* A phone on its side: 390-ish px tall. Narrower panel so the track
+           keeps most of the width, and the chart row (which would take a third
+           of the height) stays in the stats panel's place: hidden. */
+        @media (orientation: landscape) and (max-height: 540px) and (min-width: 640px) {
+            #sidebar { width: 15rem; padding: 0.625rem; }
+            #chart-panel { display: none !important; }
+            /* Start/Hyper/Reset stay in reach above the track: the side panel
+               copy is a long scroll away on a screen this short. */
+            #run-controls-m { display: flex !important; }
         }

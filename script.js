@@ -1133,7 +1133,7 @@ const app = {
                 const stride = 18;
                 for(let i=0; i<r.count; i++) {
                     const idx = i * stride;
-                    const c = cars[buf[idx]];
+                    const c = cars[r.ids[i]];
                     if(!c) continue;
                     c.crashed = buf[idx+1] === 1;
                     c.x = buf[idx+2]; c.y = buf[idx+3];
@@ -1149,7 +1149,7 @@ const app = {
                 // field in sim.c cannot silently shift every read by one.
                 const stride = r.stride || 5;
                 for(let i=0; i<r.count; i++) {
-                    const c = cars[r.start + i];
+                    const c = cars[r.ids[i]];
                     if(!c) continue;
                     c.fitness = buf[i*stride];
                     const prevLaps = c.completedLaps;
@@ -1176,8 +1176,9 @@ const app = {
         const sp = this._spectated;
         if(sp) {
             for(const r of st.rows) {
-                if(!r.render || sp.id < r.start || sp.id >= r.start + r.count) continue;
-                const base = (sp.id - r.start) * 18 + 11;
+                const j = r.render ? r.ids.indexOf(sp.id) : -1;
+                if(j < 0) continue;
+                const base = j * 18 + 11;
                 for(let j=0; j<SENSOR_COUNT; j++) sp.sensors[j] = r.buffer[base + j];
                 break;
             }
