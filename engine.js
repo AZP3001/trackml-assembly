@@ -383,7 +383,7 @@ const Engine = {
         // Wall time since the previous round landed (or this round's own
         // duration after a gap, so a pause is never counted as running time).
         const gap = this._tpLast && now - this._tpLast < 1000 ? now - this._tpLast : ms;
-        this._noteBench(steps, gap);
+        this._noteBench(steps, gap, st.gen, st.wantRender);
         if (!this._tpT0 || st.t0 - this._tpLast > 1000) { this._tpT0 = st.t0; this._tpSteps = 0; }
         this._tpSteps += steps;
         this._tpLast = now;
@@ -395,25 +395,31 @@ const Engine = {
         }
     },
 
-    // Benchmark of the current run: averages over the whole run, its first
-    // 100 s and 100-1000 s of running time, and one car-steps/s sample per
-    // second for the graph (the last 1000). Restarted by resetBench() whenever
-    // what is being measured changes (new run, track, hyper toggle, pool).
+    // CPU benchmark of the current run, Hyper mode only (at 1x the rate is just
+    // 60 steps a second per car): car-steps/s averaged over the whole run and
+    // over generations 1-100, 100-1000 and 1000+, plus one sample per
+    // generation for the graph (the last 1000). app.evolve() calls
+    // benchGenEnd(); resetBench() starts over when the setup being measured
+    // changes (new run, track, CPU/GPU pool).
     bench: null,
     resetBench: function() {
-        this.bench = { ms: 0, steps: 0, win: [[0, 0], [0, 0]], samples: [], secSteps: 0, secMs: 0 };
+        this.bench = { ms: 0, steps: 0, gens: 0, win: [[0, 0], [0, 0], [0, 0]], samples: [], sampleGen: [], genSteps: 0, genMs: 0 };
     },
-    _noteBench: function(steps, ms) {
+    _noteBench: function(steps, ms, gen, wantRender) {
+        if (wantRender) return;
         const b = this.bench || (this.resetBench(), this.bench);
-        const w = b.ms < 100000 ? b.win[0] : b.ms < 1000000 ? b.win[1] : null;
-        if (w) { w[0] += steps; w[1] += ms; }
+        const w = b.win[gen <= 100 ? 0 : gen <= 1000 ? 1 : 2];
+        w[0] += steps; w[1] += ms;
         b.steps += steps; b.ms += ms;
-        b.secSteps += steps; b.secMs += ms;
-        if (b.secMs >= 1000) {
-            b.samples.push(b.secSteps * 1000 / b.secMs);
-            if (b.samples.length > 1000) b.samples.shift();
-            b.secSteps = 0; b.secMs = 0;
-        }
+        b.genSteps += steps; b.genMs += ms;
+    },
+    benchGenEnd: function(gen) {
+        const b = this.bench;
+        if (!b || !(b.genMs > 0)) return;
+        b.samples.push(b.genSteps * 1000 / b.genMs); b.sampleGen.push(gen);
+        if (b.samples.length > 1000) { b.samples.shift(); b.sampleGen.shift(); }
+        b.gens++;
+        b.genSteps = 0; b.genMs = 0;
     },
 
     // A wasm instance's memory can be detached and replaced when it grows, so a
@@ -702,14 +708,15 @@ const Engine = {
     // previous results before asking for the next ones.
     _spare: [],
 
-    run: function(iters, wantRender) {
+    // `gen` only labels the round for the benchmark.
+    run: function(iters, wantRender, gen) {
         // A pool reshape is swapping workers; the round starts on the new ones.
-        if (this._gate) return this._gate.promise.then(() => this.run(iters, wantRender));
+        if (this._gate) return this._gate.promise.then(() => this.run(iters, wantRender, gen));
         return new Promise(resolve => {
             this._runState = {
                 completed: 0, total: this.workers.length,
                 maxLaps: 0, allCrashed: true, wantRender, resolve,
-                rows: [], t0: performance.now()
+                rows: [], t0: performance.now(), gen: gen | 0
             };
             for (let i = 0; i < this.workers.length; i++) {
                 const spare = this._spare[i];

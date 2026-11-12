@@ -137,12 +137,13 @@ within a frame or two. `tools/statemigrate.mjs` holds it to byte-identical: cars
 instance, or split across two, finish exactly where an instance that never moved them does.
 
 **As a CPU benchmark.** Under the car-steps/s readout (Settings → Compute Engine) the run is also
-averaged: over the whole run, its first 100 seconds and 100–1000 s of running time, with a graph of
-one sample per second (the dashed line marks 100 s). Run it in **Hyper** mode — at 1x the number is
-just 60 steps a second per car. Pauses aren't counted, and it starts over on Reset, a new track,
-toggling Hyper, or changing CPU cores / GPU, so every reading measures one setup. The 0–100 s figure
-includes warm-up; 100–1000 s is the sustained number, after a phone or laptop has had time to heat up
-and throttle.
+averaged, counting **Hyper mode only** (at 1x the number is just 60 steps a second per car): over the
+whole run and over generations 1–100, 100–1000 and 1000+, with a graph of one point per generation
+(the dashed line marks generation 100). Early generations are short and mostly crashes, so they
+measure overhead as much as raw speed; the later windows are the sustained number, after a phone or
+laptop has had time to heat up and throttle. It starts over on Reset, a new track, or changing CPU
+cores / GPU; leaving Hyper only pauses it. For comparing devices, use the same track, Pop Size and
+core count.
 
 At 1x speed the race is paced by wall-clock time — a fixed 60 steps a second (`clock.js`), on a 30,
 60 or 120 Hz screen alike and whatever the repaint cap — so a faster backend doesn't make it visibly

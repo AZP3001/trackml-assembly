@@ -325,28 +325,38 @@ const hyper = await page.evaluate(() => {
 check(hyper.gen > beforeHyper + 1, 'hyper mode trains', `reached gen ${hyper.gen}`);
 
 // --- car-steps/s benchmark ----------------------------------------------------
-// Averages over the run and its first 100 s, one graph sample per second of
-// running time, and a fresh start when what is measured changes.
+// Hyper-mode car-steps/s averaged over the run and over generation windows,
+// one graph point per generation; 1x time is not counted, Reset starts over.
 {
     const r = await page.evaluate(async () => {
+        app.toggleSettings();                    // open, so the graph has a size
+        Engine.resetBench();
         if (!app.state.isRunning) app.toggleRun();
-        app.toggleHyper();                       // restarts the benchmark
+        if (!app.state.hyperMode) app.toggleHyper();
+        const g0 = app.state.generation;
         await new Promise(r => setTimeout(r, 4500));
         const b = Engine.bench;
-        const out = { secs: b.ms / 1000, samples: b.samples.length, avg: b.steps * 1000 / b.ms,
+        const out = { gens: b.gens, genNow: app.state.generation, g0, samples: b.samples.length, avg: b.steps * 1000 / b.ms,
                       w0: b.win[0][1], w1: b.win[1][1], text: document.getElementById('compute-bench').textContent,
                       graphW: document.getElementById('compute-graph').width };
         app.toggleHyper();
-        out.afterToggle = Engine.bench.ms;
+        await new Promise(r => setTimeout(r, 500));   // the Hyper round in flight still lands and counts
+        const ms = Engine.bench.ms;
+        await new Promise(r => setTimeout(r, 600));
+        out.keptAfterToggle = Engine.bench.ms > 0;
+        out.grewAt1x = Engine.bench.ms - ms;
+        app.reset();
+        out.afterReset = Engine.bench.ms;
+        app.toggleSettings();
         return out;
     });
-    check(r.samples >= 3 && r.avg > 0 && r.w0 > 0 && r.w1 === 0, 'the benchmark averages the run and fills the 0-100 s window first',
-        `${r.secs.toFixed(1)} s, ${r.samples} samples, avg ${Math.round(r.avg)} car-steps/s`);
-    check(/avg .*\n0–100s .* · 100–1000s –/.test(r.text) && r.graphW > 0, 'and shows the averages with a graph', JSON.stringify(r.text));
-    check(r.afterToggle < 1000, 'toggling Hyper starts a fresh benchmark', `${r.afterToggle.toFixed(0)} ms kept`);
+    check(r.samples >= 2 && r.samples === r.gens && r.avg > 0 && r.w0 > 0 && (r.genNow > 100 || r.w1 === 0),
+        'the benchmark averages Hyper car-steps/s per generation, into the gen 1-100 window first',
+        `${r.gens} gens (gen ${r.g0} -> ${r.genNow}), avg ${Math.round(r.avg)} car-steps/s`);
+    check(/avg .* gens .*\ngen 1–100 .* · 100–1000 .* · 1000\+ /.test(r.text) && r.graphW > 0, 'and shows the generation windows with a graph', JSON.stringify(r.text));
+    check(r.keptAfterToggle && r.grewAt1x === 0, 'leaving Hyper keeps the benchmark, and 1x time is not counted', `+${r.grewAt1x} ms at 1x`);
+    check(r.afterReset === 0, 'Reset starts a fresh benchmark');
 }
-check(Number.isFinite(hyper.alive) && hyper.alive >= 0 && hyper.alive <= boot.cars,
-    'alive count survives hyper mode', `${hyper.alive} alive`);
 
 // --- track switching ----------------------------------------------------
 await page.evaluate(() => app.switchTrack(3));

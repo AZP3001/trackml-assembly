@@ -25,7 +25,7 @@ const SETTING_DESCRIPTIONS = {
     hiddenLayers: "Brain complexity. More layers = smarter but heavier computation.",
     initialTTL: "Time to Live. Frames allowed before death if no checkpoint is reached.",
     targetLaps: "Laps needed to trigger the next generation automatically.",
-    bench: "A CPU benchmark of the current run: average car-steps per second overall, over its first 100 seconds and over 100-1000 s, with one graph point per second (dashed line: 100 s). Run it in Hyper mode — at 1x the number is just 60 steps a second per car. Restarts on Reset, a new track, toggling Hyper, or changing CPU cores / GPU.",
+    bench: "A CPU benchmark of the current run, counted in Hyper mode only (at 1x the number is just 60 steps a second per car): average car-steps per second overall and over generations 1-100, 100-1000 and 1000+, with one graph point per generation (dashed line: generation 100). Restarts on Reset, a new track, or changing CPU cores / GPU.",
     profile: "Explore: get round the track at all — a generation ends at the first finished lap, with wide mutations. Optimize: cut lap time — more laps per generation, small careful mutations, more elites. Explore hands over to Optimize by itself the first time a car finishes; a new track or Reset goes back to Explore.",
     maxSpeed: "Top speed. Higher speeds require faster AI reaction times.",
     acceleration: "Engine power.", turnSpeed: "Steering sensitivity. Cars turn tightest at low speed and lose authority as they speed up, same as a real car's grip limit.",
@@ -1015,6 +1015,7 @@ const app = {
         let s10 = 0; for(let i=0; i<n10; i++) s10 += sorted[n - 1 - i];
         const top1 = s1 / n1, top10 = s10 / n10;
 
+        Engine.benchGenEnd(this.state.generation);
         const res = Engine.evolve(fitness, this.state.eliteClones, sigmaGen);
         this.state.globalBest = { fitness: res.globalBest };
 
@@ -1237,7 +1238,7 @@ const app = {
         const iters = hyper ? HYPER_CHUNK : SimClock.take() * this.state.speedMultiplier;
         if(iters <= 0) return false;
         this._pendingToken = this._runToken;
-        this._pending = Engine.run(iters, !hyper);
+        this._pending = Engine.run(iters, !hyper, this.state.generation);
         return true;
     },
 
@@ -1523,7 +1524,6 @@ const app = {
     },
     toggleHyper: function() { 
         this.state.hyperMode = !this.state.hyperMode; 
-        Engine.resetBench();
         const active = this.state.hyperMode;
         [ui.btnHyper, ui.btnHyperM].forEach(btn => {
             if(!btn) return;
@@ -1792,30 +1792,36 @@ const app = {
 
     _drawBench: function() {
         const b = Engine.bench;
+        const has = b && b.ms > 0;
         if(ui.computeBench) {
-            if(!b || !(b.ms > 0)) ui.computeBench.textContent = '';
+            if(!has) ui.computeBench.textContent = 'CPU benchmark: start Hyper mode';
             else {
-                const sec = b.ms / 1000;
                 const avg = (w) => w[1] > 0 ? formatRate(w[0] * 1000 / w[1]) : '–';
+                const g = this.state.generation, cur = (lo, hi) => g > lo && g <= hi ? '…' : '';
+                const sec = Math.floor(b.ms / 1000);
                 ui.computeBench.textContent =
-                    `avg ${formatRate(b.steps * 1000 / b.ms)} · ${Math.floor(sec)}s${this.state.hyperMode ? '' : ' · use Hyper to benchmark'}\n` +
-                    `0–100s ${avg(b.win[0])}${sec < 100 ? '…' : ''} · 100–1000s ${avg(b.win[1])}${sec >= 100 && sec < 1000 ? '…' : ''}`;
-                ui.computeBench.style.whiteSpace = 'pre';
+                    `avg ${formatRate(b.steps * 1000 / b.ms)} · ${b.gens} gens · ${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s${this.state.hyperMode ? '' : ' (Hyper only)'}\n` +
+                    `gen 1–100 ${avg(b.win[0])}${cur(0, 100)} · 100–1000 ${avg(b.win[1])}${cur(100, 1000)} · 1000+ ${avg(b.win[2])}${cur(1000, Infinity)}`;
             }
         }
         const cv = ui.computeGraph;
-        if(!cv || !cv.clientWidth) return;
+        if(!cv || !cv.clientWidth) return;   // settings collapsed: drawn when opened
         const dpr = window.devicePixelRatio || 1, W = Math.round(cv.clientWidth * dpr), H = Math.round(cv.clientHeight * dpr);
         if(cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
         const g = cv.getContext('2d');
         g.clearRect(0, 0, W, H);
-        const s = b ? b.samples : [];
-        if(s.length < 2) return;
+        const s = has ? b.samples : [];
+        if(s.length < 2) {
+            g.fillStyle = '#64748b'; g.font = `${9 * dpr}px monospace`; g.textBaseline = 'middle';
+            g.fillText(has ? 'graph: one point per generation…' : 'graph appears in Hyper mode', 6 * dpr, H / 2);
+            return;
+        }
         const span = Math.max(s.length, 100), max = Math.max(...s) * 1.1 || 1;
         const x = (i) => (i / (span - 1)) * W, y = (v) => H - (v / max) * (H - 2) - 1;
-        if(span > 100) {   // the 100 s mark, once the run has passed it
+        const at100 = b.sampleGen.indexOf(100);
+        if(at100 >= 0) {   // gen 100, where the first window ends
             g.strokeStyle = '#475569'; g.setLineDash([2 * dpr, 2 * dpr]); g.lineWidth = dpr;
-            g.beginPath(); g.moveTo(x(99), 0); g.lineTo(x(99), H); g.stroke(); g.setLineDash([]);
+            g.beginPath(); g.moveTo(x(at100), 0); g.lineTo(x(at100), H); g.stroke(); g.setLineDash([]);
         }
         g.strokeStyle = '#34d399'; g.lineWidth = 1.5 * dpr;
         g.beginPath();
@@ -2001,7 +2007,9 @@ const app = {
         });
     },
 
-    toggleSettings: function() { document.getElementById('config-panel').classList.toggle('hidden'); },
+    // Drawn straight away on opening: the benchmark graph can't size itself
+    // while its panel is hidden.
+    toggleSettings: function() { document.getElementById('config-panel').classList.toggle('hidden'); this._drawBench(); },
     closeCodeModal: function() { document.getElementById('code-modal').classList.add('hidden'); },
     dismissBackdrop: function(el, ev) { if(ev.target === el) el.classList.add('hidden'); },
     selectText: function(el) { el.select(); },
