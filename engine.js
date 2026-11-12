@@ -380,6 +380,10 @@ const Engine = {
         for (const r of st.rows) steps += r.carSteps || 0;
         const ms = now - st.t0;
         this.throughput.roundMs = this.throughput.roundMs ? this.throughput.roundMs * 0.8 + ms * 0.2 : ms;
+        // Wall time since the previous round landed (or this round's own
+        // duration after a gap, so a pause is never counted as running time).
+        const gap = this._tpLast && now - this._tpLast < 1000 ? now - this._tpLast : ms;
+        this._noteBench(steps, gap);
         if (!this._tpT0 || st.t0 - this._tpLast > 1000) { this._tpT0 = st.t0; this._tpSteps = 0; }
         this._tpSteps += steps;
         this._tpLast = now;
@@ -388,6 +392,27 @@ const Engine = {
             this.throughput.stepsPerSec = this._tpSteps * 1000 / span;
             this._tpSteps = 0;
             this._tpT0 = now;
+        }
+    },
+
+    // Benchmark of the current run: averages over the whole run, its first
+    // 100 s and 100-1000 s of running time, and one car-steps/s sample per
+    // second for the graph (the last 1000). Restarted by resetBench() whenever
+    // what is being measured changes (new run, track, hyper toggle, pool).
+    bench: null,
+    resetBench: function() {
+        this.bench = { ms: 0, steps: 0, win: [[0, 0], [0, 0]], samples: [], secSteps: 0, secMs: 0 };
+    },
+    _noteBench: function(steps, ms) {
+        const b = this.bench || (this.resetBench(), this.bench);
+        const w = b.ms < 100000 ? b.win[0] : b.ms < 1000000 ? b.win[1] : null;
+        if (w) { w[0] += steps; w[1] += ms; }
+        b.steps += steps; b.ms += ms;
+        b.secSteps += steps; b.secMs += ms;
+        if (b.secMs >= 1000) {
+            b.samples.push(b.secSteps * 1000 / b.secMs);
+            if (b.samples.length > 1000) b.samples.shift();
+            b.secSteps = 0; b.secMs = 0;
         }
     },
 

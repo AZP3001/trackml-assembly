@@ -323,6 +323,28 @@ const hyper = await page.evaluate(() => {
     return { gen: g, alive: app.state.aliveCount };
 });
 check(hyper.gen > beforeHyper + 1, 'hyper mode trains', `reached gen ${hyper.gen}`);
+
+// --- car-steps/s benchmark ----------------------------------------------------
+// Averages over the run and its first 100 s, one graph sample per second of
+// running time, and a fresh start when what is measured changes.
+{
+    const r = await page.evaluate(async () => {
+        if (!app.state.isRunning) app.toggleRun();
+        app.toggleHyper();                       // restarts the benchmark
+        await new Promise(r => setTimeout(r, 4500));
+        const b = Engine.bench;
+        const out = { secs: b.ms / 1000, samples: b.samples.length, avg: b.steps * 1000 / b.ms,
+                      w0: b.win[0][1], w1: b.win[1][1], text: document.getElementById('compute-bench').textContent,
+                      graphW: document.getElementById('compute-graph').width };
+        app.toggleHyper();
+        out.afterToggle = Engine.bench.ms;
+        return out;
+    });
+    check(r.samples >= 3 && r.avg > 0 && r.w0 > 0 && r.w1 === 0, 'the benchmark averages the run and fills the 0-100 s window first',
+        `${r.secs.toFixed(1)} s, ${r.samples} samples, avg ${Math.round(r.avg)} car-steps/s`);
+    check(/avg .*\n0–100s .* · 100–1000s –/.test(r.text) && r.graphW > 0, 'and shows the averages with a graph', JSON.stringify(r.text));
+    check(r.afterToggle < 1000, 'toggling Hyper starts a fresh benchmark', `${r.afterToggle.toFixed(0)} ms kept`);
+}
 check(Number.isFinite(hyper.alive) && hyper.alive >= 0 && hyper.alive <= boot.cars,
     'alive count survives hyper mode', `${hyper.alive} alive`);
 

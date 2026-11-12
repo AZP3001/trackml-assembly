@@ -136,6 +136,14 @@ hand-over pauses the race — a message round trip, typically a few milliseconds
 within a frame or two. `tools/statemigrate.mjs` holds it to byte-identical: cars moved to a new
 instance, or split across two, finish exactly where an instance that never moved them does.
 
+**As a CPU benchmark.** Under the car-steps/s readout (Settings → Compute Engine) the run is also
+averaged: over the whole run, its first 100 seconds and 100–1000 s of running time, with a graph of
+one sample per second (the dashed line marks 100 s). Run it in **Hyper** mode — at 1x the number is
+just 60 steps a second per car. Pauses aren't counted, and it starts over on Reset, a new track,
+toggling Hyper, or changing CPU cores / GPU, so every reading measures one setup. The 0–100 s figure
+includes warm-up; 100–1000 s is the sustained number, after a phone or laptop has had time to heat up
+and throttle.
+
 At 1x speed the race is paced by wall-clock time — a fixed 60 steps a second (`clock.js`), on a 30,
 60 or 120 Hz screen alike and whatever the repaint cap — so a faster backend doesn't make it visibly
 faster; the difference shows in hyper mode, and in the **car-steps/s** readout under the slider,

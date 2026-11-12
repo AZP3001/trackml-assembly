@@ -25,6 +25,7 @@ const SETTING_DESCRIPTIONS = {
     hiddenLayers: "Brain complexity. More layers = smarter but heavier computation.",
     initialTTL: "Time to Live. Frames allowed before death if no checkpoint is reached.",
     targetLaps: "Laps needed to trigger the next generation automatically.",
+    bench: "A CPU benchmark of the current run: average car-steps per second overall, over its first 100 seconds and over 100-1000 s, with one graph point per second (dashed line: 100 s). Run it in Hyper mode — at 1x the number is just 60 steps a second per car. Restarts on Reset, a new track, toggling Hyper, or changing CPU cores / GPU.",
     profile: "Explore: get round the track at all — a generation ends at the first finished lap, with wide mutations. Optimize: cut lap time — more laps per generation, small careful mutations, more elites. Explore hands over to Optimize by itself the first time a car finishes; a new track or Reset goes back to Explore.",
     maxSpeed: "Top speed. Higher speeds require faster AI reaction times.",
     acceleration: "Engine power.", turnSpeed: "Steering sensitivity. Cars turn tightest at low speed and lose authority as they speed up, same as a real car's grip limit.",
@@ -393,6 +394,8 @@ const app = {
         ui.btnFps60     = $('btn-fps-60');
         ui.btnFollowCar = $('btn-follow-car');
         ui.computeRate  = $('compute-rate');
+        ui.computeBench = $('compute-bench');
+        ui.computeGraph = $('compute-graph');
         this._syncRenderHzUI();
         this._syncFollowCarUI();
         // Apply the pending Engine core label now that the element is cached
@@ -789,7 +792,7 @@ const app = {
             await Engine.ready();
             if(ui.coreCount && Engine._pendingCoreLabel) ui.coreCount.innerHTML = Engine._pendingCoreLabel;
             this._initCoreCountSlider();
-            Engine.onPoolChange = () => this._syncComputeUI();
+            Engine.onPoolChange = () => { Engine.resetBench(); this._syncComputeUI(); };
             this._syncComputeUI();
             this.resetTracks();
             this.initChart();
@@ -1520,6 +1523,7 @@ const app = {
     },
     toggleHyper: function() { 
         this.state.hyperMode = !this.state.hyperMode; 
+        Engine.resetBench();
         const active = this.state.hyperMode;
         [ui.btnHyper, ui.btnHyperM].forEach(btn => {
             if(!btn) return;
@@ -1583,6 +1587,7 @@ const app = {
 
     reset: function() {
         this.setProfile('explore');
+        Engine.resetBench();
         this.state.isRunning=false; this.state.generation=1; this.state.stats=[];
         this.state.bestTimes={gen:null,all:null}; this.state.lapHistory=[]; this.state.spectateCarId=null;
         this._statRes = 1; this._recent = [];
@@ -1781,7 +1786,41 @@ const app = {
             ui.computeRate.textContent = this.state.isRunning && tp.stepsPerSec > 0
                 ? `${formatRate(tp.stepsPerSec)} car-steps/s · ${tp.roundMs.toFixed(1)} ms/round`
                 : 'Start the race to measure throughput';
+            this._drawBench();
         }
+    },
+
+    _drawBench: function() {
+        const b = Engine.bench;
+        if(ui.computeBench) {
+            if(!b || !(b.ms > 0)) ui.computeBench.textContent = '';
+            else {
+                const sec = b.ms / 1000;
+                const avg = (w) => w[1] > 0 ? formatRate(w[0] * 1000 / w[1]) : '–';
+                ui.computeBench.textContent =
+                    `avg ${formatRate(b.steps * 1000 / b.ms)} · ${Math.floor(sec)}s${this.state.hyperMode ? '' : ' · use Hyper to benchmark'}\n` +
+                    `0–100s ${avg(b.win[0])}${sec < 100 ? '…' : ''} · 100–1000s ${avg(b.win[1])}${sec >= 100 && sec < 1000 ? '…' : ''}`;
+                ui.computeBench.style.whiteSpace = 'pre';
+            }
+        }
+        const cv = ui.computeGraph;
+        if(!cv || !cv.clientWidth) return;
+        const dpr = window.devicePixelRatio || 1, W = Math.round(cv.clientWidth * dpr), H = Math.round(cv.clientHeight * dpr);
+        if(cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+        const g = cv.getContext('2d');
+        g.clearRect(0, 0, W, H);
+        const s = b ? b.samples : [];
+        if(s.length < 2) return;
+        const span = Math.max(s.length, 100), max = Math.max(...s) * 1.1 || 1;
+        const x = (i) => (i / (span - 1)) * W, y = (v) => H - (v / max) * (H - 2) - 1;
+        if(span > 100) {   // the 100 s mark, once the run has passed it
+            g.strokeStyle = '#475569'; g.setLineDash([2 * dpr, 2 * dpr]); g.lineWidth = dpr;
+            g.beginPath(); g.moveTo(x(99), 0); g.lineTo(x(99), H); g.stroke(); g.setLineDash([]);
+        }
+        g.strokeStyle = '#34d399'; g.lineWidth = 1.5 * dpr;
+        g.beginPath();
+        s.forEach((v, i) => i ? g.lineTo(x(i), y(v)) : g.moveTo(x(i), y(v)));
+        g.stroke();
     },
 
     updateLapHistory: function() {
@@ -2027,6 +2066,7 @@ const app = {
     
     switchTrack: function(i) {
         i = parseInt(i); if (i < 0 || i >= this.state.tracks.length) i = 0;
+        Engine.resetBench();
         this.state.currentTrackIndex = i; this.state.isRunning = false; this.state.generation = 1; this.state.globalBest = null; this.state.stats = []; this.state.spectateCarId = null; this.updateChart();
         // A different track means a different question of "has this been
         // lapped yet" — the whole point of settling the mutation-rate decay
