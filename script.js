@@ -1234,6 +1234,8 @@ const app = {
                     if(st.maxLaps >= this.state.targetLaps) this._finishFrame = this._genFrames;
                     this._genFrames = 0;
                     this.evolve();
+                    // Skip Gen: that generation is done; wait at the next one's start.
+                    if(this._stepping) { this._stepping = false; if(this.state.isRunning) this.toggleRun(); this._needsDraw = true; }
                 }
             } else {
                 for(const r of st.rows) Engine.recycle(r.index, r.buffer.buffer);
@@ -1247,7 +1249,7 @@ const app = {
         if(iters <= 0) return false;
         this._lastIters = iters;
         this._pendingToken = this._runToken;
-        this._pending = Engine.run(iters, !hyper, this.state.generation);
+        this._pending = Engine.run(iters, !this.state.hyperMode, this.state.generation);
         return true;
     },
 
@@ -1268,6 +1270,16 @@ const app = {
         return left > 0 ? Math.min(HYPER_CHUNK, left) : 250;
     },
 
+    // Skip Gen: run the current generation to its end at full speed, breed the
+    // next one and pause at its start — one generation per press. Pressed while
+    // racing, it finishes the generation in progress and pauses there.
+    _stepping: false,
+    stepGeneration: function() {
+        if(this.state.isEditing || !this.state.cars.length) return;
+        this._stepping = true;
+        if(!this.state.isRunning) this.toggleRun();
+    },
+
     // One chain only: started once from init(), and every pass schedules
     // exactly one successor (even if a round threw), so no setting, toggle or
     // track switch can ever leave two loops racing each other.
@@ -1276,14 +1288,15 @@ const app = {
     loop: async function(rafNow) {
         try {
             const now = typeof rafNow === 'number' ? rafNow : performance.now();
-            const hyper = this.state.hyperMode;
+            // Skip Gen runs at Hyper pace (but keeps drawing) until its generation ends.
+            const hyper = this.state.hyperMode || this._stepping;
             const running = this.state.isRunning && !this.state.isEditing;
             SimClock.advance(now, running && !hyper);
 
             await this._cycle(hyper);
             if(hyper) {
                 const end = performance.now() + this._HYPER_BUDGET_MS;
-                while(this._pending && this.state.hyperMode && performance.now() < end) await this._cycle(true);
+                while(this._pending && (this.state.hyperMode || this._stepping) && performance.now() < end) await this._cycle(true);
             }
 
             this.updateUI();
@@ -1531,6 +1544,7 @@ const app = {
 
     toggleRun: function() { 
         this.state.isRunning = !this.state.isRunning; 
+        if(!this.state.isRunning) this._stepping = false;   // Pause cancels a Skip Gen in progress
         const running = this.state.isRunning;
         const icon = running ? SVG_PAUSE : SVG_PLAY;
         const txt = running ? 'Pause' : 'Start';
@@ -2104,6 +2118,7 @@ const app = {
     switchTrack: function(i) {
         i = parseInt(i); if (i < 0 || i >= this.state.tracks.length) i = 0;
         Engine.resetBench();
+        this._stepping = false;
         this.state.currentTrackIndex = i; this.state.isRunning = false; this.state.generation = 1; this.state.globalBest = null; this.state.stats = []; this.state.spectateCarId = null; this.updateChart();
         // A different track means a different question of "has this been
         // lapped yet" — the whole point of settling the mutation-rate decay

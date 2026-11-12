@@ -324,6 +324,7 @@ than starting near one end of the range.
 ### Simulation Control
 * **Simulation Speed:** Adjust the simulation speed.
 * **Hyper Mode:** Simulates as fast as your PC allows, and draws nothing at all while it does.
+* **Skip Gen:** runs the current generation to its end at Hyper speed (still drawing), breeds the next one and pauses at its start — press again for the next. Learning one generation at a time. Pressed while racing, it finishes the generation in progress and pauses there; Pause cancels it.
 
 The canvas repaints at most 60 times a second by default (a button next to the zoom controls drops it
 to 30), and not at all when nothing has changed — the simulation steps at its fixed 60 Hz either

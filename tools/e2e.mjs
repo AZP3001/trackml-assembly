@@ -444,16 +444,28 @@ check(rejected.length === 0, 'malformed brain files are rejected',
     rejected.length ? 'accepted: ' + rejected.join(', ') : 'all 4 bad files caught');
 
 // --- Skip Gen -----------------------------------------------------------
-// The button calls app.evolve() directly, outside the run loop, which is a
-// path the natural generation rollover above never takes.
-const skipped = await page.evaluate(() => {
+// One press runs the current generation to its natural end, breeds the next
+// one and pauses at its start; app.evolve() is still callable directly.
+const skipped = await page.evaluate(async () => {
+    if (app.state.isRunning) app.toggleRun();
+    if (app.state.hyperMode) app.toggleHyper();
+    await new Promise(r => setTimeout(r, 300));
     const before = app.state.generation;
+    document.querySelector('[data-click="app.stepGeneration"]').click();
+    const t0 = performance.now();
+    while (app.state.generation === before && performance.now() - t0 < 30000) await new Promise(r => setTimeout(r, 20));
+    const ms = performance.now() - t0;
+    await new Promise(r => setTimeout(r, 500));
+    const out = { before, after: app.state.generation, running: app.state.isRunning, ms,
+                  atStart: app.state.cars.every(c => !c.crashed && c.completedLaps === 0), stepping: app._stepping };
     app.evolve();
-    return { before, after: app.state.generation, cars: app.state.cars.length,
-             stats: app.state.stats.length };
+    out.direct = app.state.generation;
+    return out;
 });
-check(skipped.after === skipped.before + 1 && skipped.cars > 0, 'Skip Gen evolves on demand',
-    `gen ${skipped.before} -> ${skipped.after}`);
+check(skipped.after === skipped.before + 1 && !skipped.running && !skipped.stepping && skipped.atStart,
+    'Skip Gen runs one whole generation, then pauses at the start of the next',
+    `gen ${skipped.before} -> ${skipped.after} in ${skipped.ms.toFixed(0)} ms, running=${skipped.running}`);
+check(skipped.direct === skipped.after + 1, 'and evolve() still advances a generation directly');
 
 // --- zones --------------------------------------------------------------
 // Zone types cross into wasm as integer ids rather than the JS edition's
