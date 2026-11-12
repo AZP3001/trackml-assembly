@@ -1829,7 +1829,8 @@ const app = {
                 const sec = Math.floor(b.ms / 1000);
                 ui.computeBench.textContent =
                     `avg ${formatRate(b.steps * 1000 / b.ms)} · ${b.gens} gens · ${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s${this.state.hyperMode ? '' : ' (Hyper only)'}\n` +
-                    `gen 1–100 ${avg(b.win[0])}${cur(0, 100)} · 100–1000 ${avg(b.win[1])}${cur(100, 1000)} · 1000+ ${avg(b.win[2])}${cur(1000, Infinity)}`;
+                    `gen 1–100 ${avg(b.win[0])}${cur(0, 100)} · 100–1000 ${avg(b.win[1])}${cur(100, 1000)} · 1000+ ${avg(b.win[2])}${cur(1000, Infinity)}` +
+                    (b.gens ? `\nnow ${b.recentMs.toFixed(0)} ms/gen · ${formatRate(b.recentSteps)} car-steps/gen` : '');
             }
         }
         const cv = ui.computeGraph;

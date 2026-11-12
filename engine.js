@@ -403,7 +403,7 @@ const Engine = {
     // changes (new run, track, CPU/GPU pool).
     bench: null,
     resetBench: function() {
-        this.bench = { ms: 0, steps: 0, gens: 0, win: [[0, 0], [0, 0], [0, 0]], samples: [], sampleGen: [], genSteps: 0, genMs: 0 };
+        this.bench = { ms: 0, steps: 0, gens: 0, win: [[0, 0], [0, 0], [0, 0]], samples: [], sampleGen: [], genSteps: 0, genMs: 0, recentMs: 0, recentSteps: 0 };
     },
     _noteBench: function(steps, ms, gen, wantRender) {
         if (wantRender) return;
@@ -417,6 +417,10 @@ const Engine = {
         const b = this.bench;
         if (!b || !(b.genMs > 0)) return;
         b.samples.push(b.genSteps * 1000 / b.genMs); b.sampleGen.push(gen);
+        // Smoothed cost of one generation lately: tells "the CPU got slower"
+        // (car-steps/s falls) apart from "generations got longer" (steps/gen rises).
+        const a = b.gens ? 0.1 : 1;
+        b.recentMs += (b.genMs - b.recentMs) * a; b.recentSteps += (b.genSteps - b.recentSteps) * a;
         if (b.samples.length > 1000) { b.samples.shift(); b.sampleGen.shift(); }
         b.gens++;
         b.genSteps = 0; b.genMs = 0;

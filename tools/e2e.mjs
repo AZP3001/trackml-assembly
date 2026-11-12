@@ -353,7 +353,8 @@ check(hyper.gen > beforeHyper + 1, 'hyper mode trains', `reached gen ${hyper.gen
     check(r.samples >= 2 && r.samples === r.gens && r.avg > 0 && r.w0 > 0 && (r.genNow > 100 || r.w1 === 0),
         'the benchmark averages Hyper car-steps/s per generation, into the gen 1-100 window first',
         `${r.gens} gens (gen ${r.g0} -> ${r.genNow}), avg ${Math.round(r.avg)} car-steps/s`);
-    check(/avg .* gens .*\ngen 1–100 .* · 100–1000 .* · 1000\+ /.test(r.text) && r.graphW > 0, 'and shows the generation windows with a graph', JSON.stringify(r.text));
+    check(/avg .* gens .*\ngen 1–100 .* · 100–1000 .* · 1000\+ .*\nnow \d+ ms\/gen · .* car-steps\/gen/.test(r.text) && r.graphW > 0,
+        'and shows the generation windows, the current cost per generation and a graph', JSON.stringify(r.text));
     check(r.keptAfterToggle && r.grewAt1x === 0, 'leaving Hyper keeps the benchmark, and 1x time is not counted', `+${r.grewAt1x} ms at 1x`);
     check(r.afterReset === 0, 'Reset starts a fresh benchmark');
 }
