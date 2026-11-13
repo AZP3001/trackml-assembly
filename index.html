@@ -28,7 +28,7 @@
     <div id="sidebar-overlay" data-click="app.closeSidebar"></div>
 
     <div class="wide:hidden bg-slate-800 px-4 py-3 flex justify-between items-center border-b border-slate-700 z-40 relative shrink-0">
-        <h1 class="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent leading-none">TrackML&nbsp;Assembly<span class="text-[9px] text-slate-500 font-normal block leading-tight">WASM backend<span class="version-tag-compact"></span></span></h1>
+        <h1 data-click="app.reload" title="Reload the page" role="button" class="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent leading-none cursor-pointer">TrackML&nbsp;Assembly<span class="text-[9px] text-slate-500 font-normal block leading-tight">WASM backend<span class="version-tag-compact"></span></span></h1>
         <button data-click="app.openSidebar" class="text-slate-300 hover:text-white bg-slate-700 rounded-lg px-3 py-2 flex items-center gap-2 text-sm font-bold">
             <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"></path><circle cx="12" cy="12" r="3"></circle></svg> Settings
         </button>
@@ -36,13 +36,13 @@
 
     <div id="sidebar" class="w-full wide:w-80 bg-slate-800 p-4 flex flex-col border-r border-slate-700 overflow-y-auto shrink-0 custom-scrollbar shadow-xl">
         <div class="wide:hidden flex justify-between items-center mb-4 pb-3 border-b border-slate-700">
-            <h1 class="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent leading-none">TrackML&nbsp;Assembly<span class="text-[9px] text-slate-500 font-normal block leading-tight">WASM backend<span class="version-tag-compact"></span></span></h1>
+            <h1 data-click="app.reload" title="Reload the page" role="button" class="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent leading-none cursor-pointer">TrackML&nbsp;Assembly<span class="text-[9px] text-slate-500 font-normal block leading-tight">WASM backend<span class="version-tag-compact"></span></span></h1>
             <button id="sidebar-close-btn" data-click="app.closeSidebar" class="text-slate-400 hover:text-white bg-slate-700 rounded-lg p-2 flex items-center gap-1 text-sm font-bold">
                 <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg> Close
             </button>
         </div>
         <div class="hidden wide:flex justify-between items-center mb-4">
-		<h1 class="text-2xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent leading-tight">TrackML&nbsp;Assembly
+		<h1 data-click="app.reload" title="Reload the page" role="button" class="text-2xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent leading-tight cursor-pointer">TrackML&nbsp;Assembly
                 <span class="text-[11px] text-slate-500 font-normal block leading-snug tracking-wide">WebAssembly backend &middot; <span id="version-tag">dev build</span></span>
             </h1>
         </div>
@@ -239,8 +239,8 @@
                     <input id="cfg-acceleration" type="range" min="0.01" max="0.25" step="0.01" value="0.05" data-input="app.updatePhysics|acceleration|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                 <div data-enter="app.showInfo|turnSpeed" data-leave="app.showInfo">
-                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Turn Speed</span><span id="val-turn">0.01</span></label>
-                    <input id="cfg-turnSpeed" type="range" min="0.004" max="0.1" step="0.002" value="0.01" data-input="app.updatePhysics|turnSpeed|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
+                    <label class="text-[10px] text-slate-500 flex justify-between"><span>Turn Speed</span><span id="val-turn">0.02</span></label>
+                    <input id="cfg-turnSpeed" type="range" min="0.004" max="0.1" step="0.002" value="0.02" data-input="app.updatePhysics|turnSpeed|@value" class="w-full h-1 bg-slate-600 rounded cursor-pointer">
                 </div>
                 <div data-enter="app.showInfo|brakeStrength" data-leave="app.showInfo">
                     <label class="text-[10px] text-slate-500 flex justify-between"><span>Brake Strength</span><span id="val-brakeStrength">0.01</span></label>

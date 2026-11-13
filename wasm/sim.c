@@ -998,6 +998,28 @@ float sensor_len(void);
 static i32   *wbs_start;
 static float *b_x1, *b_y1, *b_dx, *b_dy, *b_mx, *b_my, *b_r2, *b_hl;
 
+// A wall outside gate i's along-the-track window that a car heading for gate i
+// could still see or touch, because another pass of the track runs close by.
+//
+// The window is measured along the track, so on its own it is blind sideways:
+// where two passes touch or overlap the barrier between them is trimmed away
+// (it would wall off open road), and a ray through that opening used to carry
+// on to its full length without ever meeting the far wall of the neighbouring
+// pass — that wall belongs to a gate hundreds of pixels of track away. A car
+// that then drifted across found no walls at all there. `reach` is how far
+// from the gate's centre such a car can be, plus the sensor length.
+static i32 bucketExtra(i32 i, i32 wi, i32 nBack, i32 nFwd, i32 segs, float reach) {
+    Wall *wl = &tk_walls[wi];
+    i32 s = wl->seg;
+    if (s < 0 || s >= segs) return 0;                      // undefined: in every bucket already
+    i32 d = ((s - i) % segs + segs) % segs;
+    if (d <= nFwd || d >= segs - nBack) return 0;          // in the window already
+    float mx = (wl->x1 + wl->x2) * 0.5f, my = (wl->y1 + wl->y2) * 0.5f;
+    float hl = hypotf_(wl->x2 - wl->x1, wl->y2 - wl->y1) * 0.5f;
+    float r = reach + hl, dx = mx - tk_cps[i].cx, dy = my - tk_cps[i].cy;
+    return dx * dx + dy * dy <= r * r;
+}
+
 static void buildWallBuckets(void) {
     i32 segs = tk_cp_n;
     if (segs <= 0) { wbs_start = 0; return; }
@@ -1041,6 +1063,12 @@ static void buildWallBuckets(void) {
         if (nBack[i] > segs - 1) nBack[i] = segs - 1;
         if (nFwd[i] > segs - 1) nFwd[i] = segs - 1;
     }
+    // See bucketExtra. A car heading for gate i sits on the road between the
+    // previous gate and this one, so no further from this gate's centre than
+    // that gap plus the widest half-road, with a frame of travel as slack.
+    float *reach = (float *)arena_alloc((u32)segs * 4);
+    if (!reach) { wbs_start = 0; return; }
+    for (i32 i = 0; i < segs; i++) reach[i] = sensor_len() + gap[((i - 1) % segs + segs) % segs] + tk_w_max + 40.0f;
 
     i32 *cnt = (i32 *)arena_alloc((u32)(segs + 1) * 4);
     i32 *bstart = (i32 *)arena_alloc((u32)(segs + 1) * 4);
@@ -1082,6 +1110,7 @@ static void buildWallBuckets(void) {
             i32 seg = ((i + j) % segs + segs) % segs;
             n += cnt[seg];
         }
+        for (i32 k = 0; k < tk_wall_n; k++) n += bucketExtra(i, k, nBack[i], nFwd[i], segs, reach[i]);
         total += (n + 3) & ~3;
     }
     wbs_start[segs] = total;
@@ -1111,6 +1140,13 @@ static void buildWallBuckets(void) {
                 b_dx[w] = wl->x2 - wl->x1; b_dy[w] = wl->y2 - wl->y1;
                 w++;
             }
+        }
+        for (i32 k = 0; k < tk_wall_n; k++) {
+            if (!bucketExtra(i, k, nBack[i], nFwd[i], segs, reach[i])) continue;
+            Wall *wl = &tk_walls[k];
+            b_x1[w] = wl->x1; b_y1[w] = wl->y1;
+            b_dx[w] = wl->x2 - wl->x1; b_dy[w] = wl->y2 - wl->y1;
+            w++;
         }
         while ((w - base) & 3) { b_x1[w] = 0.0f; b_y1[w] = 0.0f; b_dx[w] = 0.0f; b_dy[w] = 0.0f; w++; }
         for (i32 k = base; k < w; k++) {
@@ -2182,7 +2218,19 @@ static void updateCar(i32 i) {
     // safety stop, not an expected limit.
     for (i32 pass = 0; pass < 8 && nCP; pass++) {
         float dx = cx_ - nCP->cx, dy = cy_ - nCP->cy;
-        if (pass == 0 && dx * dx + dy * dy > 160000.0f) { car_crashed[i] = 1; return; }  // off course
+        // Off course. A car heading for this gate belongs on the road between
+        // the previous gate and this one, so it is never further from this
+        // gate's centre than that gap plus the widest half-road (and a frame
+        // of travel). Beyond that it has left its stretch — typically across
+        // onto a neighbouring pass of the track where two run side by side —
+        // and its wall bucket (buildWallBuckets, same bound) no longer covers
+        // where it is. This was a flat 400px, which let such a car drive on
+        // blind, through walls it was never handed, until its TTL ran out.
+        if (pass == 0) {
+            Checkpoint *pv = &tk_cps[(nxt - 1 + tk_cp_n) % tk_cp_n];
+            float far = hypotf_(nCP->cx - pv->cx, nCP->cy - pv->cy) + tk_w_max + 40.0f + speed;
+            if (dx * dx + dy * dy > far * far) { car_crashed[i] = 1; return; }
+        }
 
         float mx = (nCP->p1x + nCP->p2x) * 0.5f, my = (nCP->p1y + nCP->p2y) * 0.5f;
         float cdx = cx_ - mx, cdy = cy_ - my;

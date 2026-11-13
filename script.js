@@ -338,7 +338,7 @@ const app = {
         // byte-identical to the stash except a small, fixed push on the
         // throttle bias. See NUDGE_TABLE in sim.c.
         nudgeMode: false,
-        physics: { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.01, brakeStrength: 0.01 },
+        physics: { maxSpeed: 10, acceleration: 0.05, turnSpeed: 0.02, brakeStrength: 0.01 },
         // Canvas repaint ceiling — 60 or 30, user-settable, see setRenderHz.
         renderHz: RENDER_HZ_DEFAULT,
         tracks: [], currentTrackIndex: 1, cars: [], generation: 1, isRunning: false, speedMultiplier: 1, hyperMode: false,
@@ -2064,6 +2064,9 @@ const app = {
         } catch (e) { /* refused: the CSS fullscreen still applies */ }
         this.handleViewportResize();
     },
+
+    // The TrackML title is a reload button.
+    reload: function() { location.reload(); },
 
     wipeEverything: function() {
         if(!confirm('Wipe all site data and reload?\n\nThis deletes the tracks you created, clears browser storage and any cached copy of the app, and throws away the current run. Saved files on your computer are untouched.')) return;

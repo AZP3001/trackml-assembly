@@ -113,6 +113,10 @@ jobs:
           node tools/mutationsettle.mjs wasm/sim.wasm
           node tools/mutationsettle.mjs wasm/sim-simd.wasm
 
+      # Sensor readings against a brute-force raycast over every wall.
+      - name: Lidar sees every wall
+        run: node tools/lidarcheck.mjs
+
       # Real training, headless: three tracks (Monaco never finished inside
       # 30 generations before the mutation/elite fixes) must each finish
       # their laps, the all-time best must never fall, and nothing may go

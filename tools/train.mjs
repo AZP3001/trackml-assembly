@@ -27,7 +27,7 @@ const GENS = Number(opt('--gens', 60));
 const SEEDS = Number(opt('--seeds', 3));
 const QUIET = args.includes('--quiet'), REQUIRE = args.includes('--require-solved');
 const POP = Number(opt('--pop', 150)), ELITE = Number(opt('--elite', 15)), TARGET = Number(opt('--laps', 2)), HIDDEN = Number(opt('--hidden', 4));
-const TURN = Number(opt('--turn', 0.01)), BRAKE = Number(opt('--brake', 0.01));
+const TURN = Number(opt('--turn', 0.02)), BRAKE = Number(opt('--brake', 0.01));
 const MUT = [Number(opt('--mut-rate', 0.15)), Number(opt('--sigma', 0.5)), Number(opt('--sigma-floor', 0.05))];
 const FOCUS = Number(opt('--focus', 0)), TTL = Number(opt('--ttl', 750));
 const JSON_OUT = args.includes('--json');

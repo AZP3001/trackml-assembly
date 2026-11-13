@@ -443,7 +443,14 @@ fn tailPhase(c: ptr<function, Car>, ci: i32, trig: vec2<f32>, prev: vec2<f32>, b
     let p1x = td[o]; let p1y = td[o + 1]; let p2x = td[o + 2]; let p2y = td[o + 3];
     let dx = cx - td[o + 4];
     let dy = cy - td[o + 5];
-    if (pp == 0 && dx * dx + dy * dy > 160000.0) { (*c).crashed = 1; return; }
+    // Off course: see the same test in sim.c's updateCar.
+    if (pp == 0) {
+      let po = P.cpOff + 6 * ((gi - 1 + P.cpN) % P.cpN);
+      let gx = td[o + 4] - td[po + 4];
+      let gy = td[o + 5] - td[po + 5];
+      let far = sqrt(gx * gx + gy * gy) + P.wMax + 40.0 + speed;
+      if (dx * dx + dy * dy > far * far) { (*c).crashed = 1; return; }
+    }
     let mx = (p1x + p2x) * 0.5;
     let my = (p1y + p2y) * 0.5;
     let cdx = cx - mx;
@@ -561,7 +568,7 @@ let gateMirror = new Float32Array(MAX_GATES).fill(-1);
 
 const params = new ArrayBuffer(144);
 const pf = new Float32Array(params), pi = new Int32Array(params);
-const cfg = { maxSpeed: 10, accel: 0.05, turnSpeed: 0.01, brakeStrength: 0.01, initialTTL: 750, targetLaps: 3 };
+const cfg = { maxSpeed: 10, accel: 0.05, turnSpeed: 0.02, brakeStrength: 0.01, initialTTL: 750, targetLaps: 3 };
 const trk = { cpN: 0, startCp: 0, zoneN: 0, centerN: 0, gridNx: 0, gridNy: 0, hasGrid: 0, hasBuckets: 0,
               gridCell: 1, gridOx: 0, gridOy: 0, trackLen: 0, wMax: 0, zoneOff: 0, ctrOff: 0, wOff: 0, gsOff: 0, giOff: 0 };
 
