@@ -133,7 +133,7 @@ jobs:
           node tools/statemigrate.mjs wasm/sim.wasm
           node tools/statemigrate.mjs wasm/sim-simd.wasm
 
-      # The sidebar version number ("V21.9 · build ...") is computed from git
+      # The sidebar version number ("V22.9 · build ...") is computed from git
       # history in deploy.yml, never typed by hand — this proves the formula
       # is sound and stays monotonic walking the branch forward.
       - name: Version scheme

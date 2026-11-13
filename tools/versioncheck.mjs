@@ -63,8 +63,11 @@ check(isAncestor, 'PORT_COMMIT is an ancestor of HEAD',
     isAncestor ? 'ancestry holds' : 'HEAD has diverged from PORT_COMMIT — the workflow would fail loudly, correctly');
 
 if (isAncestor) {
-    const since = Number(git('rev-list', '--count', `${PORT_COMMIT}..HEAD`));
-    const version = `21.${since}`;
+    const mm = workflow.match(/MAJOR_COMMIT:\s*([0-9a-f]{40})/);
+    check(!!mm, 'deploy.yml names a 40-char MAJOR_COMMIT', mm ? mm[1] : 'no match found');
+    const BASE = mm ? mm[1] : PORT_COMMIT;
+    const since = Number(git('rev-list', '--count', `${BASE}..HEAD`));
+    const version = `22.${since}`;
     check(Number.isInteger(since) && since >= 0, 'commit count since the port is a sane non-negative integer',
         `${since} commits since PORT_COMMIT`);
     console.log(`  HEAD would deploy as: V${version}`);
@@ -82,10 +85,10 @@ if (isAncestor) {
     // individually deployed on its own — only the merge that combined them
     // was. Each link in --first-parent, by contrast, actually is an ancestor
     // of the next, so its count can only stay the same or grow.
-    const recentLog = git('log', '--first-parent', '--reverse', '--format=%H', `${PORT_COMMIT}..HEAD`).split('\n').filter(Boolean);
+    const recentLog = git('log', '--first-parent', '--reverse', '--format=%H', `${BASE}..HEAD`).split('\n').filter(Boolean);
     let prevCount = 0, monotone = true, brokenAt = null;
     for (const sha of recentLog) {
-        const c = Number(git('rev-list', '--count', `${PORT_COMMIT}..${sha}`));
+        const c = Number(git('rev-list', '--count', `${BASE}..${sha}`));
         if (c < prevCount) { monotone = false; brokenAt = sha; break; }
         prevCount = c;
     }

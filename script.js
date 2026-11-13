@@ -477,7 +477,9 @@ const app = {
     handleViewportResize: function() {
         clearTimeout(this._resizeTimer);
         this._resizeTimer = setTimeout(() => {
-            if (!this._applyRenderScale()) return;
+            const changed = this._applyRenderScale();
+            if (!this.state.isEditing) this.fitView();
+            if (!changed) { this._needsDraw = true; return; }
             if (this.currentTrack) this.cacheBackgroundRender();
             this._needsDraw = true;
             this.draw();
@@ -559,6 +561,25 @@ const app = {
         this.state.view.zoom = 1;
         this.state.view.panX = CANVAS_WIDTH / 2;
         this.state.view.panY = CANVAS_HEIGHT / 2;
+        this._needsDraw = true;
+    },
+
+    // Race view: centre on the track and zoom in as far as still shows all of
+    // it. Zoom never goes below 1, so a track larger than the world stays at 1:1.
+    fitView: function() {
+        const t = this.currentTrack, v = this.state.view;
+        const w = t && t.wallsF32;
+        if (!w || !w.length) return this.resetView();
+        // Bounds of the real walls, not of the centreline path.
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        for (let i = 0; i < w.length; i += 2) {
+            if (w[i] < x0) x0 = w[i]; if (w[i] > x1) x1 = w[i];
+            if (w[i + 1] < y0) y0 = w[i + 1]; if (w[i + 1] > y1) y1 = w[i + 1];
+        }
+        x0 -= 20; y0 -= 20; x1 += 20; y1 += 20;
+        v.zoom = Math.max(1, Math.min(8, this._viewportW / (x1 - x0), this._viewportH / (y1 - y0)));
+        v.panX = (x0 + x1) / 2; v.panY = (y0 + y1) / 2;
+        this._clampView();
         this._needsDraw = true;
     },
 
@@ -816,8 +837,8 @@ const app = {
     // it is absent — running locally, or a deploy that never landed — the
     // static fallback in the markup stays as it is.
     //
-    // The version itself (e.g. "21.9") is computed by the workflow from git
-    // history — a commit count since the WebAssembly port, which is V21.0 —
+    // The version itself (e.g. "22.9") is computed by the workflow from git
+    // history — a commit count since the V22 baseline commit —
     // not typed in by hand anywhere. See .github/workflows/deploy.yml for why:
     // the predecessor project hand-maintained its version string and
     // repeatedly forgot to bump it. A number nobody has to remember to update
@@ -2160,6 +2181,7 @@ const app = {
         this._runToken++; this._needsDraw = true;
         const sel = document.getElementById('track-dropdown'); if(sel) sel.value = i;
         const t = this.state.tracks[i];
+        this.fitView();
         
         this.cacheBackgroundRender();
         // Order matters: the workers rebuild the track geometry before pop_init
@@ -2439,12 +2461,13 @@ const editor = {
         document.getElementById('edit-autowidth').checked = !!t.autoWidth;
         document.getElementById('edit-autowidth-blend').value = Math.round(t.autoWidthBlend * 100);
         this.syncAutoWidthUI();
+        app.resetView();   // the editor starts on the whole map
         this.setMode('path');
         const c = document.getElementById('sim-canvas');
         c.style.touchAction = 'none';
         c.onpointerdown = e => { e.preventDefault(); c.setPointerCapture(e.pointerId); this.onDown(e); };
         c.onpointermove = e => { e.preventDefault(); this.onMove(e); };
-        c.onpointerup = c.onpointercancel = e => { c.releasePointerCapture(e.pointerId); this.dragIndex=null; this.snap=null; this.isDraggingStart=false; this.isResizingZone=false; if(this.isDrawing) this.finishDrawing(); };
+        c.onpointerup = c.onpointercancel = e => { c.releasePointerCapture(e.pointerId); this.dragIndex=null; this.snap=null; this.selectUp(); this.isDraggingStart=false; this.isResizingZone=false; if(this.isDrawing) this.finishDrawing(); };
     },
 
     setMode: function(m) {
@@ -2457,7 +2480,8 @@ const editor = {
         }
         const ktc = document.getElementById('kill-timer-container');
         if (ktc) ktc.style.display = 'none';
-        ['path','draw','zones'].forEach(x => {
+        this.sel = []; this.marquee = null; this.xf = null;
+        ['path','draw','zones','select'].forEach(x => {
             const btn = document.getElementById('btn-mode-'+x);
             if(btn) btn.className = m===x?'px-2 py-1 text-xs rounded flex items-center gap-1 bg-blue-600 text-white':'px-2 py-1 text-xs rounded flex items-center gap-1 text-slate-400';
             const tools = document.getElementById(x+'-tools');
@@ -2737,7 +2761,7 @@ const editor = {
 
     toggleTools: function() { document.getElementById('editor-controls').classList.toggle('collapsed'); },
     cancel: function() {
-        app.state.isEditing = false; 
+        app.state.isEditing = false; app.fitView();
         document.getElementById('editor-controls').classList.add('hidden'); 
         const cv = document.getElementById('sim-canvas'); cv.onpointerdown = null; cv.onpointermove = null; cv.onpointerup = null; cv.onpointercancel = null;
     },
@@ -2802,6 +2826,8 @@ const editor = {
             return;
         }
 
+        if (this.mode === 'select') { this.selectDown(x, y); return; }
+
         if (this.mode === 'zones') {
             if(this.selectedZone && Math.hypot(x-(this.selectedZone.x+this.selectedZone.radius), y-this.selectedZone.y) < 30) { this.isResizingZone = true; return; }
             this.selectedZone = [...this.track.zones].reverse().find(z => Math.hypot(z.x-x, z.y-y) < z.radius) || null; 
@@ -2838,28 +2864,126 @@ const editor = {
         }
     },
 
-    // CAD-style inference while dragging point i: x and y each snap,
-    // independently, to the x / y of any other point (matching a neighbour
-    // makes that segment exactly vertical / horizontal). Failing both, the
-    // point snaps onto the circle where prev–point–next is exactly 90°.
+    // CAD-style inference while dragging point i. Each constraint is a line:
+    //  - through a neighbour, when the segment to it is within 2° of a
+    //    multiple of 45° (so horizontal, vertical and both diagonals);
+    //  - x = / y = of any other, non-neighbour point within `thr`.
+    // Two lines pin the point to their intersection, one line slides it
+    // along. With none, a corner within 2° of a right angle becomes exactly 90°.
     snapOn: true, snap: null,
     setSnap: function(on) { this.snapOn = !!on; this.snap = null; },
     snapPoint: function(i, x, y, thr) {
-        const path = this.track.path, n = path.length, g = { x: null, y: null, right: false };
-        let bx = thr, by = thr;
+        const path = this.track.path, n = path.length, S = Math.SQRT1_2, DEG = 2;
+        const DIRS = [[1, 0], [S, S], [0, 1], [-S, S]];
+        const a = path[(i + n - 1) % n], b = path[(i + 1) % n], lines = [];
+        for (const nb of (a === b ? [a] : [a, b])) {
+            if (nb === path[i] || (nb.x === x && nb.y === y)) continue;
+            const deg = Math.atan2(y - nb.y, x - nb.x) * 180 / Math.PI, k = Math.round(deg / 45);
+            if (Math.abs(deg - k * 45) < DEG) { const d = DIRS[((k % 4) + 4) % 4]; lines.push({ px: nb.x, py: nb.y, dx: d[0], dy: d[1] }); }
+        }
+        let gx = null, gy = null, bx = thr, by = thr;
         path.forEach((p, k) => {
-            if (k === i) return;
-            if (Math.abs(p.x - x) < bx) { bx = Math.abs(p.x - x); g.x = p.x; }
-            if (Math.abs(p.y - y) < by) { by = Math.abs(p.y - y); g.y = p.y; }
+            if (k === i || p === a || p === b) return;
+            if (Math.abs(p.x - x) < bx) { bx = Math.abs(p.x - x); gx = p.x; }
+            if (Math.abs(p.y - y) < by) { by = Math.abs(p.y - y); gy = p.y; }
         });
-        if (g.x !== null) x = g.x;
-        if (g.y !== null) y = g.y;
-        if (g.x === null && g.y === null && n > 2) {
-            const a = path[(i + n - 1) % n], b = path[(i + 1) % n];
-            const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2, r = Math.hypot(a.x - b.x, a.y - b.y) / 2, d = Math.hypot(x - cx, y - cy);
-            if (d > 0 && Math.abs(d - r) < thr) { x = cx + (x - cx) * r / d; y = cy + (y - cy) * r / d; g.right = true; }
+        if (gx !== null) lines.push({ px: gx, py: y, dx: 0, dy: 1 });
+        if (gy !== null) lines.push({ px: x, py: gy, dx: 1, dy: 0 });
+        const g = { lines: [], right: false };
+        const off = L => Math.abs((x - L.px) * L.dy - (y - L.py) * L.dx);
+        if (lines.length) {
+            const L1 = lines[0];
+            for (const L2 of lines.slice(1)) {
+                const cr = L1.dx * L2.dy - L1.dy * L2.dx;
+                if (Math.abs(cr) < 0.1) continue;                       // parallel
+                const t = ((L2.px - L1.px) * L2.dy - (L2.py - L1.py) * L2.dx) / cr;
+                const X = L1.px + t * L1.dx, Y = L1.py + t * L1.dy;
+                // An intersection far from the pointer is two lines that merely cross somewhere.
+                if (Math.hypot(X - x, Y - y) > 3 * (off(L1) + off(L2)) + thr) continue;
+                x = X; y = Y; g.lines = [L1, L2]; break;
+            }
+            if (!g.lines.length) {
+                const t = (x - L1.px) * L1.dx + (y - L1.py) * L1.dy;
+                x = L1.px + t * L1.dx; y = L1.py + t * L1.dy; g.lines = [L1];
+            }
+        } else if (n > 2 && a !== b) {
+            const ua = Math.hypot(a.x - x, a.y - y), ub = Math.hypot(b.x - x, b.y - y);
+            const cos = ua && ub ? ((a.x - x) * (b.x - x) + (a.y - y) * (b.y - y)) / (ua * ub) : 1;
+            if (Math.abs(cos) < Math.sin(DEG * Math.PI / 180)) {
+                // Thales: every point on the circle with diameter a–b sees it at 90°.
+                const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2, r = Math.hypot(a.x - b.x, a.y - b.y) / 2, d = Math.hypot(x - cx, y - cy);
+                if (d > 0) { x = cx + (x - cx) * r / d; y = cy + (y - cy) * r / d; g.right = true; }
+            }
         }
         return { x, y, g };
+    },
+
+    // ---- Select mode: marquee a set of points, then move / stretch / scale them.
+    sel: [], marquee: null, xf: null,
+    selBox: function() {
+        if (!this.sel.length) return null;
+        const ps = this.sel.map(i => this.track.path[i]);
+        return { x0: Math.min(...ps.map(p => p.x)), y0: Math.min(...ps.map(p => p.y)), x1: Math.max(...ps.map(p => p.x)), y1: Math.max(...ps.map(p => p.y)) };
+    },
+    // fx / fy: which side of the box the handle drags (-1 min, 1 max, 0 neither).
+    // Corners (both set) scale uniformly, edges stretch one axis.
+    selHandles: function(b) {
+        const hs = [];
+        for (const fx of [-1, 0, 1]) for (const fy of [-1, 0, 1]) {
+            if (!fx && !fy) continue;
+            hs.push({ fx, fy, x: fx < 0 ? b.x0 : fx > 0 ? b.x1 : (b.x0 + b.x1) / 2, y: fy < 0 ? b.y0 : fy > 0 ? b.y1 : (b.y0 + b.y1) / 2 });
+        }
+        return hs;
+    },
+    selectDown: function(x, y) {
+        const b = this.selBox(), r = 30 / app.state.view.zoom;
+        if (b) {
+            const h = this.selHandles(b).find(h => Math.hypot(h.x - x, h.y - y) < r) || null;
+            if (h || (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1)) {
+                const t = this.track;
+                this.xf = { h, x, y, b, pts: this.sel.map(i => Object.assign({}, t.path[i])), all: this.sel.length === t.path.length,
+                    start: Object.assign({}, t.startPos), zones: (t.zones || []).map(z => Object.assign({}, z)), width: t.trackWidth };
+                return;
+            }
+        }
+        this.sel = []; this.marquee = { x0: x, y0: y, x1: x, y1: y };
+    },
+    selectMove: function(x, y) {
+        if (this.marquee) { this.marquee.x1 = x; this.marquee.y1 = y; return; }
+        const f = this.xf; if (!f) return;
+        const h = f.h, b = f.b, t = this.track;
+        let sx = 1, sy = 1, tx = 0, ty = 0, ax = 0, ay = 0, uniform = false;
+        if (!h) { tx = x - f.x; ty = y - f.y; }
+        else {
+            ax = h.fx > 0 ? b.x0 : b.x1; ay = h.fy > 0 ? b.y0 : b.y1;
+            // A flat selection (all points on one line) has no extent to scale on that axis.
+            const rx = h.fx && Math.abs(h.x - ax) > 1 ? (x - ax) / (h.x - ax) : null;
+            const ry = h.fy && Math.abs(h.y - ay) > 1 ? (y - ay) / (h.y - ay) : null;
+            uniform = !!(h.fx && h.fy);
+            if (uniform) sx = sy = Math.max(0.05, Math.max(rx === null ? -Infinity : rx, ry === null ? -Infinity : ry, 0.05));
+            else { if (rx !== null) sx = Math.max(0.05, rx); if (ry !== null) sy = Math.max(0.05, ry); }
+        }
+        const mx = v => ax + (v - ax) * sx + tx, my = v => ay + (v - ay) * sy + ty;
+        this.sel.forEach((i, k) => {
+            const o = f.pts[k], p = t.path[i];
+            p.x = mx(o.x); p.y = my(o.y);
+            if (uniform && o.radius !== undefined) p.radius = Math.max(10, o.radius * sx);
+        });
+        // The whole track selected: the start marker, the zones and (on a
+        // uniform scale) the road width go with it, so it is the same track, just bigger.
+        if (f.all) {
+            t.startPos = { x: mx(f.start.x), y: my(f.start.y) };
+            (t.zones || []).forEach((z, k) => { const o = f.zones[k]; if (!o) return; z.x = mx(o.x); z.y = my(o.y); if (uniform) z.radius = Math.max(20, o.radius * sx); });
+            if (uniform) { t.trackWidth = Math.max(20, Math.min(150, Math.round(f.width * sx))); document.getElementById('edit-width').value = t.trackWidth; }
+        }
+    },
+    selectUp: function() {
+        const m = this.marquee;
+        if (m) {
+            const x0 = Math.min(m.x0, m.x1), x1 = Math.max(m.x0, m.x1), y0 = Math.min(m.y0, m.y1), y1 = Math.max(m.y0, m.y1);
+            this.sel = this.track.path.map((p, i) => (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1) ? i : -1).filter(i => i >= 0);
+        }
+        this.marquee = null; this.xf = null;
     },
 
     onMove: function(e) {
@@ -2871,6 +2995,7 @@ const editor = {
             }
             return;
         }
+        if(this.mode === 'select') { this.selectMove(x, y); return; }
         if(this.mode === 'zones') {
             if(this.selectedZone && (e.buttons === 1 || e.type==="touchmove")) {
                 if(this.isResizingZone) this.selectedZone.radius = Math.max(30, Math.hypot(x - this.selectedZone.x, y - this.selectedZone.y)); 
@@ -2880,7 +3005,7 @@ const editor = {
         if(this.isDraggingStart) this.track.startPos = {x,y};
         else if(this.dragIndex !== null) {
             // ~10 screen px of pull, whatever the zoom.
-            const sn = this.snapOn ? this.snapPoint(this.dragIndex, x, y, 10 / app._viewMatrix().z) : { x, y, g: null };
+            const sn = this.snapOn ? this.snapPoint(this.dragIndex, x, y, 6 / app._viewMatrix().z) : { x, y, g: null };
             this.track.path[this.dragIndex].x = sn.x;
             this.track.path[this.dragIndex].y = sn.y;
             this.snap = sn.g;
@@ -2953,7 +3078,7 @@ const editor = {
             }
         }
 
-        if(this.mode === 'path') {
+        if(this.mode === 'path' || this.mode === 'select') {
             ctx.strokeStyle='#3b82f6'; ctx.lineWidth=2; ctx.setLineDash([5,5]); ctx.beginPath();
             if(this.track.path.length>0) { ctx.moveTo(this.track.path[0].x, this.track.path[0].y); for(let i=1; i<this.track.path.length; i++) ctx.lineTo(this.track.path[i].x, this.track.path[i].y); if(this.track.path.length>2) ctx.lineTo(this.track.path[0].x, this.track.path[0].y); }
             ctx.stroke(); ctx.setLineDash([]);
@@ -2962,14 +3087,13 @@ const editor = {
             const g = this.snap, dp = this.dragIndex !== null && this.track.path[this.dragIndex];
             if (g && dp) {
                 ctx.strokeStyle = ctx.fillStyle = '#f0abfc'; ctx.lineWidth = 1.5 / v.z; ctx.setLineDash([8 / v.z, 6 / v.z]); ctx.beginPath();
-                if (g.x !== null) { ctx.moveTo(g.x, -1e4); ctx.lineTo(g.x, 1e4); }
-                if (g.y !== null) { ctx.moveTo(-1e4, g.y); ctx.lineTo(1e4, g.y); }
+                for (const L of g.lines) { ctx.moveTo(L.px - L.dx * 1e4, L.py - L.dy * 1e4); ctx.lineTo(L.px + L.dx * 1e4, L.py + L.dy * 1e4); }
                 ctx.stroke(); ctx.setLineDash([]);
                 if (g.right) { ctx.font = `bold ${14 / v.z}px sans-serif`; ctx.textAlign = 'left'; ctx.fillText('90°', dp.x + 12 / v.z, dp.y - 12 / v.z); }
             }
             
             this.track.path.forEach((p, i) => { 
-                const isSelected = (this.selectedIndex === i || this.selectedIndex === 'all');
+                const isSelected = this.mode === 'select' ? this.sel.includes(i) : (this.selectedIndex === i || this.selectedIndex === 'all');
                 ctx.fillStyle = i===0 ? '#22c55e' : (isSelected ? '#ef4444' : (i===this.hoverIndex ? '#fbbf24' : '#60a5fa')); 
                 
                 ctx.beginPath(); 
@@ -2988,6 +3112,21 @@ const editor = {
 
             ctx.save(); ctx.translate(p.startPos.x, p.startPos.y); ctx.rotate(p.startAngle); ctx.fillStyle='rgba(34,197,94,0.5)'; ctx.fillRect(-10,-5,20,10); ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(-5, 0); ctx.lineTo(5, 0); ctx.lineTo(2, -3); ctx.moveTo(5, 0); ctx.lineTo(2, 3); ctx.stroke(); ctx.restore();
             ctx.fillStyle = this.isDraggingStart ? '#fff' : '#22c55e'; ctx.beginPath(); ctx.arc(p.startPos.x, p.startPos.y, 10, 0, Math.PI*2); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth=2; ctx.stroke();
+        }
+
+        if(this.mode === 'select') {
+            const m = this.marquee, b = this.selBox();
+            ctx.strokeStyle = '#fde047'; ctx.lineWidth = 2 / v.z; ctx.setLineDash([6 / v.z, 4 / v.z]);
+            if (m) { ctx.fillStyle = 'rgba(253,224,71,0.12)'; ctx.fillRect(m.x0, m.y0, m.x1 - m.x0, m.y1 - m.y0); ctx.strokeRect(m.x0, m.y0, m.x1 - m.x0, m.y1 - m.y0); }
+            if (b) {
+                ctx.strokeRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0); ctx.setLineDash([]);
+                const hs = 7 / v.z;
+                for (const h of this.selHandles(b)) {
+                    ctx.fillStyle = h.fx && h.fy ? '#fde047' : '#fff'; ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5 / v.z;
+                    ctx.fillRect(h.x - hs, h.y - hs, hs * 2, hs * 2); ctx.strokeRect(h.x - hs, h.y - hs, hs * 2, hs * 2);
+                }
+            }
+            ctx.setLineDash([]);
         }
     }
 };

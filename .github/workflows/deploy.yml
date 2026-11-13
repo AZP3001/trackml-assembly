@@ -111,13 +111,15 @@ jobs:
         id: version
         env:
           PORT_COMMIT: ebf75a7deee71bd16b81ff5336ad054f9243c509
+          # V22.0: the last V21 commit (V21.40). Minor counts from here.
+          MAJOR_COMMIT: 22067e5491d25786345d2ccc7293d9fbfb2fb9bd
         run: |
           if ! git merge-base --is-ancestor "$PORT_COMMIT" HEAD; then
             echo "::error::PORT_COMMIT ($PORT_COMMIT) is not an ancestor of HEAD — the version baseline in deploy.yml needs updating."
             exit 1
           fi
-          since=$(git rev-list --count "${PORT_COMMIT}..HEAD")
-          version="21.${since}"
+          since=$(git rev-list --count "${MAJOR_COMMIT}..HEAD")
+          version="22.${since}"
           echo "version=${version}" | tee -a "$GITHUB_OUTPUT"
 
       # A build stamp, so "did my push actually go live?" has an answer you can

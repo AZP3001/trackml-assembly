@@ -528,23 +528,62 @@ check(afterReload.tracks === boot.tracks + 1, 'reload gives built-ins plus the s
 check(afterReload.pop === boot.cars, 'settings reset to defaults',
     `population ${afterReload.pop}`);
 
-// Editor snapping: x and y snap independently to other points; else to a 90° corner.
+// Editor snapping: segments to a neighbour snap to multiples of 45° within 2°;
+// failing that, a near-right corner becomes exactly 90°.
 const snap = await page.evaluate(() => {
     app.createNewTrack();   // square: (200,200) (1000,200) (1000,700) (200,700)
-    const axis = editor.snapPoint(1, 995, 204, 10);          // near x of point 2, y of point 0
+    const axis = editor.snapPoint(1, 995, 204, 6);           // ~horizontal from 0, ~vertical from 2
+    const diag = editor.snapPoint(1, 705, 696, 6);           // ~45° from 0, ~horizontal from 2
+    const loose = editor.snapPoint(1, 960, 240, 6);          // 3° off both: no snap
     editor.track.path[1] = { x: 1000, y: 0 };
-    const far = editor.snapPoint(0, 400, 400, 10);
+    const far = editor.snapPoint(0, 400, 400, 6);
     // point 0 between (200,700) and (1000,0): just off the 90° circle
     const c = { x: 600, y: 350 }, r = Math.hypot(800, 700) / 2;
-    const rt = editor.snapPoint(0, c.x - (r + 4) * 0.6, c.y - (r + 4) * 0.8, 10);
+    const rt = editor.snapPoint(0, c.x - (r + 4) * 0.6, c.y - (r + 4) * 0.8, 6);
     const a = editor.track.path[3], b = editor.track.path[1];
     const dot = (a.x - rt.x) * (b.x - rt.x) + (a.y - rt.y) * (b.y - rt.y);
     editor.cancel();
-    return { axis, far, right: rt.g.right, dot };
+    return { axis, diag, loose, far, right: rt.g.right, dot };
 });
-check(snap.axis.x === 1000 && snap.axis.y === 200, 'a dragged point snaps to other points\' x and y', `(${snap.axis.x}, ${snap.axis.y})`);
+check(snap.axis.x === 1000 && snap.axis.y === 200, 'a dragged point snaps to horizontal and vertical', `(${snap.axis.x}, ${snap.axis.y})`);
+check(Math.abs(snap.diag.x - 700) < 1e-9 && snap.diag.y === 700, 'and to 45°', `(${snap.diag.x}, ${snap.diag.y})`);
+check(snap.loose.x === 960 && snap.loose.y === 240, 'but not from more than 2° away');
 check(snap.far.x === 400 && snap.far.y === 400, 'and is left alone away from any guide');
 check(snap.right && Math.abs(snap.dot) < 1e-6, 'and snaps to an exact 90° corner', `dot ${snap.dot.toExponential(1)}`);
+
+// Select mode: marquee everything, scale from a corner, stretch from a side, move.
+const selx = await page.evaluate(() => {
+    app.createNewTrack();   // square 200..1000 x 200..700, width 60
+    editor.setMode('select');
+    editor.selectDown(100, 100); editor.selectMove(1100, 800); editor.selectUp();
+    const picked = editor.sel.length;
+    editor.selectDown(1000, 700); editor.selectMove(600, 450); editor.selectUp();   // corner: halve
+    const P = () => editor.track.path.map(p => [p.x, p.y]);
+    const half = P(), width = editor.track.trackWidth;
+    editor.selectDown(600, 325); editor.selectMove(800, 400); editor.selectUp();    // right edge: x only
+    const wide = P();
+    editor.selectDown(400, 300); editor.selectMove(410, 320); editor.selectUp();    // inside: move
+    const moved = P();
+    editor.cancel();
+    return { picked, half, width, wide, moved };
+});
+check(selx.picked === 4, 'a marquee selects the points inside it', `${selx.picked} points`);
+check(JSON.stringify(selx.half) === '[[200,200],[600,200],[600,450],[200,450]]' && selx.width === 30,
+    'a corner handle scales the track evenly, road width included', `${JSON.stringify(selx.half)} width ${selx.width}`);
+check(JSON.stringify(selx.wide) === '[[200,200],[800,200],[800,450],[200,450]]', 'a side handle stretches one axis only', JSON.stringify(selx.wide));
+check(JSON.stringify(selx.moved) === '[[210,220],[810,220],[810,470],[210,470]]', 'dragging inside the box moves the selection', JSON.stringify(selx.moved));
+
+// Race view fits the track: a small track is zoomed in and centred on.
+const fit = await page.evaluate(() => {
+    const t = app.currentTrack, keep = t.wallsF32;
+    t.wallsF32 = new Float32Array([300, 300, 500, 300, 500, 400, 300, 400]);
+    app.fitView();
+    const v = Object.assign({}, app.state.view), tl = app.screenToWorld(0, 0), br = app.screenToWorld(ui.canvas.width, ui.canvas.height);
+    t.wallsF32 = keep; app.fitView();
+    return { v, tl, br };
+});
+check(fit.v.zoom > 2 && fit.v.panX === 400 && fit.v.panY === 350, 'the race view zooms in on and centres a small track', `zoom ${fit.v.zoom.toFixed(2)} at (${fit.v.panX}, ${fit.v.panY})`);
+check(fit.tl.x <= 280 && fit.tl.y <= 280 && fit.br.x >= 520 && fit.br.y >= 420, 'with the whole track still in view');
 
 // Fullscreen toggle: the map covers the viewport, then goes back.
 const fs = await page.evaluate(() => {
@@ -749,7 +788,7 @@ await page.evaluate(() => { if (app.state.isEditing) editor.cancel(); });
         const real = window.fetch;
         window.fetch = (u, o) => String(u).includes('version.json')
             ? Promise.resolve({ ok: true, json: () => Promise.resolve({
-                version: '21.9', commit: 'deadbeefcafe', short: 'deadbee', ref: 'main', built: '2026-09-21T09:00:00Z'
+                version: '22.9', commit: 'deadbeefcafe', short: 'deadbee', ref: 'main', built: '2026-09-21T09:00:00Z'
               }) })
             : real(u, o);
         app.showBuildStamp();
@@ -761,10 +800,10 @@ await page.evaluate(() => { if (app.state.isEditing) editor.cancel(); });
             mobiles: [...document.querySelectorAll('.version-tag-compact')].map(e => e.textContent.trim())
         };
     });
-    check(stamped.text === 'V21.9 · build deadbee', 'the version number and build hash are shown together',
+    check(stamped.text === 'V22.9 · build deadbee', 'the version number and build hash are shown together',
         `"${stamped.text}"`);
     check(/main/.test(stamped.title), 'and names the branch it came from', stamped.title);
-    check(stamped.mobiles.length === 2 && stamped.mobiles.every(t => t === '· V21.9'),
+    check(stamped.mobiles.length === 2 && stamped.mobiles.every(t => t === '· V22.9'),
         'the compact mobile headers pick up the same version',
         JSON.stringify(stamped.mobiles));
 }
