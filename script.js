@@ -2019,8 +2019,7 @@ const app = {
     // The one explicit "forget everything" control: the saved tracks, the
     // browser's cached copy of the site, and the run.
     // The map takes the whole page. The CSS class does the work; the native
-    // Fullscreen API on top hides the browser chrome where it exists (iPhone
-    // Safari has none for page elements).
+    // Fullscreen API on top hides the browser chrome, except on iOS/iPadOS.
     toggleFullscreen: function() {
         const on = document.body.classList.toggle('map-fs');
         // Start with the editor tools folded away so the whole track shows; ☰ brings them back.
@@ -2028,7 +2027,11 @@ const app = {
         const d = document, el = d.documentElement;
         try {
             let p;
-            if (on) p = (el.requestFullscreen || el.webkitRequestFullscreen || (() => {})).call(el);
+            // iOS/iPadOS native fullscreen exits on any downward swipe, which is
+            // what dragging a track point looks like to it. CSS-only there.
+            const ios = /iPhone|iPod|iPad/.test(navigator.userAgent) || (/\bMacintosh\b/.test(navigator.userAgent) && (navigator.maxTouchPoints || 0) > 1);
+            if (on && ios) { /* CSS fullscreen only */ }
+            else if (on) p = (el.requestFullscreen || el.webkitRequestFullscreen || (() => {})).call(el);
             else if (d.fullscreenElement || d.webkitFullscreenElement) p = (d.exitFullscreen || d.webkitExitFullscreen).call(d);
             if (p && p.catch) p.catch(() => {});
         } catch (e) { /* refused: the CSS fullscreen still applies */ }

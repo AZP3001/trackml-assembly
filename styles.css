@@ -38,8 +38,7 @@ body { background-color: #0f172a; color: white; overflow: hidden; margin: 0; fon
            the editor toolbar floats over it and can fold down to its ☰ button. */
         body.map-fs #map-wrap { position: fixed; inset: 0; z-index: 45; border: 0; border-radius: 0; background: #020617; }
         body.map-fs #sidebar { display: none; }
-        /* left: iPadOS draws its own exit-fullscreen X over the top-left corner. */
-        body.map-fs #editor-controls { position: fixed; top: 0.5rem; left: 5.5rem; right: 0.5rem; }
+        body.map-fs #editor-controls { position: fixed; top: 0.5rem; left: 0.5rem; right: 0.5rem; }
         #editor-controls.collapsed { right: auto !important; padding: 0.25rem; }
         #editor-controls.collapsed > :last-child,
         #editor-controls.collapsed > :first-child > :not(#btn-tools-toggle) { display: none !important; }
