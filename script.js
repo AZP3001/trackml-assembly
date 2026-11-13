@@ -26,7 +26,7 @@ const SETTING_DESCRIPTIONS = {
     initialTTL: "Time to Live. Frames allowed before death if no checkpoint is reached.",
     targetLaps: "Laps needed to trigger the next generation automatically.",
     bench: "A CPU benchmark of the current run, counted in Hyper mode only (at 1x the number is just 60 steps a second per car): average car-steps per second overall and over generations 1-100, 100-1000 and 1000+, with one graph point per generation (dashed line: generation 100). Restarts on Reset, a new track, or changing CPU cores / GPU.",
-    profile: "Explore: get round the track at all — a generation ends at the first finished lap, with wide mutations. Optimize: cut lap time — more laps per generation, small careful mutations, more elites. Explore hands over to Optimize by itself the first time a car finishes; a new track or Reset goes back to Explore.",
+    profile: "Explore: get round the track at all — a generation ends at the first finished lap, with wide mutations, and speed earns nothing: only how far a car got counts. Optimize: cut lap time — more laps per generation, small careful mutations, more elites. Explore hands over to Optimize by itself the first time a car finishes; a new track or Reset goes back to Explore.",
     maxSpeed: "Top speed. Higher speeds require faster AI reaction times.",
     acceleration: "Engine power.", turnSpeed: "Steering sensitivity. Cars turn tightest at low speed and lose authority as they speed up, same as a real car's grip limit.",
     brakeStrength: "How hard the brake pedal bites. Braking now scales with how hard the AI presses it, instead of every negative throttle snapping speed down by the same flat amount.",
@@ -125,9 +125,13 @@ const DEVICE_DEFAULTS = IS_MOBILE ? DEFAULT_SETTINGS.mobile : DEFAULT_SETTINGS.d
 // mutants and 3-lap generations all measured WORSE for lap time per unit of
 // work, so the mutation size stays the same in both.
 // eliteFrac is a share of the population, so it scales with Pop Size.
+// pace is how much reaching a gate quickly is worth on top of reaching it at
+// all (sim.c cfg_pace). Explore pays nothing for speed: until a car can lap
+// the track, a speed reward only teaches the field to arrive flat out at the
+// first corner it cannot make.
 const PROFILES = {
-    explore:  { targetLaps: 1, eliteFrac: 0.10, mutRate: 0.15, sigma: 0.5, sigmaFloor: 0.05, focusPct: 0 },
-    optimize: { targetLaps: 2, eliteFrac: 0.03, mutRate: 0.15, sigma: 0.5, sigmaFloor: 0.05, focusPct: 0 }
+    explore:  { targetLaps: 1, eliteFrac: 0.10, mutRate: 0.15, sigma: 0.5, sigmaFloor: 0.05, focusPct: 0, pace: 0 },
+    optimize: { targetLaps: 2, eliteFrac: 0.03, mutRate: 0.15, sigma: 0.5, sigmaFloor: 0.05, focusPct: 0, pace: 0.5 }
 };
 
 // How many pixels the canvas actually rasterises, as a fraction of the fixed
@@ -329,7 +333,7 @@ const app = {
         populationSize: DEVICE_DEFAULTS.populationSize,
         eliteClones: Math.round(PROFILES.explore.eliteFrac * DEVICE_DEFAULTS.populationSize),
         targetLaps: PROFILES.explore.targetLaps,
-        profile: 'explore',
+        profile: 'explore', paceReward: PROFILES.explore.pace,
         mutRate: PROFILES.explore.mutRate, sigma: PROFILES.explore.sigma, sigmaFloor: PROFILES.explore.sigmaFloor,
         hiddenLayers: DEVICE_DEFAULTS.hiddenLayers,
         focusPct: 0, initialTTL: 750,
@@ -1660,7 +1664,10 @@ const app = {
         const st = this.state;
         st.profile = name;
         this._finishFrame = 0;   // a different lap target finishes somewhere else
-        st.targetLaps = p.targetLaps; st.focusPct = p.focusPct;
+        st.targetLaps = p.targetLaps; st.focusPct = p.focusPct; st.paceReward = p.pace;
+        // Scores from the other profile are on another scale (laps, speed
+        // reward): the all-time best must be re-earned, not compared against.
+        Engine.rescore();
         st.mutRate = p.mutRate; st.sigma = p.sigma; st.sigmaFloor = p.sigmaFloor;
         st.eliteClones = Math.max(1, Math.round(p.eliteFrac * st.populationSize));
         this.syncSettingsUI();
@@ -1701,7 +1708,7 @@ const app = {
     },
     updateConfig: function(k, v) {
         this.state[k] = parseFloat(v);
-        if(k === 'targetLaps') this._finishFrame = 0;
+        if(k === 'targetLaps') { this._finishFrame = 0; Engine.rescore(); }   // more or fewer laps: a different score scale
         let id = 'val-'+(k==='populationSize'?'pop':k==='targetLaps'?'laps':k==='speedMultiplier'?'speed':k==='eliteClones'?'elite':k==='focusPct'?'focus':k==='hiddenLayers'?'hidden':'ttl');
         let d = v; if(k==='speedMultiplier') d+='x'; if(k==='focusPct') d=Math.round(v*100)+'%';
         const el = document.getElementById(id); if(el) el.innerText = d;
@@ -1984,6 +1991,7 @@ const app = {
             st.isRunning = false;
             const cfg = j.settings || {};
             if(PROFILES[cfg.profile]) st.profile = cfg.profile;
+            st.paceReward = PROFILES[st.profile].pace;
             for(const k of ['populationSize','eliteClones','targetLaps','focusPct','hiddenLayers','initialTTL','speedMultiplier','mutRate','sigma','sigmaFloor']) {
                 if(typeof cfg[k] === 'number') st[k] = cfg[k];
             }
@@ -2478,7 +2486,7 @@ const editor = {
         c.style.touchAction = 'none';
         c.onpointerdown = e => { e.preventDefault(); c.setPointerCapture(e.pointerId); this.onDown(e); };
         c.onpointermove = e => { e.preventDefault(); this.onMove(e); };
-        c.onpointerup = c.onpointercancel = e => { c.releasePointerCapture(e.pointerId); this.dragIndex=null; this.snap=null; this.selectUp(); this.isDraggingStart=false; this.isResizingZone=false; if(this.isDrawing) this.finishDrawing(); };
+        c.onpointerup = c.onpointercancel = e => { c.releasePointerCapture(e.pointerId); this.dragIndex=null; this.snap=null; this.selectUp(); if(this.isDraggingStart) this.pinStart(); this.isDraggingStart=false; this.isResizingZone=false; if(this.isDrawing) this.finishDrawing(); };
     },
 
     setMode: function(m) {
@@ -2820,13 +2828,22 @@ const editor = {
             this.track.path.splice(this.selectedIndex, 1);
             this.selectedIndex = null;
             this.updatePointUI();
+            this.dropStartIfNoLoop();
         }
+    },
+    // Fewer than three points is no track, so its start marker is not drawn;
+    // forget it, or a click near where it was would drag the invisible marker.
+    dropStartIfNoLoop: function() {
+        if(this.track.path.length < 3) { this.track.startPos = null; this.track.startAngle = null; }
     },
     // Select mode: delete every point in the selection.
     deleteSelection: function() {
         const gone = new Set(this.sel);
         this.track.path = this.track.path.filter((_, i) => !gone.has(i));
         this.sel = []; this.marquee = null; this.xf = null;
+        // Path mode's own selection is an index into the path that just changed.
+        this.selectedIndex = null; this.updatePointUI();
+        this.dropStartIfNoLoop();
     },
 
     getPos: function(e) {
@@ -2834,11 +2851,12 @@ const editor = {
         return app.screenToWorld(p.x, p.y);
     },
 
-    // A track begun empty has no start marker until it is a loop; pin the
-    // derived one down then, so it can be dragged and transformed like any other.
+    // Store the start the generator derives, wherever the editor has none of
+    // its own: a track begun empty has no start marker until it is a loop, and
+    // a start that was just dragged has no heading (see onMove).
     pinStart: function() {
-        if(!this.track.startPos && this.track.path.length >= 3) {
-            const d = generateTrackFromPath(this.track.id, this.track.name, this.track.path, this.track.trackWidth, null, null, [], this.autoOpts());
+        if((!this.track.startPos || this.track.startAngle == null) && this.track.path.length >= 3) {
+            const d = generateTrackFromPath(this.track.id, this.track.name, this.track.path, this.track.trackWidth, this.track.startPos, null, [], this.autoOpts());
             this.track.startPos = d.startPos; this.track.startAngle = d.startAngle;
             document.getElementById('edit-angle').value = Math.round((d.startAngle || 0) * (180/Math.PI));
         }
@@ -2975,8 +2993,11 @@ const editor = {
         this.pinStart();
         const b = this.selBox(), r = 30 / app.state.view.zoom;
         if (b) {
-            const h = this.selHandles(b).find(h => Math.hypot(h.x - x, h.y - y) < r) || null;
-            if (h || (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1)) {
+            // A single point (or several on one spot) has no size to scale: every
+            // handle sits on it, so grabbing it can only mean moving it.
+            const flat = b.x1 - b.x0 < 1 && b.y1 - b.y0 < 1, pad = r / 2;
+            const h = flat ? null : this.selHandles(b).find(h => Math.hypot(h.x - x, h.y - y) < r) || null;
+            if (h || (x >= b.x0 - pad && x <= b.x1 + pad && y >= b.y0 - pad && y <= b.y1 + pad)) {
                 const t = this.track;
                 this.xf = { h, x, y, b, pts: this.sel.map(i => Object.assign({}, t.path[i])), all: this.sel.length === t.path.length,
                     start: Object.assign({}, t.startPos), zones: (t.zones || []).map(z => Object.assign({}, z)), width: t.trackWidth };
@@ -3039,7 +3060,10 @@ const editor = {
                 else { this.selectedZone.x = x; this.selectedZone.y = y; }
             } return;
         }
-        if(this.isDraggingStart) this.track.startPos = {x,y};
+        // Dragging the start drops its old heading: left as it was, a start moved
+        // onto a stretch running another way pointed the whole field at a wall.
+        // null lets the generator aim it along the track; pinStart stores that on release.
+        if(this.isDraggingStart) { this.track.startPos = {x,y}; this.track.startAngle = null; }
         else if(this.dragIndex !== null) {
             // ~10 screen px of pull, whatever the zoom.
             const sn = this.snapOn ? this.snapPoint(this.dragIndex, x, y, 6 / app._viewMatrix().z) : { x, y, g: null };

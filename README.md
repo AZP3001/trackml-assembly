@@ -228,6 +228,13 @@ pressed at any time. Every slider still works on top of whichever profile is act
 | Target Laps | **1**: a generation ends at the first finished lap | **2**: the second is a flying lap, the one worth timing |
 | Elite Clones | 10% of the field, so a lucky line isn't lost | 3%: more room for new lines beat protecting old ones |
 | Mutation | 15% of weights, sigma 0.5 | same |
+| Speed reward | **none**: a checkpoint is worth the same however long it took to reach | up to half a checkpoint extra for reaching it at pace, and a lap bonus that grows with lap speed |
+
+Explore pays nothing for speed on purpose. Any reward for pace before a car can lap the track pays a
+car for arriving flat out at the first corner it cannot make, and the whole field converges on doing
+that. Measured on eight custom-style tracks (long straights into 90° corners and hairpins) x 5 seeds
+with faster cars (Acceleration 0.2, Max Speed 15): 11 of 40 runs lapped the track within 60
+generations with the original 3x pace bonus, 40 of 40 with none while exploring.
 
 (The tables below were measured with Turn Speed 0.02 and Brake Strength 0.05; the defaults are now
 0.02 / 0.01. Turn Speed is the one that decides whether twisty tracks are learnable at all: over all

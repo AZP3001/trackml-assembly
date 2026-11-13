@@ -296,6 +296,67 @@ console.log(`race behaviour test (${wasmPath})\n`);
         floorExample || 'every car at or above the base rate for its progress');
 }
 
+// --- Explore: speed earns nothing ---------------------------------------
+// The Explore profile runs with the pace reward at 0: until a car can lap the
+// track, paying for speed only teaches the field to arrive flat out at the
+// first corner it cannot make. So with it off, a car's score must be explained
+// by how far it got alone — 500 a gate, less a crash, plus at most the small
+// per-frame "still making progress" term (0.1 a frame for 180 frames a gate).
+{
+    buildTrack(polar(48, a => 340 + Math.sin(a * 3) * 70), 60);
+    w.set_config(10, 0.05, 0.04, 0.2, 750, 99, 0.15, 5, 0, 0);   // last argument: pace reward off
+    const POP = 200;
+    w.pop_init(POP, 0, 5, 20260921);
+    w.pop_randomize_brains();
+    w.pop_reset();
+    let frames = 0;
+    do { w.run(50); frames += 50; } while (frames < 4000 && w.all_crashed() !== 1);
+    w.write_fitness();
+    const S = w.fitness_stride(), fb = f32(w.fitness_ptr(), POP * S);
+    let judged = 0, off = 0, example = null;
+    for (let i = 0; i < POP; i++) {
+        const gates = fb[i * S + 3], fit = fb[i * S];
+        if (gates < 1 || fb[i * S + 1] > 0) continue;            // a finished lap adds its own bonus
+        judged++;
+        if (fit < 500 * gates - 51 || fit > 500 * gates + 18 * (gates + 1) + 1) {
+            off++;
+            if (!example) example = `${gates} gates in ${fb[i * S + 4]} frames scored ${fit.toFixed(0)}`;
+        }
+    }
+    check(judged > 20 && off === 0, 'with the speed reward off, a score depends only on how far the car got',
+        example || `${judged} cars, each within the per-frame term of 500 a gate`);
+}
+
+// --- Speed Boost zones pay at the speed a car can actually reach ---------
+// The zone pays for going faster than 70% of top speed. That was 70% of Max
+// Speed (7 at the stock 10), while stock Acceleration tops a car out at 4.95
+// on a straight: no car could ever earn it. One car with a brain that does
+// nothing but hold full throttle is sent down a 900px straight twice, without
+// the zone and then with one over the whole track — the same drive, frame for
+// frame, so any difference in score is the zone paying.
+{
+    const path = [{ x: 150, y: 250 }, { x: 1050, y: 250 }, { x: 1050, y: 650 }, { x: 150, y: 650 }];
+    const H = 5, IN = 11, THROTTLE_BIAS = IN * H + H * 2 + H + 1;   // [wIH | wHO | bH | bO], bO = steer, throttle
+    const drive = (zones) => {
+        const pIn = f32(w.path_in_ptr(), path.length * 4);
+        path.forEach((p, i) => { pIn[i * 4] = p.x; pIn[i * 4 + 1] = p.y; pIn[i * 4 + 2] = 1; pIn[i * 4 + 3] = 60; });
+        f32(w.zone_in_ptr(), 5).set([CX, CY, 2000, 0, 150]);     // x, y, radius, type 0 = speed, kill timer
+        w.set_config(10, 0.05, 0.04, 0.2, 750, 99, 0.15, H, 0, 0);
+        // Started at the head of the top straight, facing down it.
+        if (!w.track_build(w.path_in_ptr(), path.length, 60, 1, 250, 250, 1, 0, w.zone_in_ptr(), zones, 0, 0)) throw new Error('track_build failed');
+        w.pop_init(1, 0, H, 1);
+        const brain = f32(w.brains_ptr(), w.brain_stride());
+        brain.fill(0); brain[THROTTLE_BIAS] = 5;
+        w.pop_reset();
+        w.run(400);
+        w.write_fitness();
+        return f32(w.fitness_ptr(), w.fitness_stride())[0];
+    };
+    const without = drive(0), withZone = drive(1);
+    check(withZone > without + 50, 'a Speed Boost zone pays at stock settings',
+        `flat out down a straight: ${without.toFixed(0)} without the zone, ${withZone.toFixed(0)} with it`);
+}
+
 // --- pace: and it shows up in training ----------------------------------
 // A softer end-to-end check on a track that learns reliably, across several
 // seeds, so it measures the scoring rather than the luck of one run.

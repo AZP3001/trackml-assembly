@@ -541,11 +541,22 @@ const Engine = {
         if (state.mutRate !== undefined) this.master.ex.set_mutation(state.mutRate, state.sigma, state.sigmaFloor);
     },
 
-    pushConfig: function(state) {
+    // sim.c set_config's arguments, in order.
+    _configArgs: function(state) {
         const p = state.physics;
-        const args = [p.maxSpeed, p.acceleration, p.turnSpeed, p.brakeStrength,
-                      state.initialTTL, state.targetLaps, state.focusPct, state.hiddenLayers,
-                      state.nudgeMode ? 1 : 0];
+        return [p.maxSpeed, p.acceleration, p.turnSpeed, p.brakeStrength,
+                state.initialTTL, state.targetLaps, state.focusPct, state.hiddenLayers,
+                state.nudgeMode ? 1 : 0, state.paceReward];
+    },
+
+    // The scoring changed (profile, lap target), so the stored all-time-best
+    // score no longer compares with what a generation can earn. Forget the
+    // number, keep the brain: it still runs as car 0, and the next generation's
+    // best — at least as good as it, under the new scoring — takes over.
+    rescore: function() { this._globalBestFitness = -Infinity; },
+
+    pushConfig: function(state) {
+        const args = this._configArgs(state);
         if (this.master) { this.master.ex.set_config(...args); this._pushMutation(state); }
         this._allWorkers().forEach(w => w.postMessage({ type: 'config', args }));
         this._lastConfig = args;
@@ -566,10 +577,7 @@ const Engine = {
             autoWidth: !!track.autoWidth,
             autoWidthBlend: track.autoWidthBlend || 0
         };
-        const p = state.physics;
-        const config = [p.maxSpeed, p.acceleration, p.turnSpeed, p.brakeStrength,
-                        state.initialTTL, state.targetLaps, state.focusPct, state.hiddenLayers,
-                        state.nudgeMode ? 1 : 0];
+        const config = this._configArgs(state);
         if (this.master) { this.master.ex.set_config(...config); this._pushMutation(state); }
         this._allWorkers().forEach(w => w.postMessage({ type: 'track', def, config }));
         this._lastTrackMsg = { def, config };

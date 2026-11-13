@@ -539,13 +539,16 @@ check(afterReload.pop === boot.cars, 'settings reset to defaults',
 const blank = await page.evaluate(() => {
     app.createNewTrack();
     const empty = editor.track.path.length;
+    editor.draw(document.getElementById('sim-canvas').getContext('2d'));   // an empty track must still paint
     const tracksBefore = app.state.tracks.length;
     const realAlert = window.alert; let warned = false; window.alert = () => { warned = true; };
     editor.save(); window.alert = realAlert;
     const refused = warned && app.state.isEditing && app.state.tracks.length === tracksBefore;
     const c = document.getElementById('sim-canvas'), r = c.getBoundingClientRect();
     const click = (fx, fy) => { const e = { button: 0, buttons: 1, clientX: r.left + r.width * fx, clientY: r.top + r.height * fy }; editor.onDown(e); editor.dragIndex = null; };
-    click(0.3, 0.3); click(0.7, 0.3); click(0.5, 0.7);
+    click(0.3, 0.3);
+    editor.draw(c.getContext('2d'));
+    click(0.7, 0.3); click(0.5, 0.7);
     const placed = editor.track.path.length;
     editor.draw(c.getContext('2d'));
     editor.setMode('select'); editor.sel = [0, 1, 2]; editor.deleteSelection();
@@ -594,14 +597,18 @@ const selx = await page.evaluate(() => {
     const wide = P();
     editor.selectDown(400, 300); editor.selectMove(410, 320); editor.selectUp();    // inside: move
     const moved = P();
+    // one point alone: grabbing it moves it (it has no size to scale)
+    editor.sel = [0]; editor.selectDown(210, 220); editor.selectMove(260, 300); editor.selectUp();
+    const single = P()[0];
     editor.cancel();
-    return { picked, half, width, wide, moved };
+    return { picked, half, width, wide, moved, single };
 });
 check(selx.picked === 4, 'a marquee selects the points inside it', `${selx.picked} points`);
 check(JSON.stringify(selx.half) === '[[200,200],[600,200],[600,450],[200,450]]' && selx.width === 30,
     'a corner handle scales the track evenly, road width included', `${JSON.stringify(selx.half)} width ${selx.width}`);
 check(JSON.stringify(selx.wide) === '[[200,200],[800,200],[800,450],[200,450]]', 'a side handle stretches one axis only', JSON.stringify(selx.wide));
 check(JSON.stringify(selx.moved) === '[[210,220],[810,220],[810,470],[210,470]]', 'dragging inside the box moves the selection', JSON.stringify(selx.moved));
+check(selx.single[0] === 260 && selx.single[1] === 300, 'a single selected point can be dragged', JSON.stringify(selx.single));
 
 // Race view fits the track: a small track is zoomed in and centred on.
 const fit = await page.evaluate(() => {
@@ -630,6 +637,37 @@ const hold = await page.evaluate(() => {
 });
 check(hold.first === 1 && hold.held === 1 && hold.next === 2, 'follow camera keeps its car until the lap ends', JSON.stringify(hold));
 check(hold.free === 3, 'and without follow the telemetry still tracks the leader live');
+
+// Explore pays nothing for speed, Optimize does; and switching profile drops
+// the stored all-time-best score, which is on the other profile's scale.
+const paceCfg = await page.evaluate(() => {
+    const was = app.state.profile;
+    app.setProfile('explore');
+    const explore = { state: app.state.paceReward, sent: Engine._lastConfig[9] };
+    Engine._globalBestFitness = 123456;
+    app.setProfile('optimize');
+    const optimize = { state: app.state.paceReward, sent: Engine._lastConfig[9], best: Engine._globalBestFitness };
+    app.setProfile(was);
+    return { explore, optimize };
+});
+check(paceCfg.explore.state === 0 && paceCfg.explore.sent === 0, 'Explore runs with the speed reward off', JSON.stringify(paceCfg.explore));
+check(paceCfg.optimize.state === 0.5 && paceCfg.optimize.sent === 0.5, 'Optimize turns it on', JSON.stringify(paceCfg.optimize));
+check(paceCfg.optimize.best === -Infinity, 'a profile switch does not keep a score from the other scoring');
+
+// Dragging the start marker re-aims it along the track where it lands.
+const startAim = await page.evaluate(() => {
+    newSquare();   // clockwise square: top edge runs +x, right edge runs +y
+    editor.track.startPos = { x: 600, y: 200 }; editor.track.startAngle = 0;
+    const realGetPos = editor.getPos;
+    editor.getPos = () => ({ x: 1000, y: 450 });
+    editor.isDraggingStart = true; editor.onMove({ buttons: 1 }); editor.pinStart(); editor.isDraggingStart = false;
+    editor.getPos = realGetPos;
+    const out = { x: editor.track.startPos.x, y: editor.track.startPos.y, deg: editor.track.startAngle * 180 / Math.PI };
+    editor.cancel();
+    return out;
+});
+check(Math.abs(startAim.deg - 90) < 10 && Math.abs(startAim.x - 1000) < 5, 'a dragged start marker points along the track where it is dropped',
+    `at (${startAim.x.toFixed(0)}, ${startAim.y.toFixed(0)}) heading ${startAim.deg.toFixed(0)}°`);
 
 // Fullscreen toggle: the map covers the viewport, then goes back.
 const fs = await page.evaluate(() => {

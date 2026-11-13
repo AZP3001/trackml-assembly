@@ -1008,15 +1008,15 @@ static float *b_x1, *b_y1, *b_dx, *b_dy, *b_mx, *b_my, *b_r2, *b_hl;
 // pass — that wall belongs to a gate hundreds of pixels of track away. A car
 // that then drifted across found no walls at all there. `reach` is how far
 // from the gate's centre such a car can be, plus the sensor length.
+// Each wall's midpoint and half-length, computed once per build: this test runs
+// for every gate against every wall, twice, on every frame the editor is open.
+static float *bw_mx, *bw_my, *bw_hl;
 static i32 bucketExtra(i32 i, i32 wi, i32 nBack, i32 nFwd, i32 segs, float reach) {
-    Wall *wl = &tk_walls[wi];
-    i32 s = wl->seg;
+    i32 s = tk_walls[wi].seg;
     if (s < 0 || s >= segs) return 0;                      // undefined: in every bucket already
-    i32 d = ((s - i) % segs + segs) % segs;
+    i32 d = s - i; if (d < 0) d += segs;
     if (d <= nFwd || d >= segs - nBack) return 0;          // in the window already
-    float mx = (wl->x1 + wl->x2) * 0.5f, my = (wl->y1 + wl->y2) * 0.5f;
-    float hl = hypotf_(wl->x2 - wl->x1, wl->y2 - wl->y1) * 0.5f;
-    float r = reach + hl, dx = mx - tk_cps[i].cx, dy = my - tk_cps[i].cy;
+    float r = reach + bw_hl[wi], dx = bw_mx[wi] - tk_cps[i].cx, dy = bw_my[wi] - tk_cps[i].cy;
     return dx * dx + dy * dy <= r * r;
 }
 
@@ -1067,7 +1067,14 @@ static void buildWallBuckets(void) {
     // previous gate and this one, so no further from this gate's centre than
     // that gap plus the widest half-road, with a frame of travel as slack.
     float *reach = (float *)arena_alloc((u32)segs * 4);
-    if (!reach) { wbs_start = 0; return; }
+    u32 wbytes = (u32)(tk_wall_n > 0 ? tk_wall_n : 1) * 4;
+    bw_mx = (float *)arena_alloc(wbytes); bw_my = (float *)arena_alloc(wbytes); bw_hl = (float *)arena_alloc(wbytes);
+    if (!reach || !bw_mx || !bw_my || !bw_hl) { wbs_start = 0; return; }
+    for (i32 k = 0; k < tk_wall_n; k++) {
+        Wall *wl = &tk_walls[k];
+        bw_mx[k] = (wl->x1 + wl->x2) * 0.5f; bw_my[k] = (wl->y1 + wl->y2) * 0.5f;
+        bw_hl[k] = hypotf_(wl->x2 - wl->x1, wl->y2 - wl->y1) * 0.5f;
+    }
     for (i32 i = 0; i < segs; i++) reach[i] = sensor_len() + gap[((i - 1) % segs + segs) % segs] + tk_w_max + 40.0f;
 
     i32 *cnt = (i32 *)arena_alloc((u32)(segs + 1) * 4);
@@ -1489,6 +1496,18 @@ static i32   cfg_hidden = 5;
 // some clones a bit more throttle, some a bit less (which is also a bit more
 // brake, since they share one output). See evolve() for the table itself.
 static i32   cfg_nudgeMode = 0;
+// How much getting somewhere QUICKLY is worth on top of getting there at all:
+// a gate reached at the ideal pace scores (1 + cfg_pace) gates. The Explore
+// profile sets it to 0 — until a car can lap the track, the only thing worth
+// rewarding is how far it got. Any speed reward at that stage pays a car for
+// arriving flat out at a corner it cannot make, and the population converges
+// on doing exactly that. Optimize turns it back on to chase lap time.
+static float cfg_pace = 0.5f;
+// The speed a car can actually reach: every frame adds `accel` and then keeps
+// 99%, which settles at 99 * accel however long the straight. At the stock
+// settings that is 4.95, half of Max Speed 10 — so anything judged against
+// Max Speed itself (the Speed Boost zone wanted 70% of it) could never be met.
+static float cfg_topSpeed = 4.95f;
 
 // Lateral grip used to cancel sideways slip and keep the car's velocity
 // tracking its heading (see updateCar). It used to be a user-facing slider,
@@ -1516,12 +1535,16 @@ static void recompute_sensor_len(void) {
 
 __attribute__((export_name("set_config")))
 void set_config(float maxSpeed, float accel, float turnSpeed, float brakeStrength,
-                i32 initialTTL, i32 targetLaps, float focusPct, i32 hidden, i32 nudgeMode) {
+                i32 initialTTL, i32 targetLaps, float focusPct, i32 hidden, i32 nudgeMode, float paceReward) {
     cfg_maxSpeed = maxSpeed; cfg_accel = accel; cfg_turnSpeed = turnSpeed; cfg_brakeStrength = brakeStrength;
     cfg_initialTTL = initialTTL; cfg_targetLaps = targetLaps;
     cfg_focusPct = focusPct;
     cfg_hidden = hidden < 1 ? 1 : (hidden > MAX_HIDDEN ? MAX_HIDDEN : hidden);
     cfg_nudgeMode = nudgeMode ? 1 : 0;
+    // A caller that predates this argument passes nothing, which arrives from
+    // JS as NaN and fails the compare: it gets the default.
+    cfg_pace = paceReward >= 0.0f ? minf(paceReward, 4.0f) : 0.5f;
+    cfg_topSpeed = minf(maxSpeed, 99.0f * accel);
     recompute_sensor_len();
 }
 
@@ -2191,7 +2214,7 @@ static void updateCar(i32 i) {
         Zone *zn = &tk_zones[z];
         float dx = cx_ - zn->x, dy = cy_ - zn->y;
         if (dx * dx + dy * dy < zn->radius * zn->radius) {
-            if (zn->type == 0 && car_speed[i] > cfg_maxSpeed * 0.7f) car_fitness[i] += 2.0f;
+            if (zn->type == 0 && car_speed[i] > cfg_topSpeed * 0.7f) car_fitness[i] += 2.0f;
             else if (zn->type == 1) car_fitness[i] += 2.0f;
             else if (zn->type == 2) fitMult = 3.0f;
             else if (zn->type == 3) {
@@ -2295,16 +2318,13 @@ static void updateCar(i32 i) {
                 // above for why that alone is enough to track the stash's pace.
                 if (i == 0 && gAbs >= 0 && gAbs < MAX_GATES) gate_ratio[gAbs] = idealCp / maxf(dtCp, idealCp);
 
-                // The pace bonus is HALF a gate at most, not three gates. At 3x
-                // a car flat out to a corner it could not make outscored one
-                // that slowed down and got through: easing off cost it several
-                // hundred points on every gate it had already passed, and it
-                // had to clear a dozen more gates just to break even. The
-                // whole population then converged on arriving at that corner
-                // faster and dying in it, generation after generation. At
-                // 0.5x, getting further beats getting there faster, and pace
-                // still separates cars that got equally far.
-                car_fitness[i] += 500.0f * (1.0f + 0.5f * (idealCp / maxf(dtCp, idealCp))) * fitMult;
+                // The pace bonus is cfg_pace of a gate at most (half, when it
+                // is on at all — see cfg_pace). At 3x a car flat out to a
+                // corner it could not make outscored one that slowed down and
+                // got through: easing off cost it several hundred points on
+                // every gate it had already passed, and it had to clear a
+                // dozen more gates just to break even.
+                car_fitness[i] += 500.0f * (1.0f + cfg_pace * (idealCp / maxf(dtCp, idealCp))) * fitMult;
 
                 // A lap is complete when the car is back at the gate it
                 // started from — not when the index happens to wrap past zero,
@@ -2316,7 +2336,7 @@ static void updateCar(i32 i) {
                     car_lastLap[i] = lapFrames / 60.0f;
                     car_prevLapFrame[i] = car_frames[i];
                     float idealLap = tk_len / maxf(cfg_maxSpeed, 0.001f);
-                    car_fitness[i] += 3000.0f * (1.0f + 3.0f * (idealLap / maxf(lapFrames, idealLap))) * fitMult;
+                    car_fitness[i] += 3000.0f * (1.0f + 6.0f * cfg_pace * (idealLap / maxf(lapFrames, idealLap))) * fitMult;
                 }
             }
         }
