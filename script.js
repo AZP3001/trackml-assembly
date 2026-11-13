@@ -2476,17 +2476,18 @@ const editor = {
         if (t.autoWidthBlend === undefined) t.autoWidthBlend = 0;
         document.getElementById('edit-name').value = t.name;
         document.getElementById('edit-width').value = t.trackWidth;
-        document.getElementById('edit-angle').value = Math.round((t.startAngle || 0) * (180/Math.PI));
+        this.showAngle(t.startAngle);
         document.getElementById('edit-autowidth').checked = !!t.autoWidth;
         document.getElementById('edit-autowidth-blend').value = Math.round(t.autoWidthBlend * 100);
         this.syncAutoWidthUI();
         app.resetView();   // the editor starts on the whole map
+        this.grid.cells.clear(); this.grid.press = null;
         this.setMode('path');
         const c = document.getElementById('sim-canvas');
         c.style.touchAction = 'none';
         c.onpointerdown = e => { e.preventDefault(); c.setPointerCapture(e.pointerId); this.onDown(e); };
         c.onpointermove = e => { e.preventDefault(); this.onMove(e); };
-        c.onpointerup = c.onpointercancel = e => { c.releasePointerCapture(e.pointerId); this.dragIndex=null; this.snap=null; this.selectUp(); if(this.isDraggingStart) this.pinStart(); this.isDraggingStart=false; this.isResizingZone=false; if(this.isDrawing) this.finishDrawing(); };
+        c.onpointerup = c.onpointercancel = e => { c.releasePointerCapture(e.pointerId); this.dragIndex=null; this.snap=null; this.selectUp(); this.gridUp(); if(this.isDraggingStart) this.pinStart(); this.isDraggingStart=false; this.isResizingZone=false; if(this.isDrawing) this.finishDrawing(); };
     },
 
     setMode: function(m) {
@@ -2500,7 +2501,7 @@ const editor = {
         const ktc = document.getElementById('kill-timer-container');
         if (ktc) ktc.style.display = 'none';
         this.sel = []; this.marquee = null; this.xf = null;
-        ['path','draw','zones','select'].forEach(x => {
+        ['path','draw','zones','select','grid'].forEach(x => {
             const btn = document.getElementById('btn-mode-'+x);
             if(btn) btn.className = m===x?'px-2 py-1 text-xs rounded flex items-center gap-1 bg-blue-600 text-white':'px-2 py-1 text-xs rounded flex items-center gap-1 text-slate-400';
             const tools = document.getElementById(x+'-tools');
@@ -2616,7 +2617,7 @@ const editor = {
         const derived = generateTrackFromPath(this.track.id, this.track.name, this.track.path, this.track.trackWidth, null, null, [], this.autoOpts());
         this.track.startPos = derived.startPos;
         this.track.startAngle = derived.startAngle;
-        document.getElementById('edit-angle').value = Math.round((derived.startAngle || 0) * (180/Math.PI));
+        this.showAngle(derived.startAngle);
         this.selectedIndex = null;
         this.setMode('path');
     },
@@ -2741,8 +2742,7 @@ const editor = {
         const derived = generateTrackFromPath(this.track.id, this.track.name, path, this.track.trackWidth, null, null, [], this.autoOpts());
         this.track.startPos = derived.startPos;
         this.track.startAngle = derived.startAngle;
-        const angleEl = document.getElementById('edit-angle');
-        if (angleEl) angleEl.value = Math.round((derived.startAngle || 0) * (180 / Math.PI));
+        this.showAngle(derived.startAngle);
     },
 
     save: function() { 
@@ -2815,7 +2815,14 @@ const editor = {
             label.textContent = b === 0 ? 'Pinch only' : b === 100 ? 'Whole track' : `Mix ${b}%`;
         }
     },
-    updateAngle: function(v) { this.track.startAngle = parseFloat(v) * (Math.PI/180); },
+    updateAngle: function(v) { this.track.startAngle = parseFloat(v) * (Math.PI/180); this.showAngle(this.track.startAngle); },
+    // Slider and readout for a heading in radians, as 0-359 degrees (the
+    // generator's own headings come out of atan2, so they can be negative).
+    showAngle: function(rad) {
+        const deg = ((Math.round((rad || 0) * 180 / Math.PI) % 360) + 360) % 360;
+        document.getElementById('edit-angle').value = deg;
+        document.getElementById('edit-angle-val').textContent = deg + '°';
+    },
     addZone: function(type) { 
         const z = { id:Date.now().toString(), x:CANVAS_WIDTH/2, y:CANVAS_HEIGHT/2, radius:80, type };
         this.pinStart();
@@ -2836,6 +2843,7 @@ const editor = {
     dropStartIfNoLoop: function() {
         if(this.track.path.length < 3) { this.track.startPos = null; this.track.startAngle = null; }
     },
+    setSelType: function(type) { this.sel.forEach(i => { this.track.path[i].type = type; }); },
     // Select mode: delete every point in the selection.
     deleteSelection: function() {
         const gone = new Set(this.sel);
@@ -2858,7 +2866,7 @@ const editor = {
         if((!this.track.startPos || this.track.startAngle == null) && this.track.path.length >= 3) {
             const d = generateTrackFromPath(this.track.id, this.track.name, this.track.path, this.track.trackWidth, this.track.startPos, null, [], this.autoOpts());
             this.track.startPos = d.startPos; this.track.startAngle = d.startAngle;
-            document.getElementById('edit-angle').value = Math.round((d.startAngle || 0) * (180/Math.PI));
+            this.showAngle(d.startAngle);
         }
     },
 
@@ -2875,6 +2883,7 @@ const editor = {
         }
 
         if (this.mode === 'select') { this.selectDown(x, y); return; }
+        if (this.mode === 'grid') { this.gridDown(x, y); return; }
 
         if (this.mode === 'zones') {
             if(this.selectedZone && Math.hypot(x-(this.selectedZone.x+this.selectedZone.radius), y-this.selectedZone.y) < 30) { this.isResizingZone = true; return; }
@@ -2972,6 +2981,105 @@ const editor = {
         return { x, y, g };
     },
 
+    // ---- Grid mode: build the track out of boxes -----------------------------
+    // cells maps "cx,cy" to an arrow (0 right, 1 down, 2 left, 3 up) or, in
+    // Boxes mode, to null. Boxes: tap a box to make it track or not; the loop
+    // is whatever chain of touching boxes closes. Arrows: every box says where
+    // the road goes next, so two streets can run side by side without merging —
+    // tap to place, tap again to turn it, hold to remove. Whenever the boxes
+    // form a closed loop the track's path is rebuilt from it.
+    grid: { size: 100, arrows: false, cells: new Map(), lastDir: 0, press: null },
+    GRID_D: [[1, 0], [0, 1], [-1, 0], [0, -1]],
+    gridKey: function(x, y) { return Math.floor(x / this.grid.size) + ',' + Math.floor(y / this.grid.size); },
+    gridDown: function(x, y) {
+        if (x < 0 || y < 0 || x >= CANVAS_WIDTH || y >= CANVAS_HEIGHT) return;
+        const g = this.grid, key = this.gridKey(x, y);
+        // Hold to remove: if the finger is still down when this fires, the box goes.
+        g.press = { key, timer: setTimeout(() => { g.press = null; g.cells.delete(key); this.gridApply(); }, 450) };
+    },
+    gridUp: function() {
+        const g = this.grid, p = g.press;
+        if (!p) return;                                    // not in a press, or the hold already removed it
+        clearTimeout(p.timer); g.press = null;
+        const had = g.cells.has(p.key), dir = g.cells.get(p.key);
+        if (!g.arrows) { if (had) g.cells.delete(p.key); else g.cells.set(p.key, null); }
+        else if (had && dir !== null) { g.lastDir = (dir + 1) % 4; g.cells.set(p.key, g.lastDir); }
+        else g.cells.set(p.key, g.lastDir);                // a new arrow continues the way the last one pointed
+        this.gridApply();
+    },
+    // The closed loop of boxes, in driving order, or null.
+    gridLoop: function() {
+        const g = this.grid, cells = g.cells, D = this.GRID_D;
+        const at = k => k.split(',').map(Number), nb = (k, d) => { const [cx, cy] = at(k); return (cx + D[d][0]) + ',' + (cy + D[d][1]); };
+        const order = [], seen = new Map();
+        if (g.arrows) {
+            // Follow the arrows from the first one placed until a box repeats;
+            // the loop is everything from that box's first visit on.
+            let cur = [...cells.keys()].find(k => cells.get(k) !== null);
+            while (cur !== undefined && cells.get(cur) != null && !seen.has(cur)) { seen.set(cur, order.length); order.push(cur); cur = nb(cur, cells.get(cur)); }
+            return cur !== undefined && seen.has(cur) ? order.slice(seen.get(cur)) : null;
+        }
+        // Boxes: walk from box to touching box, straight on where there is a choice.
+        let cur = cells.keys().next().value, dir = 0;
+        while (cur !== undefined) {
+            seen.set(cur, 1); order.push(cur);
+            const d = [dir, (dir + 1) % 4, (dir + 3) % 4, (dir + 2) % 4].find(d => cells.has(nb(cur, d)) && !seen.has(nb(cur, d)));
+            if (d === undefined) break;
+            dir = d; cur = nb(cur, d);
+        }
+        const closes = order.length >= 4 && [0, 1, 2, 3].some(d => nb(order[order.length - 1], d) === order[0]);
+        return closes ? order : null;
+    },
+    // Rebuild the path from the loop: one point at the middle of every box where the road turns.
+    gridApply: function() {
+        const g = this.grid, S = g.size, loop = this.gridLoop(), status = document.getElementById('grid-status');
+        const c = (loop || []).map(k => { const [cx, cy] = k.split(',').map(Number); return { x: (cx + 0.5) * S, y: (cy + 0.5) * S }; });
+        const n = c.length;
+        const pts = c.filter((p, i) => { const a = c[(i + n - 1) % n], b = c[(i + 1) % n]; return (p.x - a.x) * (b.y - p.y) !== (p.y - a.y) * (b.x - p.x); });
+        const ok = pts.length >= 4;
+        if (status) status.textContent = ok ? `Closed loop: ${n} boxes` : (g.cells.size ? 'Not a closed loop yet' : 'Tap boxes to build a loop');
+        if (!ok) return;
+        const t = this.track;
+        t.path = pts.map(p => ({ x: p.x, y: p.y, type: 'rounded', radius: S / 2 }));
+        // Two streets in neighbouring boxes only stay two streets if the road is narrower than a box.
+        if (t.trackWidth > S * 0.45) { t.trackWidth = Math.max(20, Math.floor(S * 0.45)); document.getElementById('edit-width').value = t.trackWidth; }
+        t.startPos = null; t.startAngle = null; this.selectedIndex = null;   // the start follows the new loop
+    },
+    setGridSize: function(v) { this.grid.size = parseInt(v); document.getElementById('grid-size-val').textContent = v; this.gridApply(); },
+    setGridArrows: function(on) {
+        const g = this.grid; on = on === 'true' || on === true;
+        // Boxes that already close a loop get their arrows from it; going back, arrows are just boxes.
+        if (on && !g.arrows) {
+            const loop = this.gridLoop() || [];
+            loop.forEach((k, i) => { const a = k.split(',').map(Number), b = loop[(i + 1) % loop.length].split(',').map(Number); g.cells.set(k, this.GRID_D.findIndex(d => d[0] === b[0] - a[0] && d[1] === b[1] - a[1])); });
+        }
+        if (!on) for (const k of g.cells.keys()) g.cells.set(k, null);
+        g.arrows = on;
+        const ON = 'px-2 py-1 text-[10px] rounded bg-blue-600 text-white', OFF = 'px-2 py-1 text-[10px] rounded text-slate-400';
+        document.getElementById('btn-grid-boxes').className = on ? OFF : ON;
+        document.getElementById('btn-grid-arrows').className = on ? ON : OFF;
+        this.gridApply();
+    },
+    clearGrid: function() { this.grid.cells.clear(); this.gridApply(); },
+    drawGrid: function(ctx, v) {
+        const g = this.grid, S = g.size;
+        ctx.strokeStyle = 'rgba(226,232,240,0.25)'; ctx.lineWidth = 1 / v.z; ctx.beginPath();
+        for (let x = 0; x <= CANVAS_WIDTH; x += S) { ctx.moveTo(x, 0); ctx.lineTo(x, CANVAS_HEIGHT); }
+        for (let y = 0; y <= CANVAS_HEIGHT; y += S) { ctx.moveTo(0, y); ctx.lineTo(CANVAS_WIDTH, y); }
+        ctx.stroke();
+        for (const [k, dir] of g.cells) {
+            const [cx, cy] = k.split(',').map(Number), mx = (cx + 0.5) * S, my = (cy + 0.5) * S;
+            ctx.fillStyle = 'rgba(250,204,21,0.22)'; ctx.fillRect(cx * S, cy * S, S, S);
+            if (dir === null) continue;
+            const [dx, dy] = this.GRID_D[dir], a = S * 0.3;
+            ctx.strokeStyle = '#fde047'; ctx.lineWidth = Math.max(2, S * 0.05); ctx.lineCap = 'round'; ctx.beginPath();
+            ctx.moveTo(mx - dx * a, my - dy * a); ctx.lineTo(mx + dx * a, my + dy * a);
+            ctx.moveTo(mx + dx * a - (dx - dy) * a * 0.5, my + dy * a - (dy + dx) * a * 0.5); ctx.lineTo(mx + dx * a, my + dy * a);
+            ctx.lineTo(mx + dx * a - (dx + dy) * a * 0.5, my + dy * a - (dy - dx) * a * 0.5);
+            ctx.stroke();
+        }
+    },
+
     // ---- Select mode: marquee a set of points, then move / stretch / scale them.
     sel: [], marquee: null, xf: null,
     selBox: function() {
@@ -3054,6 +3162,7 @@ const editor = {
             return;
         }
         if(this.mode === 'select') { this.selectMove(x, y); return; }
+        if(this.mode === 'grid') return;
         if(this.mode === 'zones') {
             if(this.selectedZone && (e.buttons === 1 || e.type==="touchmove")) {
                 if(this.isResizingZone) this.selectedZone.radius = Math.max(30, Math.hypot(x - this.selectedZone.x, y - this.selectedZone.y)); 
@@ -3180,6 +3289,8 @@ const editor = {
             ctx.fillStyle = this.isDraggingStart ? '#fff' : '#22c55e'; ctx.beginPath(); ctx.arc(p.startPos.x, p.startPos.y, 10, 0, Math.PI*2); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth=2; ctx.stroke();
             }
         }
+
+        if(this.mode === 'grid') this.drawGrid(ctx, v);
 
         if(this.mode === 'select') {
             const m = this.marquee, b = this.selBox();

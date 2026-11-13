@@ -503,6 +503,7 @@ of the space.
 Besides placing points by hand, the editor has three ways to build a track:
 * **Draw:** switch to the Draw tab and drag a loop directly on the canvas — it's simplified into an editable path automatically.
 * **Import from Image:** upload a PNG/JPG (a hand-drawn loop or a photo of a track layout) and it's analyzed (thresholded, skeletonized, traced) into a starting track for you to refine.
+* **Grid:** build the track out of boxes (size set by the Box size slider). *Boxes*: tap boxes to mark them as track; once they close a loop it becomes the track. *Arrows*: each box gets an arrow saying where the road goes next (tap to place, tap again to turn, hold to remove), so two streets in neighbouring boxes stay separate.
 * **Duplicate:** clone the currently-selected track as a starting point for a variant.
 
 Tracks you save are kept in the browser (localStorage) across visits, until **Wipe All Data & Reload** in Settings deletes them. Nothing else is persisted.

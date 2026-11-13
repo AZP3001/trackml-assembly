@@ -669,6 +669,47 @@ const startAim = await page.evaluate(() => {
 check(Math.abs(startAim.deg - 90) < 10 && Math.abs(startAim.x - 1000) < 5, 'a dragged start marker points along the track where it is dropped',
     `at (${startAim.x.toFixed(0)}, ${startAim.y.toFixed(0)}) heading ${startAim.deg.toFixed(0)}°`);
 
+// Grid mode: boxes that close a loop become the track; arrows give it a direction.
+const grid = await page.evaluate(async () => {
+    app.createNewTrack();
+    editor.setMode('grid');
+    const tap = (cx, cy) => { editor.gridDown(cx * 100 + 50, cy * 100 + 50); editor.gridUp(); };
+    const P = () => editor.track.path.map(p => [p.x, p.y]);
+    for (const [cx, cy] of [[2, 2], [3, 2], [4, 2], [4, 3], [4, 4], [3, 4], [2, 4]]) tap(cx, cy);
+    const open = editor.track.path.length;                      // seven boxes: not closed yet
+    tap(2, 3);
+    const boxes = P(), status = document.getElementById('grid-status').textContent;
+    editor.setGridArrows('true');                               // the loop hands its direction to the arrows
+    const arrows = [...editor.grid.cells.values()].join('');
+    editor.clearGrid();
+    // two streets in touching rows, kept apart by their arrows: → → ↓ / ↑ ← ←
+    tap(1, 1); tap(2, 1); tap(3, 1); tap(3, 1); tap(3, 2); tap(3, 2); tap(2, 2); tap(1, 2); tap(1, 2);
+    const twoRows = P(), width = editor.track.trackWidth;
+    editor.gridDown(150, 150); await new Promise(r => setTimeout(r, 600)); editor.gridUp();   // hold: remove
+    const afterHold = editor.grid.cells.has('1,1');
+    editor.draw(document.getElementById('sim-canvas').getContext('2d'));
+    editor.cancel();
+    return { open, boxes, status, arrows, twoRows, width, afterHold };
+});
+check(grid.open === 0 && JSON.stringify(grid.boxes) === '[[250,250],[450,250],[450,450],[250,450]]', 'grid boxes become a track once they close a loop', `${JSON.stringify(grid.boxes)} — ${grid.status}`);
+check(grid.arrows === '00112233', 'switching to arrows keeps the loop and gives it a direction', grid.arrows);
+check(JSON.stringify(grid.twoRows) === '[[150,150],[350,150],[350,250],[150,250]]' && grid.width === 45, 'arrows keep two side-by-side streets apart', `${JSON.stringify(grid.twoRows)} width ${grid.width}`);
+check(grid.afterHold === false, 'holding a box removes it');
+
+// Select mode can make its points sharp or rounded; the start angle is shown in degrees.
+const misc = await page.evaluate(() => {
+    newSquare();
+    editor.setMode('select'); editor.sel = [0, 2]; editor.setSelType('corner');
+    const types = editor.track.path.map(p => p.type).join(',');
+    editor.updateAngle(-90 + 360 * 0);  // slider value in degrees
+    editor.showAngle(-Math.PI / 2);
+    const label = document.getElementById('edit-angle-val').textContent, slider = document.getElementById('edit-angle').value;
+    editor.cancel();
+    return { types, label, slider };
+});
+check(misc.types === 'corner,rounded,corner,rounded', 'Select mode sets corner / rounded on the selection', misc.types);
+check(misc.label === '270°' && misc.slider === '270', 'the start angle is shown, as 0-359°', `${misc.label}, slider ${misc.slider}`);
+
 // Fullscreen toggle: the map covers the viewport, then goes back.
 const fs = await page.evaluate(() => {
     app.toggleFullscreen();

@@ -350,13 +350,31 @@
                     <button data-click="editor.setMode|zones" id="btn-mode-zones" class="px-2 py-1 text-xs rounded flex items-center gap-1 text-slate-400">
                         <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg> Zones/Areas
                     </button>
+                    <button data-click="editor.setMode|grid" id="btn-mode-grid" class="px-2 py-1 text-xs rounded flex items-center gap-1 text-slate-400">
+                        <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="1"></rect><path d="M3 9h18M3 15h18M9 3v18M15 3v18"></path></svg> Grid
+                    </button>
                     <button data-click="editor.setMode|select" id="btn-mode-select" class="px-2 py-1 text-xs rounded flex items-center gap-1 text-slate-400">
                         <svg class="w-3 h-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="4 3"><rect x="3" y="3" width="18" height="18" rx="1"></rect></svg> Select
                     </button>
                 </div>
 
+                <div id="grid-tools" class="hidden items-center gap-2 flex-wrap">
+                    <div class="flex bg-slate-700 rounded p-0.5 gap-0.5">
+                        <button id="btn-grid-boxes" data-click="editor.setGridArrows|false" title="Tap a box to make it track; tap again to clear it" class="px-2 py-1 text-[10px] rounded bg-blue-600 text-white">Boxes</button>
+                        <button id="btn-grid-arrows" data-click="editor.setGridArrows|true" title="Tap to place an arrow, tap again to turn it, hold to remove. Streets side by side stay separate." class="px-2 py-1 text-[10px] rounded text-slate-400">Arrows</button>
+                    </div>
+                    <div class="flex flex-col w-24 md:w-32">
+                        <span class="text-[8px] md:text-[10px] text-slate-400 flex justify-between"><span>Box size</span><span id="grid-size-val" class="font-mono text-slate-200">100</span></span>
+                        <input type="range" min="50" max="200" step="10" value="100" id="grid-size" data-input="editor.setGridSize|@value" class="w-full">
+                    </div>
+                    <button data-click="editor.clearGrid" class="px-2 py-1 bg-red-500/20 text-red-400 border border-red-500/50 rounded text-[10px] md:text-xs">Clear</button>
+                    <span id="grid-status" class="text-[10px] md:text-xs text-yellow-200">Tap boxes to build a loop</span>
+                </div>
+
                 <div id="select-tools" class="hidden items-center gap-2 flex-wrap">
                     <span class="text-[10px] md:text-xs text-yellow-200">Drag a box around points to select them. Then drag inside to move, a side handle to stretch, or a corner to scale everything evenly.</span>
+                    <button data-click="editor.setSelType|corner" title="Make the selected points sharp corners" class="px-2 py-1 bg-slate-700 hover:bg-slate-600 rounded text-[10px] md:text-xs">Corner</button>
+                    <button data-click="editor.setSelType|rounded" title="Make the selected points rounded" class="px-2 py-1 bg-slate-700 hover:bg-slate-600 rounded text-[10px] md:text-xs">Rounded</button>
                     <button data-click="editor.deleteSelection" class="px-2 py-1 bg-red-500/20 text-red-400 border border-red-500/50 rounded text-[10px] md:text-xs">Delete selected</button>
                 </div>
 
@@ -426,7 +444,7 @@
                     </div>
 
                      <div class="flex flex-col w-16 md:w-20">
-                        <span class="text-[8px] md:text-[10px] text-slate-400">Start Angle</span>
+                        <span class="text-[8px] md:text-[10px] text-slate-400 flex justify-between"><span>Start Angle</span><span id="edit-angle-val" class="font-mono text-slate-200">0°</span></span>
                         <input type="range" min="0" max="360" id="edit-angle" data-input="editor.updateAngle|@value" class="w-full">
                     </div>
 
