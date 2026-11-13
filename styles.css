@@ -33,3 +33,12 @@ body { background-color: #0f172a; color: white; overflow: hidden; margin: 0; fon
                copy is a long scroll away on a screen this short. */
             #run-controls-m { display: flex !important; }
         }
+
+        /* Fullscreen map (app.toggleFullscreen): the track area covers the page;
+           the editor toolbar floats over it and can fold down to its ☰ button. */
+        body.map-fs #map-wrap { position: fixed; inset: 0; z-index: 45; border: 0; border-radius: 0; background: #020617; }
+        body.map-fs #sidebar { display: none; }
+        body.map-fs #editor-controls { position: fixed; top: 0.5rem; left: 0.5rem; right: 0.5rem; }
+        #editor-controls.collapsed { right: auto !important; padding: 0.25rem; }
+        #editor-controls.collapsed > :last-child,
+        #editor-controls.collapsed > :first-child > :not(#btn-tools-toggle) { display: none !important; }

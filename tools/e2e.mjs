@@ -485,9 +485,7 @@ const zones = await page.evaluate(async () => {
 check(zones.count === 4 && zones.walls > 20, 'zones survive a track rebuild',
     `${zones.count} zones: ${zones.types.join(', ')}`);
 
-// --- saving a track, and NOT persisting it ------------------------------
-// The app deliberately keeps nothing across reloads. A track you make lasts
-// the session; the code export is how you keep one.
+// --- saving a track persists it, and only it ------------------------------
 await page.evaluate(() => {
     app.createNewTrack();
     document.getElementById('edit-name').value = 'E2E Session Track';
@@ -498,16 +496,14 @@ await page.waitForTimeout(400);
 const saved = await page.evaluate(() => ({
     inList: app.state.tracks.some(t => t.name === 'E2E Session Track'),
     code: document.getElementById('code-output').value,
-    storageKeys: Object.keys(localStorage).length + Object.keys(sessionStorage).length
+    keys: Object.keys(localStorage).join(',')
 }));
 check(saved.inList, 'custom track joins the track list');
 check(/^generateTrackFromPath\(/.test(saved.code), 'the editor exports code for the track',
     saved.code.slice(0, 48) + '...');
-check(saved.storageKeys === 0, 'saving writes nothing to browser storage',
-    `${saved.storageKeys} keys after a save`);
+check(saved.keys === 'trackml_user_tracks', 'saving stores only the user tracks', saved.keys);
 
-// Plant some storage, reload, and confirm the page wiped it and came back with
-// only the built-in tracks.
+// Plant some other storage, reload: the saved track comes back, nothing else does.
 await page.evaluate(() => {
     localStorage.setItem('trackml_custom_tracks_v1', '[{"id":"ghost","name":"Ghost Track"}]');
     localStorage.setItem('trackml_settings_v1', '{"populationSize":123}');
@@ -523,14 +519,32 @@ const afterReload = await page.evaluate(() => ({
     tracks: app.state.tracks.length,
     pop: app.state.populationSize
 }));
-check(afterReload.local === 0 && afterReload.session === 0, 'reload clears browser storage',
+check(afterReload.local === 1 && afterReload.session === 0, 'reload clears all other browser storage',
     `${afterReload.local} local + ${afterReload.session} session keys remain`);
-check(!afterReload.sessionTrack, 'a track made this session does not come back');
+check(afterReload.sessionTrack, 'a saved track comes back after a reload');
 check(!afterReload.ghost, 'storage planted by an older build is ignored');
-check(afterReload.tracks === boot.tracks, 'reload gives the built-in track list',
+check(afterReload.tracks === boot.tracks + 1, 'reload gives built-ins plus the saved track',
     `${afterReload.tracks} tracks`);
 check(afterReload.pop === boot.cars, 'settings reset to defaults',
     `population ${afterReload.pop}`);
+
+// Fullscreen toggle: the map covers the viewport, then goes back.
+const fs = await page.evaluate(() => {
+    app.toggleFullscreen();
+    const r = document.getElementById('map-wrap').getBoundingClientRect();
+    const full = r.width === innerWidth && r.height === innerHeight;
+    app.toggleFullscreen();
+    return { full, off: !document.body.classList.contains('map-fs') };
+});
+check(fs.full && fs.off, 'fullscreen button gives the map the whole viewport');
+
+// "Wipe All Data" deletes the saved tracks too.
+page.once('dialog', d => d.accept());
+await Promise.all([page.waitForEvent('load'), page.evaluate(() => { app.wipeEverything(); })]);
+await page.waitForFunction(APP_READY, null, { timeout: 30000 });
+const wiped = await page.evaluate(() => ({ local: Object.keys(localStorage).length, tracks: app.state.tracks.length }));
+check(wiped.local === 0 && wiped.tracks === boot.tracks, 'wipe all data deletes the saved tracks',
+    `${wiped.local} keys, ${wiped.tracks} tracks`);
 
 // --- session round trip ---------------------------------------------------
 // Save the whole run, scramble the live state, load it back, and check the

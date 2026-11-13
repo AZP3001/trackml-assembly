@@ -498,7 +498,7 @@ Besides placing points by hand, the editor has three ways to build a track:
 * **Import from Image:** upload a PNG/JPG (a hand-drawn loop or a photo of a track layout) and it's analyzed (thresholded, skeletonized, traced) into a starting track for you to refine.
 * **Duplicate:** clone the currently-selected track as a starting point for a variant.
 
-Tracks you create last for the session. **Nothing is cached or persisted** — see below.
+Tracks you save are kept in the browser (localStorage) across visits, until **Wipe All Data & Reload** in Settings deletes them. Nothing else is persisted.
 
 ### Keeping a track
 Hit **Save Track** and the editor hands you a `generateTrackFromPath(...)` line for it. Paste that

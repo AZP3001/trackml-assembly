@@ -281,23 +281,27 @@ function finishLineOf(t) {
     return { x1: cp[i], y1: cp[i + 1], x2: cp[i + 2], y2: cp[i + 3] };
 }
 
-// --- No persistence, by design -----------------------------------------
+// --- Almost no persistence, by design ------------------------------------
 //
-// Nothing this app does survives a reload. Custom tracks, slider settings and
-// the trained population all live in memory only, so every load starts from a
-// clean slate. Use "Save AI" for a brain you want to keep and the code export
-// in the track editor for a track.
+// Slider settings and the trained population live in memory only, so every
+// load starts from a clean slate. Use "Save AI" for a brain you want to keep.
+// The one thing kept across reloads is the tracks you saved in the editor
+// (TRACKS_KEY), until "Wipe All Data" removes those too.
 //
 // wipeStorage() doesn't just decline to write — it actively clears everything
 // the page could be holding, including data written by an older build that did
 // persist, and any Cache Storage or service worker left over from one. Reload
 // really does mean reload.
-function wipeStorage() {
+const TRACKS_KEY = 'trackml_user_tracks';
+function wipeStorage(keepTracks) {
     const clear = (store) => {
         try { store && store.clear(); } catch (e) { /* blocked or unavailable */ }
     };
+    let kept = null;
+    try { if (keepTracks) kept = localStorage.getItem(TRACKS_KEY); } catch (e) { /* blocked */ }
     clear(window.localStorage);
     clear(window.sessionStorage);
+    try { if (kept) localStorage.setItem(TRACKS_KEY, kept); } catch (e) { /* blocked */ }
 
     // A service worker would keep serving stale JS and wasm from its own cache
     // no matter what the network says, so retire any that's registered.
@@ -860,8 +864,18 @@ const app = {
         // Load tracks from the external tracks.js file
         this.state.tracks = getDefaultTracks(generateTrackFromPath, CANVAS_WIDTH, CANVAS_HEIGHT);
         this._builtInTrackIds = new Set(this.state.tracks.map(t => t.id));
-        // Nothing is restored from storage: tracks you make last for the
-        // session and no longer.
+        // Tracks saved in the editor come back; one bad entry must not cost
+        // the rest, hence the try per track.
+        let defs = [];
+        try { defs = JSON.parse(localStorage.getItem(TRACKS_KEY)) || []; } catch (e) { /* blocked or corrupt */ }
+        for (const d of Array.isArray(defs) ? defs : []) {
+            try {
+                const t = generateTrackFromPath(d.id, d.name, d.path, d.trackWidth, d.startPos, d.startAngle, d.zones || [], { enabled: !!d.autoWidth, blend: d.autoWidthBlend || 0 });
+                t._user = true;
+                const i = this.state.tracks.findIndex(tr => tr.id === t.id);
+                if (i !== -1) this.state.tracks[i] = t; else this.state.tracks.push(t);
+            } catch (e) { /* skip a track that no longer builds */ }
+        }
         this.renderTrackList();
         this.switchTrack(0);
     },
@@ -2002,12 +2016,25 @@ const app = {
         inp.value = '';
     },
 
-    // The one explicit "forget everything" control. Nothing is persisted
-    // automatically — every open already starts clean — so this exists for the
-    // case where something cached looks wrong and you want the browser's copy
-    // of the site gone too, not just the run.
+    // The one explicit "forget everything" control: the saved tracks, the
+    // browser's cached copy of the site, and the run.
+    // The map takes the whole page. The CSS class does the work; the native
+    // Fullscreen API on top hides the browser chrome where it exists (iPhone
+    // Safari has none for page elements).
+    toggleFullscreen: function() {
+        const on = document.body.classList.toggle('map-fs');
+        const d = document, el = d.documentElement;
+        try {
+            let p;
+            if (on) p = (el.requestFullscreen || el.webkitRequestFullscreen || (() => {})).call(el);
+            else if (d.fullscreenElement || d.webkitFullscreenElement) p = (d.exitFullscreen || d.webkitExitFullscreen).call(d);
+            if (p && p.catch) p.catch(() => {});
+        } catch (e) { /* refused: the CSS fullscreen still applies */ }
+        this.handleViewportResize();
+    },
+
     wipeEverything: function() {
-        if(!confirm('Wipe all site data and reload?\n\nThis clears browser storage and any cached copy of the app, and throws away the current run. Saved files on your computer are untouched.')) return;
+        if(!confirm('Wipe all site data and reload?\n\nThis deletes the tracks you created, clears browser storage and any cached copy of the app, and throws away the current run. Saved files on your computer are untouched.')) return;
         wipeStorage();
         const done = () => location.reload();
         if(window.caches && caches.keys) {
@@ -2176,18 +2203,25 @@ const app = {
         document.getElementById('editor-controls').classList.remove('hidden');
         closeSidebar();
     },
+    persistTracks: function() {
+        try {
+            localStorage.setItem(TRACKS_KEY, JSON.stringify(this.state.tracks.filter(t => t._user).map(t => this.cloneTrackDef(t))));
+        } catch (e) { /* storage blocked or full: the track still lasts the session */ }
+    },
     saveTrack: function(t) {
+        t._user = true;
         const idx = this.state.tracks.findIndex(tr => tr.id === t.id);
         if(idx !== -1) this.state.tracks[idx] = t;
         else { this.state.tracks.push(t); this.state.currentTrackIndex = this.state.tracks.length-1; }
         this.state.isEditing = false;
         document.getElementById('editor-controls').classList.add('hidden');
         this.switchTrack(this.state.currentTrackIndex); this.renderTrackList();
+        this.persistTracks();
     },
     deleteTrack: function() {
         if(confirm("Delete this track?")) {
             if(this.state.tracks.length > 1) {
-                this.state.tracks.splice(this.state.currentTrackIndex, 1); this.switchTrack(0); this.renderTrackList();
+                this.state.tracks.splice(this.state.currentTrackIndex, 1); this.switchTrack(0); this.renderTrackList(); this.persistTracks();
             } else alert("Cannot delete last track.");
         }
     },
@@ -2696,6 +2730,7 @@ const editor = {
         document.getElementById('code-modal').classList.remove('hidden');
     },
 
+    toggleTools: function() { document.getElementById('editor-controls').classList.toggle('collapsed'); },
     cancel: function() {
         app.state.isEditing = false; 
         document.getElementById('editor-controls').classList.add('hidden'); 
@@ -2915,9 +2950,17 @@ const editor = {
     }
 };
 
-// Before anything else: clear every trace of a previous visit.
-wipeStorage();
+// Before anything else: clear every trace of a previous visit, except the
+// tracks the user saved.
+wipeStorage(true);
 window.onload = () => app.init();
+// Esc (or the browser's own exit) leaves native fullscreen: drop the CSS one too.
+['fullscreenchange', 'webkitfullscreenchange'].forEach(ev => document.addEventListener(ev, () => {
+    if (!(document.fullscreenElement || document.webkitFullscreenElement) && document.body.classList.contains('map-fs')) {
+        document.body.classList.remove('map-fs');
+        app.handleViewportResize();
+    }
+}));
 
 function openSidebar() {
     document.getElementById('sidebar').classList.add('open');
