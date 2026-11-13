@@ -585,6 +585,22 @@ const fit = await page.evaluate(() => {
 check(fit.v.zoom > 2 && fit.v.panX === 400 && fit.v.panY === 350, 'the race view zooms in on and centres a small track', `zoom ${fit.v.zoom.toFixed(2)} at (${fit.v.panX}, ${fit.v.panY})`);
 check(fit.tl.x <= 280 && fit.tl.y <= 280 && fit.br.x >= 520 && fit.br.y >= 420, 'with the whole track still in view');
 
+// Follow camera: the auto pick is held until its lap ends, not swapped on every lead change.
+const hold = await page.evaluate(() => {
+    const cars = app.state.cars, was = app.state.followCar, keep = cars.map(c => [c.fitness, c.crashed, c.completedLaps]);
+    cars.forEach(c => { c.fitness = 0; c.crashed = false; c.completedLaps = 0; });
+    app.state.spectateCarId = null; app.state.followCar = true; app._spectated = null;
+    cars[1].fitness = 5; const first = (app._spectated = app._pickSpectated()).id;
+    cars[2].fitness = 9; const held = (app._spectated = app._pickSpectated()).id;
+    cars[1].completedLaps = 1; const next = (app._spectated = app._pickSpectated()).id;
+    app.state.followCar = false; cars[3].fitness = 20; const free = app._pickSpectated().id;
+    cars.forEach((c, i) => { [c.fitness, c.crashed, c.completedLaps] = keep[i]; });
+    app.state.followCar = was; app._spectated = app._pickSpectated();
+    return { first, held, next, free };
+});
+check(hold.first === 1 && hold.held === 1 && hold.next === 2, 'follow camera keeps its car until the lap ends', JSON.stringify(hold));
+check(hold.free === 3, 'and without follow the telemetry still tracks the leader live');
+
 // Fullscreen toggle: the map covers the viewport, then goes back.
 const fs = await page.evaluate(() => {
     app.toggleFullscreen();

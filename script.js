@@ -757,12 +757,17 @@ const app = {
         // regardless meant that if car 0 had crashed and no living car outscored
         // it, the telemetry panel ended up pinned to a wreck.
         const cars = this.state.cars;
+        // Camera follow: hold the auto pick until it finishes its lap (or
+        // crashes) instead of hopping every time the lead changes hands.
+        const h = this._spectated;
+        if (this.state.followCar && h && !h.crashed && cars[h.id] === h && h.completedLaps === this._holdLaps) return h;
         let best = null;
         for (let i = 0; i < cars.length; i++) {
             const c = cars[i];
             if (c.crashed) continue;
             if (best === null || c.fitness > best.fitness) best = c;
         }
+        this._holdLaps = best ? best.completedLaps : 0;
         return best;
     },
 
@@ -966,6 +971,7 @@ const app = {
             c.sensors.fill(0); c.inputs[0] = 0; c.inputs[1] = 0;
         }
         this.state.aliveCount = n;
+        this._holdLaps = -1;   // new generation: the follow camera picks afresh
     },
 
     // Selection, crossover and mutation all happen inside the master wasm
@@ -1556,17 +1562,17 @@ const app = {
             t.steerR = steerR;
         }
         if(gas !== t.gas) {
-            if(ui.telGas) ui.telGas.style.width = gas;
+            if(ui.telGas) ui.telGas.style.height = gas;
             if(ui.telGasM) ui.telGasM.style.width = gas;
             t.gas = gas;
         }
         if(brake !== t.brake) {
-            if(ui.telBrake) ui.telBrake.style.width = brake;
+            if(ui.telBrake) ui.telBrake.style.height = brake;
             if(ui.telBrakeM) ui.telBrakeM.style.width = brake;
             t.brake = brake;
         }
         if(speed !== t.speed) {
-            if(ui.telSpeed) ui.telSpeed.style.width = speed;
+            if(ui.telSpeed) ui.telSpeed.style.height = speed;
             if(ui.telSpeedM) ui.telSpeedM.style.width = speed;
             t.speed = speed;
         }

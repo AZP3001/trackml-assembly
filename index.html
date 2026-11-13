@@ -67,33 +67,33 @@
             </label>
         </div>
 
-        <div class="mb-4 bg-slate-700/30 p-3 rounded-lg border border-slate-600">
-             <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-2 flex justify-between items-center gap-1">
+        <div class="mb-3 bg-slate-700/30 p-2 rounded-lg border border-slate-600">
+             <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-1.5 flex justify-between items-center gap-1">
                 <span id="telemetry-label" class="truncate">Live Telemetry (Auto — Fastest)</span>
                 <button id="btn-release-spectate" data-click="app.releaseSpectate" class="hidden shrink-0 text-cyan-300 hover:text-cyan-200 normal-case font-normal text-[9px] bg-cyan-500/10 border border-cyan-500/30 rounded px-1.5 py-0.5" title="Stop following this car and return to auto-follow fastest">Release</button>
                 <svg class="w-3 h-3 shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"></path></svg>
             </h3>
-            <p class="text-[9px] text-slate-500 italic -mt-1 mb-2">Click any car on track to spectate it.</p>
-            <div class="space-y-2">
-                <div class="flex items-center gap-2">
-                    <span class="text-[10px] w-8 text-slate-400">Steer</span>
-                    <div class="telemetry-bar-bg flex-1">
+            <!-- One compact row: steer left/right, then gas / brake / speed
+                 as vertical bars filling bottom to top. -->
+            <div class="flex items-end gap-3" title="Click any car on track to spectate it.">
+                <div class="flex-1 flex flex-col gap-1">
+                    <div class="telemetry-bar-bg">
                         <div id="tel-steer-l" class="bar-steer-l" style="width: 0%"></div>
                         <div id="tel-steer-r" class="bar-steer-r" style="width: 0%"></div>
                     </div>
+                    <span class="text-[9px] text-slate-400 leading-none">Steer</span>
                 </div>
-                <div class="flex items-center gap-2">
-                    <span class="text-[10px] w-8 text-slate-400">Gas</span>
-                    <div class="telemetry-bar-bg flex-1"><div id="tel-gas" class="telemetry-bar-fill bg-emerald-500" style="width: 0%"></div></div>
+                <div class="flex flex-col items-center gap-1">
+                    <div class="telemetry-vbar"><div id="tel-gas" class="bg-emerald-500" style="height: 0%"></div></div>
+                    <span class="text-[9px] text-slate-400 leading-none">Gas</span>
                 </div>
-                <div class="flex items-center gap-2">
-                    <span class="text-[10px] w-8 text-slate-400">Brk</span>
-                    <div class="telemetry-bar-bg flex-1"><div id="tel-brake" class="telemetry-bar-fill bg-red-500" style="width: 0%"></div></div>
+                <div class="flex flex-col items-center gap-1">
+                    <div class="telemetry-vbar"><div id="tel-brake" class="bg-red-500" style="height: 0%"></div></div>
+                    <span class="text-[9px] text-slate-400 leading-none">Brk</span>
                 </div>
-                <div class="flex items-center gap-2 mt-1">
-                    <span class="text-[10px] w-8 text-slate-400">Spd</span>
-                    <div class="telemetry-bar-bg flex-1"><div id="tel-speed" class="telemetry-bar-fill bg-yellow-400" style="width: 0%"></div></div>
-                    <span id="tel-speed-val" class="text-[10px] w-6 text-right font-mono text-yellow-400">0</span>
+                <div class="flex flex-col items-center gap-1">
+                    <div class="telemetry-vbar"><div id="tel-speed" class="bg-yellow-400" style="height: 0%"></div></div>
+                    <span class="text-[9px] text-slate-400 leading-none">Spd <span id="tel-speed-val" class="font-mono text-yellow-400">0</span></span>
                 </div>
             </div>
         </div>

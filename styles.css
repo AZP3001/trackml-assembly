@@ -7,6 +7,8 @@ body { background-color: #0f172a; color: white; overflow: hidden; margin: 0; fon
         
         .telemetry-bar-bg { background: #1e293b; height: 6px; border-radius: 3px; overflow: hidden; position: relative; }
         .telemetry-bar-fill { height: 100%; transition: width 0.1s linear; }
+        .telemetry-vbar { background: #1e293b; width: 8px; height: 28px; border-radius: 3px; overflow: hidden; position: relative; }
+        .telemetry-vbar > div { position: absolute; left: 0; right: 0; bottom: 0; transition: height 0.1s linear; }
         .bar-steer-l { background: #60a5fa; position: absolute; right: 50%; height: 100%; }
         .bar-steer-r { background: #60a5fa; position: absolute; left: 50%; height: 100%; }
 
