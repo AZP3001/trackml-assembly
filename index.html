@@ -394,6 +394,9 @@
                         <input type="range" min="20" max="150" id="edit-width" data-input="editor.updateWidth|@value" class="w-full">
                     </div>
 
+                    <label class="flex items-center gap-1.5 cursor-pointer text-[10px] md:text-xs text-slate-300 font-bold" title="While dragging a point: snap its x and y to the other points (straight horizontal / vertical lines) and to an exact 90° corner">
+                        <input type="checkbox" id="edit-snap" checked data-change="editor.setSnap|@checked" class="accent-fuchsia-400 w-3 h-3"> Snap
+                    </label>
                     <!-- Auto width: pinch the road in where two passes of the
                          track run close enough to leave a paper-thin barrier. -->
                     <div class="flex flex-col gap-0.5 border-l border-slate-600 pl-2 md:pl-3">

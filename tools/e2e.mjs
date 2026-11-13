@@ -528,6 +528,24 @@ check(afterReload.tracks === boot.tracks + 1, 'reload gives built-ins plus the s
 check(afterReload.pop === boot.cars, 'settings reset to defaults',
     `population ${afterReload.pop}`);
 
+// Editor snapping: x and y snap independently to other points; else to a 90° corner.
+const snap = await page.evaluate(() => {
+    app.createNewTrack();   // square: (200,200) (1000,200) (1000,700) (200,700)
+    const axis = editor.snapPoint(1, 995, 204, 10);          // near x of point 2, y of point 0
+    editor.track.path[1] = { x: 1000, y: 0 };
+    const far = editor.snapPoint(0, 400, 400, 10);
+    // point 0 between (200,700) and (1000,0): just off the 90° circle
+    const c = { x: 600, y: 350 }, r = Math.hypot(800, 700) / 2;
+    const rt = editor.snapPoint(0, c.x - (r + 4) * 0.6, c.y - (r + 4) * 0.8, 10);
+    const a = editor.track.path[3], b = editor.track.path[1];
+    const dot = (a.x - rt.x) * (b.x - rt.x) + (a.y - rt.y) * (b.y - rt.y);
+    editor.cancel();
+    return { axis, far, right: rt.g.right, dot };
+});
+check(snap.axis.x === 1000 && snap.axis.y === 200, 'a dragged point snaps to other points\' x and y', `(${snap.axis.x}, ${snap.axis.y})`);
+check(snap.far.x === 400 && snap.far.y === 400, 'and is left alone away from any guide');
+check(snap.right && Math.abs(snap.dot) < 1e-6, 'and snaps to an exact 90° corner', `dot ${snap.dot.toExponential(1)}`);
+
 // Fullscreen toggle: the map covers the viewport, then goes back.
 const fs = await page.evaluate(() => {
     app.toggleFullscreen();

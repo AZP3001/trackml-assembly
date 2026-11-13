@@ -2444,7 +2444,7 @@ const editor = {
         c.style.touchAction = 'none';
         c.onpointerdown = e => { e.preventDefault(); c.setPointerCapture(e.pointerId); this.onDown(e); };
         c.onpointermove = e => { e.preventDefault(); this.onMove(e); };
-        c.onpointerup = c.onpointercancel = e => { c.releasePointerCapture(e.pointerId); this.dragIndex=null; this.isDraggingStart=false; this.isResizingZone=false; if(this.isDrawing) this.finishDrawing(); };
+        c.onpointerup = c.onpointercancel = e => { c.releasePointerCapture(e.pointerId); this.dragIndex=null; this.snap=null; this.isDraggingStart=false; this.isResizingZone=false; if(this.isDrawing) this.finishDrawing(); };
     },
 
     setMode: function(m) {
@@ -2838,6 +2838,30 @@ const editor = {
         }
     },
 
+    // CAD-style inference while dragging point i: x and y each snap,
+    // independently, to the x / y of any other point (matching a neighbour
+    // makes that segment exactly vertical / horizontal). Failing both, the
+    // point snaps onto the circle where prev–point–next is exactly 90°.
+    snapOn: true, snap: null,
+    setSnap: function(on) { this.snapOn = !!on; this.snap = null; },
+    snapPoint: function(i, x, y, thr) {
+        const path = this.track.path, n = path.length, g = { x: null, y: null, right: false };
+        let bx = thr, by = thr;
+        path.forEach((p, k) => {
+            if (k === i) return;
+            if (Math.abs(p.x - x) < bx) { bx = Math.abs(p.x - x); g.x = p.x; }
+            if (Math.abs(p.y - y) < by) { by = Math.abs(p.y - y); g.y = p.y; }
+        });
+        if (g.x !== null) x = g.x;
+        if (g.y !== null) y = g.y;
+        if (g.x === null && g.y === null && n > 2) {
+            const a = path[(i + n - 1) % n], b = path[(i + 1) % n];
+            const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2, r = Math.hypot(a.x - b.x, a.y - b.y) / 2, d = Math.hypot(x - cx, y - cy);
+            if (d > 0 && Math.abs(d - r) < thr) { x = cx + (x - cx) * r / d; y = cy + (y - cy) * r / d; g.right = true; }
+        }
+        return { x, y, g };
+    },
+
     onMove: function(e) {
         const {x,y} = this.getPos(e);
         if(this.mode === 'draw') {
@@ -2855,8 +2879,11 @@ const editor = {
         }
         if(this.isDraggingStart) this.track.startPos = {x,y};
         else if(this.dragIndex !== null) {
-            this.track.path[this.dragIndex].x = x;
-            this.track.path[this.dragIndex].y = y;
+            // ~10 screen px of pull, whatever the zoom.
+            const sn = this.snapOn ? this.snapPoint(this.dragIndex, x, y, 10 / app._viewMatrix().z) : { x, y, g: null };
+            this.track.path[this.dragIndex].x = sn.x;
+            this.track.path[this.dragIndex].y = sn.y;
+            this.snap = sn.g;
         } 
         else this.hoverIndex = this.track.path.findIndex(p => Math.hypot(p.x-x, p.y-y)<20);
     },
@@ -2930,6 +2957,16 @@ const editor = {
             ctx.strokeStyle='#3b82f6'; ctx.lineWidth=2; ctx.setLineDash([5,5]); ctx.beginPath();
             if(this.track.path.length>0) { ctx.moveTo(this.track.path[0].x, this.track.path[0].y); for(let i=1; i<this.track.path.length; i++) ctx.lineTo(this.track.path[i].x, this.track.path[i].y); if(this.track.path.length>2) ctx.lineTo(this.track.path[0].x, this.track.path[0].y); }
             ctx.stroke(); ctx.setLineDash([]);
+
+            // Snap guides for the point being dragged.
+            const g = this.snap, dp = this.dragIndex !== null && this.track.path[this.dragIndex];
+            if (g && dp) {
+                ctx.strokeStyle = ctx.fillStyle = '#f0abfc'; ctx.lineWidth = 1.5 / v.z; ctx.setLineDash([8 / v.z, 6 / v.z]); ctx.beginPath();
+                if (g.x !== null) { ctx.moveTo(g.x, -1e4); ctx.lineTo(g.x, 1e4); }
+                if (g.y !== null) { ctx.moveTo(-1e4, g.y); ctx.lineTo(1e4, g.y); }
+                ctx.stroke(); ctx.setLineDash([]);
+                if (g.right) { ctx.font = `bold ${14 / v.z}px sans-serif`; ctx.textAlign = 'left'; ctx.fillText('90°', dp.x + 12 / v.z, dp.y - 12 / v.z); }
+            }
             
             this.track.path.forEach((p, i) => { 
                 const isSelected = (this.selectedIndex === i || this.selectedIndex === 'all');
