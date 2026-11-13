@@ -2023,6 +2023,8 @@ const app = {
     // Safari has none for page elements).
     toggleFullscreen: function() {
         const on = document.body.classList.toggle('map-fs');
+        // Start with the editor tools folded away so the whole track shows; ☰ brings them back.
+        document.getElementById('editor-controls').classList.toggle('collapsed', on);
         const d = document, el = d.documentElement;
         try {
             let p;
@@ -2958,6 +2960,7 @@ window.onload = () => app.init();
 ['fullscreenchange', 'webkitfullscreenchange'].forEach(ev => document.addEventListener(ev, () => {
     if (!(document.fullscreenElement || document.webkitFullscreenElement) && document.body.classList.contains('map-fs')) {
         document.body.classList.remove('map-fs');
+        document.getElementById('editor-controls').classList.remove('collapsed');
         app.handleViewportResize();
     }
 }));
