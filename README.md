@@ -511,6 +511,7 @@ detour. The code export above is the replacement.
 
 ## Keyboard Shortcuts
 * **Space:** Play / Pause
+* **Backspace / Delete (in the editor):** delete the selected point, or the whole selection in Select mode
 * **H:** Toggle Hyper Mode
 * **R:** Reset
 * **Esc:** Cancel track editing, or release a manual spectator selection

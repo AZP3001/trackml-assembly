@@ -2207,7 +2207,9 @@ const app = {
     },
 
     createNewTrack: function() { 
-        const t = generateTrackFromPath("custom"+Date.now(), "New Track", [{x:200,y:200},{x:1000,y:200},{x:1000,y:700},{x:200,y:700}], 60); 
+        // Starts empty: the first clicks place the points. No start position
+        // yet either — it is derived once there is a loop (see editor.onDown).
+        const t = { id: "custom"+Date.now(), name: "New Track", path: [], trackWidth: 60, startPos: null, startAngle: null, zones: [], autoWidth: false, autoWidthBlend: 0 };
         this.state.isEditing = true; this.state.trackToEdit = t; editor.init(t); this.state.isRunning = false; 
         document.getElementById('editor-controls').classList.remove('hidden'); 
         closeSidebar();
@@ -2736,6 +2738,8 @@ const editor = {
     },
 
     save: function() { 
+        if(this.track.path.length < 3) { alert('A track needs at least 3 points.'); return; }
+        this.pinStart();
         const name = document.getElementById('edit-name').value || 'Custom Track';
         this.track.name = name;
         
@@ -2806,21 +2810,38 @@ const editor = {
     updateAngle: function(v) { this.track.startAngle = parseFloat(v) * (Math.PI/180); },
     addZone: function(type) { 
         const z = { id:Date.now().toString(), x:CANVAS_WIDTH/2, y:CANVAS_HEIGHT/2, radius:80, type };
-        if (type === 'spawnkill') { z.killTimer = 150; z.x = this.track.startPos.x; z.y = this.track.startPos.y; }
+        this.pinStart();
+        if (type === 'spawnkill') { z.killTimer = 150; if (this.track.startPos) { z.x = this.track.startPos.x; z.y = this.track.startPos.y; } }
         this.track.zones.push(z); this.selectedZone = z; this.updateZoneUI();
     },
     deleteZone: function() { if(this.selectedZone) this.track.zones = this.track.zones.filter(z => z !== this.selectedZone); this.selectedZone = null; },
     deleteSelectedPoint: function() {
-        if(this.selectedIndex !== null && this.selectedIndex !== 'all' && this.track.path.length > 3) {
+        if(this.selectedIndex !== null && this.selectedIndex !== 'all') {
             this.track.path.splice(this.selectedIndex, 1);
             this.selectedIndex = null;
             this.updatePointUI();
         }
     },
+    // Select mode: delete every point in the selection.
+    deleteSelection: function() {
+        const gone = new Set(this.sel);
+        this.track.path = this.track.path.filter((_, i) => !gone.has(i));
+        this.sel = []; this.marquee = null; this.xf = null;
+    },
 
     getPos: function(e) {
         const p = app._toBackingPx(e);
         return app.screenToWorld(p.x, p.y);
+    },
+
+    // A track begun empty has no start marker until it is a loop; pin the
+    // derived one down then, so it can be dragged and transformed like any other.
+    pinStart: function() {
+        if(!this.track.startPos && this.track.path.length >= 3) {
+            const d = generateTrackFromPath(this.track.id, this.track.name, this.track.path, this.track.trackWidth, null, null, [], this.autoOpts());
+            this.track.startPos = d.startPos; this.track.startAngle = d.startAngle;
+            document.getElementById('edit-angle').value = Math.round((d.startAngle || 0) * (180/Math.PI));
+        }
     },
 
     onDown: function(e) {
@@ -2844,7 +2865,8 @@ const editor = {
             return;
         }
         
-        if(Math.hypot(x - this.track.startPos.x, y - this.track.startPos.y) < 30) { this.isDraggingStart = true; return; }
+        this.pinStart();
+        if(this.track.startPos && Math.hypot(x - this.track.startPos.x, y - this.track.startPos.y) < 30) { this.isDraggingStart = true; return; }
         
         const idx = this.track.path.findIndex(p => Math.hypot(p.x-x, p.y-y) < 40);
         if(idx !== -1) { 
@@ -2866,6 +2888,11 @@ const editor = {
             this.track.path.splice(bI+1, 0, {x, y, type: 'rounded', radius: 60}); 
             this.dragIndex = bI+1; 
             this.selectedIndex = bI+1;
+            this.updatePointUI();
+        } else if(this.track.path.length < 3) {
+            // Not a loop yet, so there is no segment to insert into: append.
+            this.track.path.push({x, y, type: 'rounded', radius: 60});
+            this.dragIndex = this.selectedIndex = this.track.path.length - 1;
             this.updatePointUI();
         } else {
             this.selectedIndex = null;
@@ -2945,6 +2972,7 @@ const editor = {
         return hs;
     },
     selectDown: function(x, y) {
+        this.pinStart();
         const b = this.selBox(), r = 30 / app.state.view.zoom;
         if (b) {
             const h = this.selHandles(b).find(h => Math.hypot(h.x - x, h.y - y) < r) || null;
@@ -3087,6 +3115,10 @@ const editor = {
             }
         }
 
+        if(this.mode === 'path' && this.track.path.length < 3) {
+            ctx.fillStyle = 'rgba(226,232,240,0.7)'; ctx.font = 'bold 18px sans-serif'; ctx.textAlign = 'center';
+            ctx.fillText(`Click to place points (${3 - this.track.path.length} more to make a track)`, CANVAS_WIDTH/2, 60);
+        }
         if(this.mode === 'path' || this.mode === 'select') {
             ctx.strokeStyle='#3b82f6'; ctx.lineWidth=2; ctx.setLineDash([5,5]); ctx.beginPath();
             if(this.track.path.length>0) { ctx.moveTo(this.track.path[0].x, this.track.path[0].y); for(let i=1; i<this.track.path.length; i++) ctx.lineTo(this.track.path[i].x, this.track.path[i].y); if(this.track.path.length>2) ctx.lineTo(this.track.path[0].x, this.track.path[0].y); }
@@ -3119,8 +3151,10 @@ const editor = {
                 ctx.stroke(); 
             });
 
+            if(this.track.path.length >= 3) {
             ctx.save(); ctx.translate(p.startPos.x, p.startPos.y); ctx.rotate(p.startAngle); ctx.fillStyle='rgba(34,197,94,0.5)'; ctx.fillRect(-10,-5,20,10); ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(-5, 0); ctx.lineTo(5, 0); ctx.lineTo(2, -3); ctx.moveTo(5, 0); ctx.lineTo(2, 3); ctx.stroke(); ctx.restore();
             ctx.fillStyle = this.isDraggingStart ? '#fff' : '#22c55e'; ctx.beginPath(); ctx.arc(p.startPos.x, p.startPos.y, 10, 0, Math.PI*2); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth=2; ctx.stroke();
+            }
         }
 
         if(this.mode === 'select') {
@@ -3170,10 +3204,18 @@ document.addEventListener('DOMContentLoaded', () => {
 document.addEventListener('keydown', (e) => {
     if (e.repeat) return;
     const tag = (e.target && e.target.tagName) || '';
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return; // don't hijack typing
+    // Don't hijack typing — but a slider, checkbox or the track dropdown is
+    // not typing, and it keeps focus after a click, which used to swallow Space.
+    const typing = tag === 'TEXTAREA' || (tag === 'INPUT' && !/^(range|checkbox|radio|button|file)$/.test(e.target.type));
+    if (typing) return;
+    if (tag === 'SELECT' && e.key !== ' ' && e.key !== 'Spacebar') return;   // arrows / type-ahead stay the dropdown's
 
     if (app.state.isEditing) {
         if (e.key === 'Escape') { e.preventDefault(); editor.cancel(); }
+        else if (e.key === 'Backspace' || e.key === 'Delete') {
+            e.preventDefault();
+            if (editor.mode === 'select') editor.deleteSelection(); else if (editor.mode === 'path') editor.deleteSelectedPoint();
+        }
         return;
     }
 

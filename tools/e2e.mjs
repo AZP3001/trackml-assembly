@@ -34,6 +34,13 @@ const browser = await chromium.launch({
     args: ['--enable-unsafe-webgpu']
 });
 const page = await browser.newPage();
+// New tracks start empty; most editor tests below want a known square to work on.
+await page.addInitScript(() => {
+    window.newSquare = () => {
+        app.createNewTrack();
+        editor.track.path = [[200, 200], [1000, 200], [1000, 700], [200, 700]].map(([x, y]) => ({ x, y, type: 'rounded', radius: 60 }));
+    };
+});
 
 const errors = [];
 page.on('pageerror', e => errors.push(String(e)));
@@ -369,7 +376,7 @@ check(switched.walls > 20, 'switching track rebuilds geometry', `"${switched.nam
 
 // --- editor -------------------------------------------------------------
 // The editor regenerates the whole track through wasm on every frame it draws.
-await page.evaluate(() => app.createNewTrack());
+await page.evaluate(() => newSquare());
 await page.waitForTimeout(300);
 const edit = await page.evaluate(() => {
     editor.track.path.push({ x: 600, y: 800, type: 'rounded', radius: 60 });
@@ -471,7 +478,7 @@ check(skipped.direct === skipped.after + 1, 'and evolve() still advances a gener
 // Zone types cross into wasm as integer ids rather than the JS edition's
 // strings, so the mapping is worth asserting rather than assuming.
 const zones = await page.evaluate(async () => {
-    app.createNewTrack();
+    newSquare();
     editor.addZone('spawnkill');
     editor.addZone('focus');
     editor.addZone('speed');
@@ -487,7 +494,7 @@ check(zones.count === 4 && zones.walls > 20, 'zones survive a track rebuild',
 
 // --- saving a track persists it, and only it ------------------------------
 await page.evaluate(() => {
-    app.createNewTrack();
+    newSquare();
     document.getElementById('edit-name').value = 'E2E Session Track';
     editor.save();
     document.getElementById('code-modal').classList.add('hidden');
@@ -528,10 +535,33 @@ check(afterReload.tracks === boot.tracks + 1, 'reload gives built-ins plus the s
 check(afterReload.pop === boot.cars, 'settings reset to defaults',
     `population ${afterReload.pop}`);
 
+// A new track starts empty; clicks place its points; it cannot be saved before it is a loop.
+const blank = await page.evaluate(() => {
+    app.createNewTrack();
+    const empty = editor.track.path.length;
+    const tracksBefore = app.state.tracks.length;
+    const realAlert = window.alert; let warned = false; window.alert = () => { warned = true; };
+    editor.save(); window.alert = realAlert;
+    const refused = warned && app.state.isEditing && app.state.tracks.length === tracksBefore;
+    const c = document.getElementById('sim-canvas'), r = c.getBoundingClientRect();
+    const click = (fx, fy) => { const e = { button: 0, buttons: 1, clientX: r.left + r.width * fx, clientY: r.top + r.height * fy }; editor.onDown(e); editor.dragIndex = null; };
+    click(0.3, 0.3); click(0.7, 0.3); click(0.5, 0.7);
+    const placed = editor.track.path.length;
+    editor.draw(c.getContext('2d'));
+    editor.setMode('select'); editor.sel = [0, 1, 2]; editor.deleteSelection();
+    const afterDelete = editor.track.path.length;
+    editor.cancel();
+    return { empty, refused, placed, afterDelete };
+});
+check(blank.empty === 0, 'a new track starts with no points');
+check(blank.refused, 'and cannot be saved until it has three');
+check(blank.placed === 3, 'clicking places points', `${blank.placed} points`);
+check(blank.afterDelete === 0, 'deleting the selection removes its points');
+
 // Editor snapping: segments to a neighbour snap to multiples of 45° within 2°;
 // failing that, a near-right corner becomes exactly 90°.
 const snap = await page.evaluate(() => {
-    app.createNewTrack();   // square: (200,200) (1000,200) (1000,700) (200,700)
+    newSquare();   // square: (200,200) (1000,200) (1000,700) (200,700)
     const axis = editor.snapPoint(1, 995, 204, 6);           // ~horizontal from 0, ~vertical from 2
     const diag = editor.snapPoint(1, 705, 696, 6);           // ~45° from 0, ~horizontal from 2
     const loose = editor.snapPoint(1, 960, 240, 6);          // 3° off both: no snap
@@ -553,7 +583,7 @@ check(snap.right && Math.abs(snap.dot) < 1e-6, 'and snaps to an exact 90° corne
 
 // Select mode: marquee everything, scale from a corner, stretch from a side, move.
 const selx = await page.evaluate(() => {
-    app.createNewTrack();   // square 200..1000 x 200..700, width 60
+    newSquare();   // square 200..1000 x 200..700, width 60
     editor.setMode('select');
     editor.selectDown(100, 100); editor.selectMove(1100, 800); editor.selectUp();
     const picked = editor.sel.length;
@@ -708,7 +738,7 @@ check(autoWidth.walls > 20 && autoWidth.autoFlag, 'the pinched track still gener
 
 // The editor controls have to drive it, not just the API.
 const autoUI = await page.evaluate(async () => {
-    app.createNewTrack();
+    newSquare();
     const cb = document.getElementById('edit-autowidth');
     const sl = document.getElementById('edit-autowidth-blend');
     cb.checked = true; cb.dispatchEvent(new Event('change'));

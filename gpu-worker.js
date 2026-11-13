@@ -467,7 +467,7 @@ fn tailPhase(c: ptr<function, Car>, ci: i32, trig: vec2<f32>, prev: vec2<f32>, b
     (*c).lastCpFrame = (*c).frames;
     let gAbs = ((*c).nextCP - 1 + P.cpN) % P.cpN;
     if (ci == 0 && gAbs >= 0 && gAbs < MAX_GATES) { aux.gate[gAbs] = idealCp / max(dtCp, idealCp); }
-    (*c).fitness += 500.0 * (1.0 + 3.0 * (idealCp / max(dtCp, idealCp))) * fitMult;
+    (*c).fitness += 500.0 * (1.0 + 0.5 * (idealCp / max(dtCp, idealCp))) * fitMult;   // see sim.c
     if ((*c).nextCP == (P.startCp + 1) % P.cpN && P.cpN > 2) {
       (*c).laps += 1;
       let lapFrames = f32((*c).frames - (*c).prevLapFrame);

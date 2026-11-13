@@ -2295,7 +2295,16 @@ static void updateCar(i32 i) {
                 // above for why that alone is enough to track the stash's pace.
                 if (i == 0 && gAbs >= 0 && gAbs < MAX_GATES) gate_ratio[gAbs] = idealCp / maxf(dtCp, idealCp);
 
-                car_fitness[i] += 500.0f * (1.0f + 3.0f * (idealCp / maxf(dtCp, idealCp))) * fitMult;
+                // The pace bonus is HALF a gate at most, not three gates. At 3x
+                // a car flat out to a corner it could not make outscored one
+                // that slowed down and got through: easing off cost it several
+                // hundred points on every gate it had already passed, and it
+                // had to clear a dozen more gates just to break even. The
+                // whole population then converged on arriving at that corner
+                // faster and dying in it, generation after generation. At
+                // 0.5x, getting further beats getting there faster, and pace
+                // still separates cars that got equally far.
+                car_fitness[i] += 500.0f * (1.0f + 0.5f * (idealCp / maxf(dtCp, idealCp))) * fitMult;
 
                 // A lap is complete when the car is back at the gate it
                 // started from — not when the index happens to wrap past zero,
