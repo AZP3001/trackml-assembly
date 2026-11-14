@@ -784,6 +784,12 @@ const undo = await page.evaluate(() => {
 check(undo.one === 224 && undo.floor === 205 && undo.redone === 207, 'undo steps back up to 20 edits, redo forward again', JSON.stringify(undo));
 check(undo.branched === 999 && undo.afterDelete === 3 && undo.restored === 4, 'a new edit drops the redo branch; a deleted point comes back');
 
+// Switching track with Hyper on (which paints nothing while it runs) must still repaint the map.
+await page.evaluate(() => { if (app.state.isRunning) app.toggleRun(); if (!app.state.hyperMode) app.toggleHyper(); app.switchTrack(2); });
+await page.waitForTimeout(400);
+const hyperSwitch = await page.evaluate(() => { const drawn = app._needsDraw === false; app.toggleHyper(); app.switchTrack(0); return drawn; });
+check(hyperSwitch, 'switching track in Hyper mode repaints the map');
+
 // Fullscreen toggle: the map covers the viewport, then goes back.
 const fs = await page.evaluate(() => {
     app.toggleFullscreen();

@@ -1360,15 +1360,17 @@ const app = {
 
             // What gets painted, and how often:
             //   * the editor draws every frame, so dragging a point stays smooth;
-            //   * hyper mode draws NOTHING at all, not even the cached background,
-            //     because the whole point of it is that the screen is not the
-            //     output;
+            //   * hyper mode draws NOTHING at all while it runs, not even the
+            //     cached background, because the whole point of it is that the
+            //     screen is not the output — but paused it paints like any
+            //     other mode, or switching track with Hyper on left the old
+            //     track on screen;
             //   * everything else is capped at the repaint ceiling and skipped
             //     when nothing has changed. Only the painting is capped — the
             //     simulation runs on SimClock's fixed 60 Hz either way.
             if(this.state.isEditing) {
                 this.draw();
-            } else if(!this.state.hyperMode && this._needsDraw && SimClock.renderDue(performance.now(), this.state.renderHz)) {
+            } else if((!this.state.hyperMode || !this.state.isRunning) && this._needsDraw && SimClock.renderDue(performance.now(), this.state.renderHz)) {
                 this._needsDraw = false;
                 this.draw();
             }
