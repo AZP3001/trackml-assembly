@@ -430,7 +430,8 @@ const app = {
         ui.canvas.addEventListener('pointercancel', e => {
             if (e.pointerType === 'touch') this._touchEnd(e); else this.endPan(e);
         });
-        ui.canvas.addEventListener('contextmenu', e => e.preventDefault());
+        // No browser menu anywhere in the app (right-click pans, and deletes grid boxes); text fields keep theirs for paste.
+        document.addEventListener('contextmenu', e => { if (!/^(INPUT|TEXTAREA)$/.test(e.target.tagName) || e.target.type === 'range') e.preventDefault(); });
         ui.canvas.addEventListener('wheel', e => {
             e.preventDefault();
             const p = this._toBackingPx(e);
@@ -2874,8 +2875,9 @@ const editor = {
     onDown: function(e) {
         // Right-button is pan (app-level, see startPan) in the editor too —
         // never a new path point.
-        if (e.button === 2) return;
         const {x,y} = this.getPos(e);
+        // Right-click in Grid mode deletes the box under it.
+        if (e.button === 2) { if (this.mode === 'grid') { this.grid.cells.delete(this.gridKey(x, y)); this.gridApply(); } return; }
 
         if (this.mode === 'draw') {
             this.isDrawing = true;
@@ -2989,7 +2991,7 @@ const editor = {
     // the road goes next, so two streets can run side by side without merging —
     // tap to place, tap again to turn it, hold to remove. Whenever the boxes
     // form a closed loop the track's path is rebuilt from it.
-    grid: { size: 100, arrows: false, cells: new Map(), lastDir: 0, press: null },
+    grid: { size: 60, arrows: false, cells: new Map(), lastDir: 0, press: null },
     GRID_D: [[1, 0], [0, 1], [-1, 0], [0, -1]],
     gridKey: function(x, y) { return Math.floor(x / this.grid.size) + ',' + Math.floor(y / this.grid.size); },
     gridDown: function(x, y) {
@@ -3043,7 +3045,7 @@ const editor = {
         const t = this.track;
         t.path = pts.map(p => ({ x: p.x, y: p.y, type: 'rounded', radius: S / 2 }));
         // Two streets in neighbouring boxes only stay two streets if the road is narrower than a box.
-        if (t.trackWidth > S * 0.45) { t.trackWidth = Math.max(20, Math.floor(S * 0.45)); document.getElementById('edit-width').value = t.trackWidth; }
+        if (t.trackWidth > S * 0.45) { t.trackWidth = Math.max(9, Math.floor(S * 0.45)); document.getElementById('edit-width').value = t.trackWidth; }
         t.startPos = null; t.startAngle = null; this.selectedIndex = null;   // the start follows the new loop
     },
     setGridSize: function(v) { this.grid.size = parseInt(v); document.getElementById('grid-size-val').textContent = v; this.gridApply(); },

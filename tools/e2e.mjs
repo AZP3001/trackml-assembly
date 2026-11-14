@@ -683,6 +683,7 @@ check(Math.abs(startAim.deg - 90) < 10 && Math.abs(startAim.x - 1000) < 5, 'a dr
 const grid = await page.evaluate(async () => {
     app.createNewTrack();
     editor.setMode('grid');
+    editor.setGridSize(100);
     const tap = (cx, cy) => { editor.gridDown(cx * 100 + 50, cy * 100 + 50); editor.gridUp(); };
     const P = () => editor.track.path.map(p => [p.x, p.y]);
     for (const [cx, cy] of [[2, 2], [3, 2], [4, 2], [4, 3], [4, 4], [3, 4], [2, 4]]) tap(cx, cy);
@@ -697,14 +698,22 @@ const grid = await page.evaluate(async () => {
     const twoRows = P(), width = editor.track.trackWidth;
     editor.gridDown(150, 150); await new Promise(r => setTimeout(r, 600)); editor.gridUp();   // hold: remove
     const afterHold = editor.grid.cells.has('1,1');
+    const realGetPos = editor.getPos; editor.getPos = () => ({ x: 250, y: 150 });
+    editor.onDown({ button: 2 }); editor.getPos = realGetPos;                                 // right-click: remove
+    const afterRight = editor.grid.cells.has('2,1');
+    editor.setGridArrows('false'); editor.setGridSize(20); editor.clearGrid();
+    for (const [cx, cy] of [[2, 2], [3, 2], [3, 3], [2, 3]]) { editor.gridDown(cx * 20 + 10, cy * 20 + 10); editor.gridUp(); }
+    const small = editor.track.path.length, smallWidth = editor.track.trackWidth, smallPts = JSON.stringify(editor.track.path.map(p => [p.x, p.y]));
     editor.draw(document.getElementById('sim-canvas').getContext('2d'));
     editor.cancel();
-    return { open, boxes, status, arrows, twoRows, width, afterHold };
+    return { open, boxes, status, arrows, twoRows, width, afterHold, afterRight, small, smallWidth, smallPts };
 });
 check(grid.open === 0 && JSON.stringify(grid.boxes) === '[[250,250],[450,250],[450,450],[250,450]]', 'grid boxes become a track once they close a loop', `${JSON.stringify(grid.boxes)} — ${grid.status}`);
 check(grid.arrows === '00112233', 'switching to arrows keeps the loop and gives it a direction', grid.arrows);
 check(JSON.stringify(grid.twoRows) === '[[150,150],[350,150],[350,250],[150,250]]' && grid.width === 45, 'arrows keep two side-by-side streets apart', `${JSON.stringify(grid.twoRows)} width ${grid.width}`);
 check(grid.afterHold === false, 'holding a box removes it');
+check(grid.afterRight === false, 'right-clicking a box removes it');
+check(grid.small === 4 && grid.smallWidth === 9 && grid.smallPts === '[[50,50],[70,50],[70,70],[50,70]]', 'boxes can be as small as 20', `${grid.smallPts}, road half-width ${grid.smallWidth}`);
 
 // Select mode can make its points sharp or rounded; the start angle is shown in degrees.
 const misc = await page.evaluate(() => {
