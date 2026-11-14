@@ -2998,12 +2998,37 @@ const editor = {
         if (x < 0 || y < 0 || x >= CANVAS_WIDTH || y >= CANVAS_HEIGHT) return;
         const g = this.grid, key = this.gridKey(x, y);
         // Hold to remove: if the finger is still down when this fires, the box goes.
-        g.press = { key, timer: setTimeout(() => { g.press = null; g.cells.delete(key); this.gridApply(); }, 450) };
+        g.press = { key, last: key, dragged: false, timer: setTimeout(() => { g.press = null; g.cells.delete(key); this.gridApply(); }, 450) };
+    },
+    // Drag with the button (or finger) down: every box the pointer passes
+    // through becomes track, and in Arrows mode each one points at the next,
+    // so a dragged line is a street that already runs the way it was drawn.
+    gridMove: function(x, y) {
+        const g = this.grid, p = g.press;
+        if (!p || x < 0 || y < 0 || x >= CANVAS_WIDTH || y >= CANVAS_HEIGHT) return;
+        const key = this.gridKey(x, y);
+        if (key === p.last) return;
+        clearTimeout(p.timer); p.dragged = true;
+        let [cx, cy] = p.last.split(',').map(Number);
+        const [tx, ty] = key.split(',').map(Number);
+        // One box at a time, so a fast drag that skips boxes still leaves an unbroken line.
+        while (cx !== tx || cy !== ty) {
+            const dx = tx - cx, dy = ty - cy;
+            const d = Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 0 : 2) : (dy > 0 ? 1 : 3);
+            g.cells.set(cx + ',' + cy, g.arrows ? d : null);
+            cx += this.GRID_D[d][0]; cy += this.GRID_D[d][1];
+            const next = cx + ',' + cy;
+            if (!g.cells.has(next) || g.cells.get(next) === null) g.cells.set(next, g.arrows ? d : null);
+            if (g.arrows) g.lastDir = d;
+        }
+        p.last = key;
+        this.gridApply();
     },
     gridUp: function() {
         const g = this.grid, p = g.press;
         if (!p) return;                                    // not in a press, or the hold already removed it
         clearTimeout(p.timer); g.press = null;
+        if (p.dragged) return;                             // the drag already placed its boxes
         const had = g.cells.has(p.key), dir = g.cells.get(p.key);
         if (!g.arrows) { if (had) g.cells.delete(p.key); else g.cells.set(p.key, null); }
         else if (had && dir !== null) { g.lastDir = (dir + 1) % 4; g.cells.set(p.key, g.lastDir); }
@@ -3165,7 +3190,7 @@ const editor = {
             return;
         }
         if(this.mode === 'select') { this.selectMove(x, y); return; }
-        if(this.mode === 'grid') return;
+        if(this.mode === 'grid') { this.gridMove(x, y); return; }
         if(this.mode === 'zones') {
             if(this.selectedZone && (e.buttons === 1 || e.type==="touchmove")) {
                 if(this.isResizingZone) this.selectedZone.radius = Math.max(30, Math.hypot(x - this.selectedZone.x, y - this.selectedZone.y)); 

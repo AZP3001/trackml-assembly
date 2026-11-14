@@ -698,6 +698,13 @@ const grid = await page.evaluate(async () => {
     const twoRows = P(), width = editor.track.trackWidth;
     editor.gridDown(150, 150); await new Promise(r => setTimeout(r, 600)); editor.gridUp();   // hold: remove
     const afterHold = editor.grid.cells.has('1,1');
+    // drag a whole loop in Arrows mode, in four strokes; a fast drag skips boxes and must still be unbroken
+    editor.clearGrid();
+    const drag = (pts) => { editor.gridDown(pts[0][0], pts[0][1]); for (const q of pts.slice(1)) editor.gridMove(q[0], q[1]); editor.gridUp(); };
+    drag([[150, 150], [550, 150]]); drag([[550, 150], [550, 350]]); drag([[550, 350], [150, 350]]); drag([[150, 350], [150, 150]]);
+    const dragged = P(), dragStatus = document.getElementById('grid-status').textContent;
+    editor.clearGrid();
+    editor.clearGrid(); tap(1, 1); tap(2, 1); tap(3, 1); tap(3, 1); tap(3, 2); tap(3, 2); tap(2, 2); tap(1, 2); tap(1, 2);
     const realGetPos = editor.getPos; editor.getPos = () => ({ x: 250, y: 150 });
     editor.onDown({ button: 2 }); editor.getPos = realGetPos;                                 // right-click: remove
     const afterRight = editor.grid.cells.has('2,1');
@@ -706,12 +713,13 @@ const grid = await page.evaluate(async () => {
     const small = editor.track.path.length, smallWidth = editor.track.trackWidth, smallPts = JSON.stringify(editor.track.path.map(p => [p.x, p.y]));
     editor.draw(document.getElementById('sim-canvas').getContext('2d'));
     editor.cancel();
-    return { open, boxes, status, arrows, twoRows, width, afterHold, afterRight, small, smallWidth, smallPts };
+    return { open, boxes, status, arrows, twoRows, width, afterHold, afterRight, small, smallWidth, smallPts, dragged, dragStatus };
 });
 check(grid.open === 0 && JSON.stringify(grid.boxes) === '[[250,250],[450,250],[450,450],[250,450]]', 'grid boxes become a track once they close a loop', `${JSON.stringify(grid.boxes)} — ${grid.status}`);
 check(grid.arrows === '00112233', 'switching to arrows keeps the loop and gives it a direction', grid.arrows);
 check(JSON.stringify(grid.twoRows) === '[[150,150],[350,150],[350,250],[150,250]]' && grid.width === 45, 'arrows keep two side-by-side streets apart', `${JSON.stringify(grid.twoRows)} width ${grid.width}`);
 check(grid.afterHold === false, 'holding a box removes it');
+check(JSON.stringify(grid.dragged) === '[[150,150],[550,150],[550,350],[150,350]]', 'dragging lays a street of arrows along the line', `${JSON.stringify(grid.dragged)} — ${grid.dragStatus}`);
 check(grid.afterRight === false, 'right-clicking a box removes it');
 check(grid.small === 4 && grid.smallWidth === 9 && grid.smallPts === '[[50,50],[70,50],[70,70],[50,70]]', 'boxes can be as small as 20', `${grid.smallPts}, road half-width ${grid.smallWidth}`);
 
