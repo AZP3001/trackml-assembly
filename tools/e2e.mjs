@@ -691,8 +691,20 @@ const grid = await page.evaluate(async () => {
     const open = editor.track.path.length;                      // seven boxes: not closed yet
     tap(2, 3);
     const boxes = P(), status = document.getElementById('grid-status').textContent;
+    // break the loop: the road goes with it; close it again and it is back
+    editor.onDown.call(Object.assign(Object.create(editor), { getPos: () => ({ x: 250, y: 350 }) }), { button: 2 });
+    const broken = editor.track.path.length;
+    tap(2, 3);
+    const reclosed = editor.track.path.length;
+    // Boxes: a left-drag that starts on a marked box rubs the line out; a right-drag does too
+    const dragTo = (pts, button) => { if (button === 2) { const gp = editor.getPos; editor.getPos = () => ({ x: pts[0][0], y: pts[0][1] }); editor.onDown({ button: 2 }); editor.getPos = gp; } else editor.gridDown(pts[0][0], pts[0][1]);
+        for (const q of pts.slice(1)) editor.gridMove(q[0], q[1]); editor.gridUp(); };
+    dragTo([[250, 250], [450, 250]]); const leftErased = editor.grid.cells.size;       // top row of the ring: 3 boxes gone
+    dragTo([[250, 250], [450, 250]]); const leftRedrawn = editor.grid.cells.size;      // starts on an empty box now: draws them back
+    dragTo([[250, 450], [450, 450]], 2); const rightErased = editor.grid.cells.size;
+    dragTo([[250, 450], [450, 450]]);
     editor.setGridArrows('true');                               // the loop hands its direction to the arrows
-    const arrows = [...editor.grid.cells.values()].join('');
+    const arrows = [...editor.grid.cells.values()].sort().join('');                 // two of each direction round the ring
     editor.clearGrid();
     // two streets in touching rows, kept apart by their arrows: → → ↓ / ↑ ← ←
     tap(1, 1); tap(2, 1); tap(3, 1); tap(3, 1); tap(3, 2); tap(3, 2); tap(2, 2); tap(1, 2); tap(1, 2);
@@ -714,15 +726,31 @@ const grid = await page.evaluate(async () => {
     const small = editor.track.path.length, smallWidth = editor.track.trackWidth, smallPts = JSON.stringify(editor.track.path.map(p => [p.x, p.y]));
     editor.draw(document.getElementById('sim-canvas').getContext('2d'));
     editor.cancel();
-    return { open, boxes, status, arrows, twoRows, width, afterHold, afterRight, small, smallWidth, smallPts, dragged, dragStatus };
+    return { open, boxes, status, arrows, twoRows, width, afterHold, broken, reclosed, leftErased, leftRedrawn, rightErased, afterRight, small, smallWidth, smallPts, dragged, dragStatus };
 });
 check(grid.open === 0 && JSON.stringify(grid.boxes) === '[[250,250],[450,250],[450,450],[250,450]]', 'grid boxes become a track once they close a loop', `${JSON.stringify(grid.boxes)} — ${grid.status}`);
+check(grid.broken === 0 && grid.reclosed === 4, 'breaking the loop takes the road away until it closes again', `${grid.broken} points, then ${grid.reclosed}`);
+check(grid.leftErased === 5 && grid.leftRedrawn === 8 && grid.rightErased === 5, 'dragging from a marked box, or with the right button, rubs a line out', `${grid.leftErased}, ${grid.leftRedrawn}, ${grid.rightErased} boxes`);
 check(grid.arrows === '00112233', 'switching to arrows keeps the loop and gives it a direction', grid.arrows);
 check(JSON.stringify(grid.twoRows) === '[[150,150],[350,150],[350,250],[150,250]]' && grid.width === 45, 'arrows keep two side-by-side streets apart', `${JSON.stringify(grid.twoRows)} width ${grid.width}`);
 check(grid.afterHold === false, 'holding a box removes it');
 check(JSON.stringify(grid.dragged) === '[[150,150],[550,150],[550,350],[150,350]]', 'dragging lays a street of arrows along the line', `${JSON.stringify(grid.dragged)} — ${grid.dragStatus}`);
 check(grid.afterRight === false, 'right-clicking a box removes it');
 check(grid.small === 4 && grid.smallWidth === 9 && grid.smallPts === '[[50,50],[70,50],[70,70],[50,70]]', 'boxes can be as small as 20', `${grid.smallPts}, road half-width ${grid.smallWidth}`);
+
+// A track built in Grid mode keeps its boxes: editing it again (and after a reload) reopens the grid.
+const regrid = await page.evaluate(() => {
+    app.createNewTrack(); editor.setMode('grid'); editor.setGridSize(100);
+    for (const [cx, cy] of [[2, 2], [3, 2], [3, 3], [2, 3]]) { editor.gridDown(cx * 100 + 50, cy * 100 + 50); editor.gridUp(); }
+    document.getElementById('edit-name').value = 'E2E Grid Track';
+    editor.save(); document.getElementById('code-modal').classList.add('hidden');
+    app.editTrack();
+    const out = { mode: editor.mode, cells: editor.grid.cells.size, size: editor.grid.size, stored: /"grid"/.test(localStorage.getItem('trackml_user_tracks') || '') };
+    editor.cancel();
+    app.state.tracks.splice(app.state.currentTrackIndex, 1); app.switchTrack(0); app.renderTrackList(); app.persistTracks();
+    return out;
+});
+check(regrid.mode === 'grid' && regrid.cells === 4 && regrid.size === 100 && regrid.stored, 'a grid-built track reopens with its boxes, in Grid mode', JSON.stringify(regrid));
 
 // Select mode can make its points sharp or rounded; the start angle is shown in degrees.
 const misc = await page.evaluate(() => {

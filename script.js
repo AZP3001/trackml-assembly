@@ -913,7 +913,7 @@ const app = {
         for (const d of Array.isArray(defs) ? defs : []) {
             try {
                 const t = generateTrackFromPath(d.id, d.name, d.path, d.trackWidth, d.startPos, d.startAngle, d.zones || [], { enabled: !!d.autoWidth, blend: d.autoWidthBlend || 0 });
-                t._user = true;
+                t._user = true; t.grid = d.grid;
                 const i = this.state.tracks.findIndex(tr => tr.id === t.id);
                 if (i !== -1) this.state.tracks[i] = t; else this.state.tracks.push(t);
             } catch (e) { /* skip a track that no longer builds */ }
@@ -2249,7 +2249,8 @@ const app = {
             startAngle: t.startAngle,
             zones: (t.zones || []).map(z => Object.assign({}, z)),
             autoWidth: !!t.autoWidth,
-            autoWidthBlend: t.autoWidthBlend || 0
+            autoWidthBlend: t.autoWidthBlend || 0,
+            grid: t.grid   // the Grid-mode boxes it was built from, if any (editor.save)
         };
     },
     editTrack: function() {
@@ -2497,9 +2498,14 @@ const editor = {
         document.getElementById('edit-autowidth-blend').value = Math.round(t.autoWidthBlend * 100);
         this.syncAutoWidthUI();
         app.resetView();   // the editor starts on the whole map
-        this.grid.cells.clear(); this.grid.press = null;
+        // A track built in Grid mode comes back with its boxes, and in Grid mode.
+        const sg = t.grid, g = this.grid;
+        g.cells = new Map(sg ? sg.cells : []); g.press = null; g.owns = g.cells.size > 0;
+        if (sg) { g.size = sg.size; g.arrows = !!sg.arrows; }
+        document.getElementById('grid-size').value = g.size; document.getElementById('grid-size-val').textContent = g.size;
+        this.syncGridButtons();
         this._hist = [this.snapshot()]; this._hi = 0;
-        this.setMode('path');
+        this.setMode(this.grid.owns ? 'grid' : 'path');
         const c = document.getElementById('sim-canvas');
         c.style.touchAction = 'none';
         c.onpointerdown = e => { e.preventDefault(); c.setPointerCapture(e.pointerId); this.onDown(e); };
@@ -2777,6 +2783,8 @@ const editor = {
 
         this.track.path = cleanPath;
         const t = generateTrackFromPath(this.track.id, this.track.name, cleanPath, this.track.trackWidth, this.track.startPos, this.track.startAngle, this.track.zones, this.autoOpts());
+        // Keep the boxes with the track while its road is still the one they describe.
+        if (this.grid.owns) t.grid = { size: this.grid.size, arrows: this.grid.arrows, cells: [...this.grid.cells] };
         app.saveTrack(t);
 
         let pathStr = JSON.stringify(cleanPath)
@@ -2802,7 +2810,7 @@ const editor = {
     snapshot: function() {
         const t = this.track, g = this.grid;
         return JSON.stringify({ path: t.path, trackWidth: t.trackWidth, startPos: t.startPos, startAngle: t.startAngle, zones: t.zones || [],
-            autoWidth: !!t.autoWidth, autoWidthBlend: t.autoWidthBlend || 0, grid: { size: g.size, arrows: g.arrows, cells: [...g.cells] } });
+            autoWidth: !!t.autoWidth, autoWidthBlend: t.autoWidthBlend || 0, grid: { size: g.size, arrows: g.arrows, owns: !!g.owns, cells: [...g.cells] } });
     },
     // Record the current state if it differs from the last one recorded.
     commit: function() {
@@ -2820,7 +2828,7 @@ const editor = {
     restore: function(json) {
         const s = JSON.parse(json), t = this.track, g = this.grid;
         Object.assign(t, { path: s.path, trackWidth: s.trackWidth, startPos: s.startPos, startAngle: s.startAngle, zones: s.zones, autoWidth: s.autoWidth, autoWidthBlend: s.autoWidthBlend });
-        g.size = s.grid.size; g.arrows = s.grid.arrows; g.cells = new Map(s.grid.cells); g.press = null;
+        g.size = s.grid.size; g.arrows = s.grid.arrows; g.cells = new Map(s.grid.cells); g.press = null; g.owns = s.grid.owns;
         // Everything that pointed into the old state.
         this.selectedIndex = null; this.selectedZone = null; this.sel = []; this.marquee = null; this.xf = null; this.dragIndex = null; this.snap = null;
         this.updatePointUI(); this.updateZoneUI();
@@ -2927,7 +2935,14 @@ const editor = {
         // never a new path point.
         const {x,y} = this.getPos(e);
         // Right-click in Grid mode deletes the box under it.
-        if (e.button === 2) { if (this.mode === 'grid') { this.grid.cells.delete(this.gridKey(x, y)); this.gridApply(); } return; }
+        if (e.button === 2) {
+            if (this.mode === 'grid') {
+                const key = this.gridKey(x, y);
+                this.grid.cells.delete(key); this.gridApply();
+                this.grid.press = { key, last: key, dragged: false, erase: true, right: true, timer: 0 };   // keep dragging to rub out a line
+            }
+            return;
+        }
         if (e.button === 1) return;
 
         if (this.mode === 'draw') {
@@ -3042,14 +3057,18 @@ const editor = {
     // the road goes next, so two streets can run side by side without merging —
     // tap to place, tap again to turn it, hold to remove. Whenever the boxes
     // form a closed loop the track's path is rebuilt from it.
-    grid: { size: 60, arrows: false, cells: new Map(), lastDir: 0, press: null },
+    grid: { size: 60, arrows: false, cells: new Map(), lastDir: 0, press: null, owns: false },   // owns: the track's road is the one these boxes describe
     GRID_D: [[1, 0], [0, 1], [-1, 0], [0, -1]],
     gridKey: function(x, y) { return Math.floor(x / this.grid.size) + ',' + Math.floor(y / this.grid.size); },
     gridDown: function(x, y) {
         if (x < 0 || y < 0 || x >= CANVAS_WIDTH || y >= CANVAS_HEIGHT) return;
         const g = this.grid, key = this.gridKey(x, y);
         // Hold to remove: if the finger is still down when this fires, the box goes.
-        g.press = { key, last: key, dragged: false, timer: setTimeout(() => { g.press = null; g.cells.delete(key); this.gridApply(); }, 450) };
+        // A drag that starts on a box already marked (Boxes mode) rubs boxes out
+        // instead of adding them. In Arrows mode a drag from an arrow carries the
+        // street on, so there the eraser is the right button (see onDown).
+        g.press = { key, last: key, dragged: false, erase: !g.arrows && g.cells.has(key),
+                    timer: setTimeout(() => { g.press = null; g.cells.delete(key); this.gridApply(); }, 450) };
     },
     // Drag with the button (or finger) down: every box the pointer passes
     // through becomes track, and in Arrows mode each one points at the next,
@@ -3066,11 +3085,12 @@ const editor = {
         while (cx !== tx || cy !== ty) {
             const dx = tx - cx, dy = ty - cy;
             const d = Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 0 : 2) : (dy > 0 ? 1 : 3);
-            g.cells.set(cx + ',' + cy, g.arrows ? d : null);
+            if (p.erase) g.cells.delete(cx + ',' + cy); else g.cells.set(cx + ',' + cy, g.arrows ? d : null);
             cx += this.GRID_D[d][0]; cy += this.GRID_D[d][1];
             const next = cx + ',' + cy;
-            if (!g.cells.has(next) || g.cells.get(next) === null) g.cells.set(next, g.arrows ? d : null);
-            if (g.arrows) g.lastDir = d;
+            if (p.erase) g.cells.delete(next);
+            else if (!g.cells.has(next) || g.cells.get(next) === null) g.cells.set(next, g.arrows ? d : null);
+            if (g.arrows && !p.erase) g.lastDir = d;
         }
         p.last = key;
         this.gridApply();
@@ -3079,7 +3099,7 @@ const editor = {
         const g = this.grid, p = g.press;
         if (!p) return;                                    // not in a press, or the hold already removed it
         clearTimeout(p.timer); g.press = null;
-        if (p.dragged) return;                             // the drag already placed its boxes
+        if (p.dragged || p.right) return;                  // the drag already did its work; a right-click already deleted
         const had = g.cells.has(p.key), dir = g.cells.get(p.key);
         if (!g.arrows) { if (had) g.cells.delete(p.key); else g.cells.set(p.key, null); }
         else if (had && dir !== null) { g.lastDir = (dir + 1) % 4; g.cells.set(p.key, g.lastDir); }
@@ -3117,8 +3137,11 @@ const editor = {
         const pts = c.filter((p, i) => { const a = c[(i + n - 1) % n], b = c[(i + 1) % n]; return (p.x - a.x) * (b.y - p.y) !== (p.y - a.y) * (b.x - p.x); });
         const ok = pts.length >= 4;
         if (status) status.textContent = ok ? `Closed loop: ${n} boxes` : (g.cells.size ? 'Not a closed loop yet' : 'Tap boxes to build a loop');
-        if (!ok) return;
         const t = this.track;
+        // The loop this road was built from is broken: take the road away too,
+        // rather than leave a stale one under the boxes being redrawn.
+        if (!ok) { if (g.owns) { t.path = []; t.startPos = null; t.startAngle = null; this.selectedIndex = null; g.owns = false; } return; }
+        g.owns = true;
         t.path = pts.map(p => ({ x: p.x, y: p.y, type: 'rounded', radius: S / 2 }));
         // Two streets in neighbouring boxes only stay two streets if the road is narrower than a box.
         if (t.trackWidth > S * 0.45) { t.trackWidth = Math.max(9, Math.floor(S * 0.45)); document.getElementById('edit-width').value = t.trackWidth; }
@@ -3426,6 +3449,8 @@ document.addEventListener('keydown', (e) => {
     const typing = tag === 'TEXTAREA' || (tag === 'INPUT' && !/^(range|checkbox|radio|button|file)$/.test(e.target.type));
     if (typing) return;
     if (tag === 'SELECT' && e.key !== ' ' && e.key !== 'Spacebar') return;   // arrows / type-ahead stay the dropdown's
+
+    if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); app.toggleFullscreen(); return; }
 
     if (app.state.isEditing) {
         if (e.key === 'Escape') { e.preventDefault(); editor.cancel(); }
