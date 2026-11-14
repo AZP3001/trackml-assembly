@@ -546,8 +546,23 @@ const Engine = {
         const p = state.physics;
         return [p.maxSpeed, p.acceleration, p.turnSpeed, p.brakeStrength,
                 state.initialTTL, state.targetLaps, state.focusPct, state.hiddenLayers,
-                state.nudgeMode ? 1 : 0, state.paceReward];
+                state.nudgeMode ? 1 : 0, state.paceReward, this._cullFor(state)];
     },
+
+    // Retire cars more than 5% of the way behind the champion's last run (sim.c
+    // cfg_cull). Only where it is safe and unseen: the track is solved
+    // (Optimize), nothing is drawn (Hyper), the champion really is car 0 (at
+    // least one elite), and the step runs in wasm (the GPU step has no such rule).
+    // Measured over 25 tracks x 3 seeds: 40% fewer car-steps per Optimize
+    // generation, best laps unchanged (geometric mean 0.997 of without).
+    CULL_BEHIND: 0.95,
+    _cullFor: function(state) {
+        return state.hyperMode && state.profile === 'optimize' && state.eliteClones >= 1 && this.mode !== 'gpu' ? this.CULL_BEHIND : 0;
+    },
+    // The champion's gate times: _champProfile as car 0 reports them during a
+    // generation, _refProfile the finished one every worker is judging by.
+    // _refDirty: the settings changed mid-generation, so this one is not kept.
+    _champProfile: null, _refProfile: null, _refDirty: false,
 
     // The scoring changed (profile, lap target), so the stored all-time-best
     // score no longer compares with what a generation can earn. Forget the
@@ -557,8 +572,11 @@ const Engine = {
 
     pushConfig: function(state) {
         const args = this._configArgs(state);
+        // Anything but the cull switch itself changes what a run is worth as a reference.
+        const clearRef = !this._lastConfig || args.slice(0, 10).some((v, i) => v !== this._lastConfig[i]);
+        if (clearRef) { this._refDirty = true; this._refProfile = null; }
         if (this.master) { this.master.ex.set_config(...args); this._pushMutation(state); }
-        this._allWorkers().forEach(w => w.postMessage({ type: 'config', args }));
+        this._allWorkers().forEach(w => w.postMessage({ type: 'config', args, clearRef }));
         this._lastConfig = args;
         if (this._lastTrackMsg) this._lastTrackMsg.config = args;
     },
@@ -593,6 +611,7 @@ const Engine = {
         this._hidden = hiddenLayers;
         this._hasGlobalBest = false;
         this._globalBestFitness = -Infinity;
+        this._champProfile = null; this._refProfile = null; this._refDirty = false;
         this._lastGateRatio = null;
         this._popEpoch++;
         // _rate is deliberately NOT cleared here: it describes the machine,
@@ -702,7 +721,7 @@ const Engine = {
                 start: s.start, count: s.count,
                 hidden: this._hidden,
                 seed: (Math.random() * 0xffffffff) >>> 0,
-                brains: blob, focused
+                brains: blob, focused, ref: this._refProfile
             }, [blob.buffer, focused.buffer]);
         });
     },
@@ -779,6 +798,7 @@ const Engine = {
         if (!st || data.type !== 'done') return;
         this._noteWorkerTiming(data);
         if (data.gateRatio) this._lastGateRatio = data.gateRatio;
+        if (data.profile) this._champProfile = data.profile;
         // Row i of this worker's results is global car ids[i].
         data.ids = this.slices[data.index] ? this.slices[data.index].ids : null;
         st.rows.push(data);
@@ -826,6 +846,8 @@ const Engine = {
             this._hasGlobalBest = true;
         }
         ex.evolve(eliteClones, this._hasGlobalBest ? 1 : 0, sigmaGen | 0);
+        this._refProfile = this._refDirty ? null : this._champProfile;
+        this._champProfile = null; this._refDirty = false;
         this._popEpoch++;
         // A generation boundary is the one moment the partition can move for
         // free: every worker is idle and about to be handed a fresh slice

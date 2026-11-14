@@ -357,6 +357,39 @@ console.log(`race behaviour test (${wasmPath})\n`);
         `flat out down a straight: ${without.toFixed(0)} without the zone, ${withZone.toFixed(0)} with it`);
 }
 
+// --- retiring laggards ----------------------------------------------------
+// With the cull on, cars well behind the reference run are retired every 256
+// frames. Three things it must never do: act without a reference, change the
+// score of anything it leaves alone, or retire global car 0 (the champion).
+{
+    const POP = 200;
+    const race = (cull, refGates) => {
+        buildTrack(polar(48, a => 340 + Math.sin(a * 3) * 70), 60);
+        w.set_config(10, 0.05, 0.04, 0.2, 750, 99, 0.15, 5, 0, 0, cull);
+        w.pop_init(POP, 0, 5, 20260921);
+        w.pop_randomize_brains();
+        // Car 0: straight on at part throttle, so it is alive but far behind any reference.
+        const brain = f32(w.brains_ptr(), w.brain_stride()); brain.fill(0); brain[11 * 5 + 5 * 2 + 5 + 1] = 0.1;
+        // An impossible reference: gate k on frame k.
+        const ref = new Int32Array(w.memory.buffer, w.ref_ptr(), refGates);
+        for (let k = 0; k < refGates; k++) ref[k] = k;
+        w.set_ref_count(refGates);
+        w.pop_reset();
+        w.run(255); const before = w.alive_count();
+        w.run(2); const after = w.alive_count();
+        w.write_render(); const car0Alive = f32(w.render_ptr(), 18)[1] === 0;
+        w.write_fitness(); const S = w.fitness_stride(), fb = f32(w.fitness_ptr(), POP * S);
+        return { before, after, car0Alive, fit: Array.from({ length: POP }, (_, i) => fb[i * S]) };
+    };
+    const off = race(0, 300), noRef = race(0.95, 0), on = race(0.95, 300);
+    check(off.after > 3 && noRef.after === off.after && noRef.fit.every((f, i) => f === off.fit[i]),
+        'without a reference run, nobody is retired', `${noRef.after} alive either way`);
+    check(off.car0Alive && on.before === off.before && on.after === 1 && on.car0Alive,
+        'cars far behind the reference are retired, the champion never', `${on.before} alive before frame 256, ${on.after} after`);
+    check(on.fit.every((f, i) => Math.abs(f - off.fit[i]) < 1), 'and a retired car keeps the score it had',
+        'no penalty for being retired');
+}
+
 // --- pace: and it shows up in training ----------------------------------
 // A softer end-to-end check on a track that learns reliably, across several
 // seeds, so it measures the scoring rather than the luck of one run.

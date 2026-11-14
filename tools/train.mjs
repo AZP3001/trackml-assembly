@@ -29,9 +29,9 @@ const QUIET = args.includes('--quiet'), REQUIRE = args.includes('--require-solve
 const POP = Number(opt('--pop', 150)), ELITE = Number(opt('--elite', 15)), TARGET = Number(opt('--laps', 2)), HIDDEN = Number(opt('--hidden', 4));
 const TURN = Number(opt('--turn', 0.02)), BRAKE = Number(opt('--brake', 0.01));
 const MUT = [Number(opt('--mut-rate', 0.15)), Number(opt('--sigma', 0.5)), Number(opt('--sigma-floor', 0.05))];
-const FOCUS = Number(opt('--focus', 0)), TTL = Number(opt('--ttl', 750)), PACE = Number(opt('--pace', 0.5));
+const FOCUS = Number(opt('--focus', 0)), TTL = Number(opt('--ttl', 750)), PACE = Number(opt('--pace', 0.5)), CULL = Number(opt('--cull', 0));
 const JSON_OUT = args.includes('--json');
-// --opt "elite=30,mut-rate=0.1,sigma=0.2,sigma-floor=0.05,focus=0.2,laps=3,pace=0.5":
+// --opt "elite=30,mut-rate=0.1,sigma=0.2,sigma-floor=0.05,focus=0.2,laps=3,pace=0.5,cull=0.8":
 // settings switched to the generation after a car first completes the target
 // laps — the app's Explore -> Optimize hand-over.
 const OPT = Object.fromEntries((opt('--opt', '') || '').split(',').filter(Boolean).map(kv => { const [k, v] = kv.split('='); return [k, Number(v)]; }));
@@ -62,7 +62,7 @@ function setup(def) {
     const zIn = f32(w.zone_in_ptr(), Math.max(1, zones.length * 5));
     zones.forEach((z, i) => { zIn.set([z.x, z.y, z.radius, ZID[z.type] ?? -1, z.killTimer ?? 150], i * 5); });
     const hasStart = def.startPos ? 1 : 0, hasAngle = def.startAngle != null ? 1 : 0;
-    w.set_config(10, 0.05, TURN, BRAKE, TTL, TARGET, FOCUS, HIDDEN, 0, PACE);
+    w.set_config(10, 0.05, TURN, BRAKE, TTL, TARGET, FOCUS, HIDDEN, 0, PACE, CULL);
     w.set_mutation(...MUT);
     if (!w.track_build(w.path_in_ptr(), def.path.length, def.width, hasStart, hasStart ? def.startPos.x : 0,
         hasStart ? def.startPos.y : 0, hasAngle, hasAngle ? def.startAngle : 0, w.zone_in_ptr(), zones.length, 0, 0)) {
@@ -110,14 +110,16 @@ function train(def, seed) {
         if (laps >= TARGET && solved === null) solved = gen;
         if (solved !== null && switchGen === null && Object.keys(OPT).length) {
             switchGen = gen;
-            const o = { elite: ELITE, 'mut-rate': MUT[0], sigma: MUT[1], 'sigma-floor': MUT[2], focus: FOCUS, laps: TARGET, ttl: TTL, pace: PACE, ...OPT };
+            const o = { elite: ELITE, 'mut-rate': MUT[0], sigma: MUT[1], 'sigma-floor': MUT[2], focus: FOCUS, laps: TARGET, ttl: TTL, pace: PACE, cull: CULL, ...OPT };
             elite = o.elite; target = o.laps;
             w.set_mutation(o['mut-rate'], o.sigma, o['sigma-floor']);
-            w.set_config(10, 0.05, TURN, BRAKE, o.ttl, target, o.focus, HIDDEN, 0, o.pace);
+            w.set_config(10, 0.05, TURN, BRAKE, o.ttl, target, o.focus, HIDDEN, 0, o.pace, o.cull);
         }
         if (best > globalBest) { w.copy_brain(bestIdx, w.stash_slot()); globalBest = best; }
         bests.push(globalBest);
         const sigmaGen = firstLap === null ? 0 : Math.max(0, gen - firstLap - SETTLE);
+        // The champion's gate times this generation are next generation's cull reference (engine.js does the same).
+        { const n = w.prof_count(); new Int32Array(w.memory.buffer, w.ref_ptr(), n).set(new Int32Array(w.memory.buffer, w.prof_ptr(), n)); w.set_ref_count(n); }
         w.evolve(elite, 1, sigmaGen);
         if (!allFinite(f32(w.brains_ptr(), (w.max_cars() + 1) * w.brain_stride()).subarray(0, POP * w.brain_stride())))
             problems.push(`gen ${gen}: non-finite weights`);

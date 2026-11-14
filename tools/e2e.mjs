@@ -654,6 +654,16 @@ check(paceCfg.explore.state === 0 && paceCfg.explore.sent === 0, 'Explore runs w
 check(paceCfg.optimize.state === 0.5 && paceCfg.optimize.sent === 0.5, 'Optimize turns it on', JSON.stringify(paceCfg.optimize));
 check(paceCfg.optimize.best === -Infinity, 'a profile switch does not keep a score from the other scoring');
 
+// Laggards are retired only when the track is solved and nothing is drawn (Optimize + Hyper).
+const cullCfg = await page.evaluate(() => {
+    const was = { profile: app.state.profile, hyper: app.state.hyperMode };
+    const read = (profile, hyper) => { app.setProfile(profile); if (app.state.hyperMode !== hyper) app.toggleHyper(); return Engine._lastConfig[10]; };
+    const out = [read('explore', false), read('explore', true), read('optimize', false), read('optimize', true)];
+    read(was.profile, was.hyper);
+    return out;
+});
+check(JSON.stringify(cullCfg) === '[0,0,0,0.95]', 'laggards are retired only in Optimize + Hyper', JSON.stringify(cullCfg));
+
 // Dragging the start marker re-aims it along the track where it lands.
 const startAim = await page.evaluate(() => {
     newSquare();   // clockwise square: top edge runs +x, right edge runs +y

@@ -1508,6 +1508,27 @@ static float cfg_pace = 0.5f;
 // settings that is 4.95, half of Max Speed 10 — so anything judged against
 // Max Speed itself (the Speed Boost zone wanted 70% of it) could never be met.
 static float cfg_topSpeed = 4.95f;
+// Retire cars that have fallen behind: every 256 frames, a living car with
+// fewer than this fraction of the gates the reference run had by that frame is
+// out (see cullLaggards). 0 is off. On only once a track is solved and nothing
+// is being drawn (Optimize + Hyper): there, most of a generation's work used
+// to go on cars already too far back to become parents.
+static float cfg_cull = 0.0f;
+// The reference: the frame on which the champion reached each of its gates,
+// last generation. prof_rec is recorded here by global car 0 (the stash's
+// clone); the main thread hands the finished one back to every instance as
+// ref_frames for the next generation. Measuring against a run that is known
+// to have got round — rather than against whoever is in front right now —
+// matters: a reckless car that leads and then crashes would otherwise retire
+// the slower cars that were going to finish.
+#define PROF_MAX 4096
+static i32 prof_rec[PROF_MAX];
+static i32 ref_frames[PROF_MAX];
+static i32 ref_n = 0;
+__attribute__((export_name("ref_ptr"))) i32 ref_ptr(void) { return (i32)(unsigned long)ref_frames; }
+__attribute__((export_name("ref_max"))) i32 ref_max(void) { return PROF_MAX; }
+__attribute__((export_name("set_ref_count"))) void set_ref_count(i32 n) { ref_n = n < 0 ? 0 : (n > PROF_MAX ? PROF_MAX : n); }
+__attribute__((export_name("prof_ptr"))) i32 prof_ptr(void) { return (i32)(unsigned long)prof_rec; }
 
 // Lateral grip used to cancel sideways slip and keep the car's velocity
 // tracking its heading (see updateCar). It used to be a user-facing slider,
@@ -1535,7 +1556,7 @@ static void recompute_sensor_len(void) {
 
 __attribute__((export_name("set_config")))
 void set_config(float maxSpeed, float accel, float turnSpeed, float brakeStrength,
-                i32 initialTTL, i32 targetLaps, float focusPct, i32 hidden, i32 nudgeMode, float paceReward) {
+                i32 initialTTL, i32 targetLaps, float focusPct, i32 hidden, i32 nudgeMode, float paceReward, float cullBehind) {
     cfg_maxSpeed = maxSpeed; cfg_accel = accel; cfg_turnSpeed = turnSpeed; cfg_brakeStrength = brakeStrength;
     cfg_initialTTL = initialTTL; cfg_targetLaps = targetLaps;
     cfg_focusPct = focusPct;
@@ -1545,6 +1566,7 @@ void set_config(float maxSpeed, float accel, float turnSpeed, float brakeStrengt
     // JS as NaN and fails the compare: it gets the default.
     cfg_pace = paceReward >= 0.0f ? minf(paceReward, 4.0f) : 0.5f;
     cfg_topSpeed = minf(maxSpeed, 99.0f * accel);
+    cfg_cull = cullBehind > 0.0f ? minf(cullBehind, 0.99f) : 0.0f;   // NaN (argument not passed) is off
     recompute_sensor_len();
 }
 
@@ -2277,6 +2299,7 @@ static void updateCar(i32 i) {
         {
             {
                 car_cpReached[i]++;
+                if (i + pop_id_offset == 0 && car_cpReached[i] <= PROF_MAX) prof_rec[car_cpReached[i] - 1] = car_frames[i];
                 car_nextCP[i] = (car_nextCP[i] + 1) % tk_cp_n;
                 // Reaching a gate resets the clock to the full Initial TTL.
                 // It used to add 150 and clamp to 600, which quietly made the
@@ -2467,6 +2490,28 @@ static inline void recordCrash(i32 i) {
     if (g >= 0 && g < MAX_GATES) crash_count[g]++;
 }
 
+// No penalty and no crash_count entry: a retired car did nothing wrong, it
+// just keeps the score it has. Nothing is judged until the reference has 20
+// gates, so a standing start cannot retire anyone, and with no reference
+// (first generation, or the settings changed) nobody is retired at all.
+static void cullLaggards(i32 frame) {
+    i32 lo = 0, hi = ref_n;                       // gates the reference had by `frame`
+    while (lo < hi) { i32 mid = (lo + hi) >> 1; if (ref_frames[mid] <= frame) lo = mid + 1; else hi = mid; }
+    if (lo < 20) return;
+    float need = cfg_cull * (float)lo;
+    i32 keep = 0;
+    for (i32 a = 0; a < active_n; a++) {
+        i32 c = active[a];
+        // Global car 0 is the champion itself: it may trail the reference (a
+        // new champion measured against the old one's run) but is never retired.
+        if ((float)car_cpReached[c] < need && c + pop_id_offset != 0) car_crashed[c] = 1; else active[keep++] = c;
+    }
+    active_n = keep;
+}
+// How many gates global car 0 has recorded in prof_rec; 0 if it is not here.
+__attribute__((export_name("prof_count")))
+i32 prof_count(void) { return (pop_id_offset == 0 && pop_n > 0) ? mini(car_cpReached[0], PROF_MAX) : 0; }
+
 __attribute__((export_name("run")))
 i32 run(i32 iters) {
     i32 maxLaps = 0;
@@ -2489,6 +2534,10 @@ i32 run(i32 iters) {
         }
         active_n = keep;
         if (maxLaps >= cfg_targetLaps) { it++; break; }
+        // Every living car has the same frame count (they were reset together),
+        // so this fires on the same frames whatever the round size, and a
+        // rewound round replays it exactly.
+        if (cfg_cull > 0.0f && keep > 0 && (car_frames[active[0]] & 255) == 0) cullLaggards(car_frames[active[0]]);
     }
     last_iters = it;
     last_all_crashed = allCrashed;

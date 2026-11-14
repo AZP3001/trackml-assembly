@@ -230,6 +230,12 @@ pressed at any time. Every slider still works on top of whichever profile is act
 | Mutation | 15% of weights, sigma 0.5 | same |
 | Speed reward | **none**: a checkpoint is worth the same however long it took to reach | up to half a checkpoint extra for reaching it at pace, and a lap bonus that grows with lap speed |
 
+In **Hyper + Optimize**, cars that fall more than 5% of the way behind the champion's previous run
+are retired early (checked every 256 frames; they keep the score they had). Once a track is solved,
+most of a generation's work used to go on cars already too far back to become parents: over the 25
+built-in tracks x 3 seeds this cuts car-steps per Optimize generation by 40% with best laps unchanged.
+It is off while exploring, at 1x (you would see cars vanish) and in GPU mode.
+
 Explore pays nothing for speed on purpose. Any reward for pace before a car can lap the track pays a
 car for arriving flat out at the first corner it cannot make, and the whole field converges on doing
 that. Measured on eight custom-style tracks (long straights into 90° corners and hairpins) x 5 seeds

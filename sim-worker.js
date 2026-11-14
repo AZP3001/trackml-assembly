@@ -35,6 +35,7 @@ self.onmessage = async (e) => {
 
         case 'config':
             ex.set_config(...msg.args);
+            if (msg.clearRef) ex.set_ref_count(0);
             break;
 
         case 'track': {
@@ -83,6 +84,10 @@ self.onmessage = async (e) => {
             f32(ex.brains_ptr(), popCount * stride).set(msg.brains.subarray(0, popCount * stride));
             // Which of this slice's cars evolve() bred as Focus % mutants.
             if (msg.focused) i32(ex.car_focused_ptr(), popCount).set(msg.focused);
+            // The champion's gate times from last generation (sim.c cullLaggards), or none.
+            const nRef = msg.ref ? Math.min(msg.ref.length, ex.ref_max()) : 0;
+            if (nRef) i32(ex.ref_ptr(), nRef).set(msg.ref.subarray(0, nRef));
+            ex.set_ref_count(nRef);
             ex.pop_reset();
             break;
         }
@@ -181,12 +186,14 @@ self.onmessage = async (e) => {
             // alive_count travels separately from the buffer: in hyper mode the
             // crashed flags never cross at all, so the main thread has no way to
             // count them itself.
+            // Car 0's gate times so far: next generation's cull reference.
+            const profile = popStart === 0 ? i32(ex.prof_ptr(), ex.prof_count()).slice() : null;
             const transfer = [buffer.buffer, crashCount.buffer];
             if (gateRatio) transfer.push(gateRatio.buffer);
             self.postMessage({
                 type: 'done', index, start: popStart, count: popCount,
                 maxLaps, allCrashed, alive: ex.alive_count(), busyMs, carSteps, crashCount, iters: ex.run_iters(),
-                render: !!msg.wantRender, stride: ex.fitness_stride(), buffer, gateRatio
+                render: !!msg.wantRender, stride: ex.fitness_stride(), buffer, gateRatio, profile
             }, transfer);
             break;
         }

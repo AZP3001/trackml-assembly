@@ -1609,6 +1609,7 @@ const app = {
     },
     toggleHyper: function() { 
         this.state.hyperMode = !this.state.hyperMode; 
+        Engine.pushConfig(this.state);   // Hyper is one of the conditions for retiring laggards (Engine._cullFor)
         const active = this.state.hyperMode;
         [ui.btnHyper, ui.btnHyperM].forEach(btn => {
             if(!btn) return;
