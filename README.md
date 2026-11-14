@@ -163,6 +163,14 @@ car-steps/s (generations ~1.8x faster).
 
 ## The GPU backend (WebGPU)
 
+**GPU batch.** A GPU step costs about the same however many cars it carries, so GPU mode races
+**GPU batch x Pop Size** cars at once (default x8, capped at 2000). Generations cannot run at the
+same time — each is bred from the results of the one before — so this is the form of "several
+generations at once" a GPU can do: several generations' worth of candidates per generation. Per
+generation a bigger field learns faster (headless, 6 hard tracks x 2 seeds: first lap at generation
+9 with 150 cars, 4 with 600, 3 with 2000). Switching mode or batch rebuilds the field at the new
+size around the best brain so far; at x1 the race is handed over mid-generation unchanged.
+
 With the toggle on **GPU**, one `gpu-worker.js` replaces the CPU pool. It speaks the same message
 protocol as `sim-worker.js`, so the engine treats it as a pool of one.
 
@@ -225,7 +233,7 @@ pressed at any time. Every slider still works on top of whichever profile is act
 
 | | Explore — just finish it | Optimize — lap time |
 | --- | --- | --- |
-| Target Laps | **1**: a generation ends at the first finished lap | **2**: the second is a flying lap, the one worth timing |
+| Target Laps | **1**: a generation ends at the first finished lap | **3**: laps two and three are flying laps, the ones worth timing |
 | Elite Clones | 10% of the field, so a lucky line isn't lost | 3%: more room for new lines beat protecting old ones |
 | Mutation | 15% of weights, sigma 0.5 | same |
 | Speed reward | **none**: a checkpoint is worth the same however long it took to reach | up to half a checkpoint extra for reaching it at pace, and a lap bonus that grows with lap speed |
@@ -299,7 +307,7 @@ tracks.
 * **Focus %** (default 0%)**:** Fraction of the population bred as mutants of the all-time best instead of by crossover. It used to come with a fitness boost through a "weakest stretch" window — but the boosted score was compared raw against the all-time best, so a boosted car could take the champion's place with a score no honest run could beat, and the champion then never updated again. The boost is gone; in testing (`tools/train.mjs`), leaving this at 0 learned fastest.
 * **Hidden Layers** (default 4)**:** Adjust the complexity of the AI's "brain" by changing the number of internal neurons. Four beat 3, 5, 6 and 8 in testing, and the SIMD build evaluates the hidden layer four units at a time, so a fifth costs a whole second pass.
 * **Initial TTL (Time-To-Live):** A countdown for each agent, **reset in full every time it reaches a checkpoint**. It used to top the clock up by 150 frames and clamp it to 600, which quietly made the slider a lie — set it to 10,000 and the very first gate cut the car back to 600.
-* **Target Laps** (set by the profile: 1 while exploring, 2 while optimizing)**:** Defines the goalpost for a successful generation before moving to the next stage of evolution.
+* **Target Laps** (set by the profile: 1 while exploring, 3 while optimizing)**:** Defines the goalpost for a successful generation before moving to the next stage of evolution.
 
 How a generation is bred, for the curious: parents are drawn from the top fifth of the field
 **rank-weighted**, so the leader parents far more often than the hundredth car rather than equally.

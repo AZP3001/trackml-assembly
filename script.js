@@ -31,6 +31,7 @@ const SETTING_DESCRIPTIONS = {
     acceleration: "Engine power.", turnSpeed: "Steering sensitivity. Cars turn tightest at low speed and lose authority as they speed up, same as a real car's grip limit.",
     brakeStrength: "How hard the brake pedal bites. Braking now scales with how hard the AI presses it, instead of every negative throttle snapping speed down by the same flat amount.",
     coreCount: "How many CPU cores run the simulation — one worker (its own wasm instance, its own slice of the population) per core. Stock is every core the machine has; pulling it down leaves the rest free for other tabs/apps at the cost of training speed. Takes effect within a frame or two, mid-generation: every car is handed to its new core exactly where it was, nobody restarts. At 1x speed the race is paced by the screen, so the difference shows in hyper mode and in the steps/s readout.",
+    gpuBatch: "GPU mode only. A GPU step costs about the same however many cars it carries, so GPU mode races this many times the Pop Size at once (up to 2000 cars): several generations' worth of candidates per generation. Generations themselves cannot run at the same time, because each is bred from the results of the one before. Changing it restarts the run.",
     computeMode: "Where the simulation runs. CPU (stock): WebAssembly on every core, as above. GPU: the whole step — wall raycasts, the neural networks, physics, gates and scoring — runs as a WebGPU compute shader with the population kept in GPU memory, and only the results come back, once per frame (or once per chunk in hyper mode). It pays off most with big populations and in hyper mode; with a small field the CPU can be just as fast, so compare the steps/s readout on your own machine. Needs WebGPU; if the GPU is unavailable or lost, the race carries on on the CPU from where it was."
 };
 
@@ -131,7 +132,7 @@ const DEVICE_DEFAULTS = IS_MOBILE ? DEFAULT_SETTINGS.mobile : DEFAULT_SETTINGS.d
 // first corner it cannot make.
 const PROFILES = {
     explore:  { targetLaps: 1, eliteFrac: 0.10, mutRate: 0.15, sigma: 0.5, sigmaFloor: 0.05, focusPct: 0, pace: 0 },
-    optimize: { targetLaps: 2, eliteFrac: 0.03, mutRate: 0.15, sigma: 0.5, sigmaFloor: 0.05, focusPct: 0, pace: 0.5 }
+    optimize: { targetLaps: 3, eliteFrac: 0.03, mutRate: 0.15, sigma: 0.5, sigmaFloor: 0.05, focusPct: 0, pace: 0.5 }
 };
 
 // How many pixels the canvas actually rasterises, as a fraction of the fixed
@@ -331,6 +332,12 @@ const app = {
         // DEVICE_DEFAULTS, which is the desktop set unless this is a phone or
         // a tablet. Everything else is the same on both.
         populationSize: DEVICE_DEFAULTS.populationSize,
+        // GPU mode races gpuBatch times the Pop Size slider (basePop) at once,
+        // up to GPU_POP_MAX: a GPU step costs about the same however many cars
+        // it carries, so a bigger field per generation is where it can win.
+        // Generations themselves cannot overlap — each is bred from the last —
+        // so this is the "several generations at once" a GPU can actually do.
+        basePop: DEVICE_DEFAULTS.populationSize, gpuBatch: 8,
         eliteClones: Math.round(PROFILES.explore.eliteFrac * DEVICE_DEFAULTS.populationSize),
         targetLaps: PROFILES.explore.targetLaps,
         profile: 'explore', paceReward: PROFILES.explore.pace,
@@ -1723,12 +1730,41 @@ const app = {
             this._needsDraw = true;
         }
     },
+    GPU_POP_MAX: 2000,
+    // Pop Size in force: the slider's value, times the GPU batch in GPU mode.
+    _effectivePop: function() {
+        const st = this.state;
+        return Engine.mode === 'gpu' ? Math.min(this.GPU_POP_MAX, st.basePop * st.gpuBatch) : st.basePop;
+    },
+    _popLabel: function() {
+        const st = this.state, el = document.getElementById('val-pop'), b = document.getElementById('val-gpuBatch');
+        if(el) el.innerText = st.populationSize === st.basePop ? st.basePop : `${st.basePop} → ${st.populationSize}`;
+        if(b) b.innerText = `×${st.gpuBatch} = ${Math.min(this.GPU_POP_MAX, st.basePop * st.gpuBatch)} cars`;
+    },
+    // A different field size is a different population. It is rebuilt at the
+    // new size around the best brain so far (as Load AI would), so switching
+    // to the GPU mid-run keeps what has been learned, the generation count and
+    // the profile. At the same size nothing happens and the race carries on.
+    _applyBatch: function() {
+        const st = this.state, n = this._effectivePop();
+        this._popLabel();
+        if(n === st.populationSize) return;
+        const best = st.generation > 1 && st.cars.length ? st.cars.reduce((p, c) => c.fitness > p.fitness ? c : p) : null;
+        const seed = best ? Engine.brainToJSON(best.id) : undefined;
+        st.populationSize = n;
+        st.eliteClones = Math.max(1, Math.round(PROFILES[st.profile].eliteFrac * n));
+        this.syncSettingsUI();
+        this.initPopulation(seed);
+    },
+    updateGpuBatch: function(v) { this.state.gpuBatch = parseInt(v, 10) || 1; this._applyBatch(); },
     updateConfig: function(k, v) {
         this.state[k] = parseFloat(v);
+        if(k === 'populationSize') { this.state.basePop = this.state.populationSize; this.state.populationSize = this._effectivePop(); }
         if(k === 'targetLaps') { this._finishFrame = 0; Engine.rescore(); }   // more or fewer laps: a different score scale
         let id = 'val-'+(k==='populationSize'?'pop':k==='targetLaps'?'laps':k==='speedMultiplier'?'speed':k==='eliteClones'?'elite':k==='focusPct'?'focus':k==='hiddenLayers'?'hidden':'ttl');
         let d = v; if(k==='speedMultiplier') d+='x'; if(k==='focusPct') d=Math.round(v*100)+'%';
         const el = document.getElementById(id); if(el) el.innerText = d;
+        if(k === 'populationSize') this._popLabel();
         // TTL, target laps and mutation rate are read inside the wasm step, so
         // they have to reach every instance. Population and hidden-layer size
         // change the shape of things and only take effect on the next reset,
@@ -1772,6 +1808,7 @@ const app = {
         await Engine.setComputeMode(mode);
         this._computePending = null;
         this._syncComputeUI();
+        this._applyBatch();
     },
     _computePending: null,
     _syncComputeUI: function() {
@@ -1810,7 +1847,7 @@ const app = {
             const lbl = document.getElementById(labelId); if (lbl) lbl.innerText = fmt ? fmt(val) : val;
         };
         apply('cfg-speedMultiplier', st.speedMultiplier, 'val-speed', v => v+'x');
-        apply('cfg-populationSize', st.populationSize, 'val-pop');
+        apply('cfg-populationSize', st.basePop, 'val-pop'); apply('cfg-gpuBatch', st.gpuBatch, 'val-gpuBatch'); this._popLabel();
         apply('cfg-eliteClones', st.eliteClones, 'val-elite');
         apply('cfg-focusPct', st.focusPct, 'val-focus', v => Math.round(v*100)+'%');
         apply('cfg-hiddenLayers', st.hiddenLayers, 'val-hidden');
@@ -2012,6 +2049,7 @@ const app = {
             for(const k of ['populationSize','eliteClones','targetLaps','focusPct','hiddenLayers','initialTTL','speedMultiplier','mutRate','sigma','sigmaFloor']) {
                 if(typeof cfg[k] === 'number') st[k] = cfg[k];
             }
+            st.basePop = st.populationSize;   // a loaded session is raced at the size it was saved with
             st.nudgeMode = !!cfg.nudgeMode;
             if(cfg.physics) for(const k in cfg.physics) {
                 if(typeof cfg.physics[k] === 'number') st.physics[k] = cfg.physics[k];

@@ -245,6 +245,8 @@ async function reshapeMidRace(label, doChange, landed) {
         await page.evaluate(() => {
             if (document.getElementById('config-panel').classList.contains('hidden')) app.toggleSettings();
         });
+        // GPU batch x1: the field keeps its size, so the hand-over is seamless (tested here).
+        await page.evaluate(() => { app.state.gpuBatch = 1; });
         const toGpu = await reshapeMidRace('gpu', () => page.click('#btn-compute-gpu'), () => Engine.mode === 'gpu');
         const ui = await page.evaluate(() => ({
             workers: Engine.workers.length,
@@ -258,6 +260,13 @@ async function reshapeMidRace(label, doChange, landed) {
             '  mid-generation, every car carrying on from where it was',
             `${toGpu.carried}/${toGpu.eligible} cars, ${toGpu.ms}ms (shader compile included)`);
         check(ui.sliderDisabled, '  and the CPU-cores slider stands down while the GPU runs');
+
+        // A bigger batch rebuilds the field at the new size, and back again.
+        const batched = await page.evaluate(() => {
+            app.updateGpuBatch(3); const big = app.state.cars.length, elite = app.state.eliteClones;
+            app.updateGpuBatch(1); return { big, elite, back: app.state.cars.length };
+        });
+        check(batched.big === boot.cars * 3 && batched.back === boot.cars, '  GPU batch x3 races three times the field', `${batched.big} cars, ${batched.elite} elites, then ${batched.back}`);
 
         await page.evaluate(() => { app.state.hyperMode = true; app.state.isRunning = true; });
         const g0 = await page.evaluate(() => app.state.generation);
@@ -790,6 +799,16 @@ await page.waitForTimeout(400);
 const hyperSwitch = await page.evaluate(() => { const drawn = app._needsDraw === false; app.toggleHyper(); app.switchTrack(0); return drawn; });
 check(hyperSwitch, 'switching track in Hyper mode repaints the map');
 
+// GPU batch: GPU mode races the Pop Size several times over; CPU mode races it as it is.
+const batch = await page.evaluate(() => {
+    const st = app.state, mode = Engine.mode, base = st.basePop, was = st.gpuBatch;
+    const cpu = app._effectivePop();
+    Engine.mode = 'gpu'; st.gpuBatch = 4; const gpu = app._effectivePop(); st.gpuBatch = 13; const capped = app._effectivePop();
+    Engine.mode = mode; st.gpuBatch = was;
+    return { base, cpu, gpu, capped };
+});
+check(batch.cpu === batch.base && batch.gpu === batch.base * 4 && batch.capped === 2000, 'GPU mode races GPU batch x Pop Size, capped at 2000', JSON.stringify(batch));
+
 // Fullscreen toggle: the map covers the viewport, then goes back.
 const fs = await page.evaluate(() => {
     app.toggleFullscreen();
@@ -1158,7 +1177,7 @@ await page.evaluate(() => { if (app.state.isEditing) editor.cancel(); });
         return { before, after, back: app.state.profile, pop: app.state.populationSize };
     });
     check(r.before.profile === 'explore' && r.before.laps === 1, 'Explore runs one-lap generations', `laps ${r.before.laps}`);
-    check(r.after.profile === 'optimize' && r.after.laps === 2 && r.after.elite === Math.max(1, Math.round(r.pop * 0.03)) && r.after.btn === 'true',
+    check(r.after.profile === 'optimize' && r.after.laps === 3 && r.after.elite === Math.max(1, Math.round(r.pop * 0.03)) && r.after.btn === 'true',
         'the first finished lap hands over to Optimize by itself', `laps ${r.after.laps}, elite ${r.after.elite} of ${r.pop}`);
     check(r.back === 'explore', 'and the Explore button switches back');
 }
