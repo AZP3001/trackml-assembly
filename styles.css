@@ -44,3 +44,5 @@ body { background-color: #0f172a; color: white; overflow: hidden; margin: 0; fon
         #editor-controls.collapsed { right: auto !important; padding: 0.25rem; }
         #editor-controls.collapsed > :last-child,
         #editor-controls.collapsed > :first-child > :not(#btn-tools-toggle) { display: none !important; }
+        /* A 4% frame around the map in fullscreen: nothing can be placed there, it is just border. */
+        body.map-fs #map-wrap { padding: 4vh 4vw; }

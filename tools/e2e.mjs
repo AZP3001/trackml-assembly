@@ -613,14 +613,15 @@ check(selx.single[0] === 260 && selx.single[1] === 300, 'a single selected point
 // Race view fits the track: a small track is zoomed in and centred on.
 const fit = await page.evaluate(() => {
     const t = app.currentTrack, keep = t.wallsF32;
-    t.wallsF32 = new Float32Array([300, 300, 500, 300, 500, 400, 300, 400]);
+    t.wallsF32 = new Float32Array([200, 20, 600, 20, 600, 220, 200, 220]);   // small, and hard against the top of the map
     app.fitView();
     const v = Object.assign({}, app.state.view), tl = app.screenToWorld(0, 0), br = app.screenToWorld(ui.canvas.width, ui.canvas.height);
+    const fill = Math.max(400 / (br.x - tl.x), 200 / (br.y - tl.y));
     t.wallsF32 = keep; app.fitView();
-    return { v, tl, br };
+    return { v, tl, br, fill };
 });
-check(fit.v.zoom > 2 && fit.v.panX === 400 && fit.v.panY === 350, 'the race view zooms in on and centres a small track', `zoom ${fit.v.zoom.toFixed(2)} at (${fit.v.panX}, ${fit.v.panY})`);
-check(fit.tl.x <= 280 && fit.tl.y <= 280 && fit.br.x >= 520 && fit.br.y >= 420, 'with the whole track still in view');
+check(fit.v.zoom > 2 && fit.v.panX === 400 && fit.v.panY === 120, 'the race view zooms in on and centres a track, even one at the edge of the map', `zoom ${fit.v.zoom.toFixed(2)} at (${fit.v.panX}, ${fit.v.panY})`);
+check(fit.tl.x <= 200 && fit.tl.y <= 20 && fit.br.x >= 600 && fit.br.y >= 220 && fit.fill > 0.9 && fit.fill <= 0.961, 'with the whole track in view and about 2% free around it', `fills ${(fit.fill * 100).toFixed(0)}% of the tighter axis`);
 
 // Follow camera: the auto pick is held until its lap ends, not swapped on every lead change.
 const hold = await page.evaluate(() => {
@@ -737,15 +738,41 @@ const misc = await page.evaluate(() => {
 check(misc.types === 'corner,rounded,corner,rounded', 'Select mode sets corner / rounded on the selection', misc.types);
 check(misc.label === '270°' && misc.slider === '270', 'the start angle is shown, as 0-359°', `${misc.label}, slider ${misc.slider}`);
 
+// Undo / redo in the editor: 20 edits back, and forward again.
+const undo = await page.evaluate(() => {
+    newSquare(); editor._hist = [editor.snapshot()]; editor._hi = 0;
+    const X = () => editor.track.path[0].x;
+    for (let i = 1; i <= 25; i++) { editor.track.path[0].x = 200 + i; editor.commit(); }
+    editor.undo(); const one = X();
+    for (let i = 0; i < 30; i++) editor.undo();
+    const floor = X();
+    editor.redo(); editor.redo(); const redone = X();
+    editor.track.path[0].x = 999; editor.commit(); editor.redo(); const branched = X();
+    editor.selectedIndex = 0; editor.deleteSelectedPoint(); editor.commit(); const afterDelete = editor.track.path.length;
+    editor.undo(); const restored = editor.track.path.length;
+    editor.cancel();
+    return { one, floor, redone, branched, afterDelete, restored };
+});
+check(undo.one === 224 && undo.floor === 205 && undo.redone === 207, 'undo steps back up to 20 edits, redo forward again', JSON.stringify(undo));
+check(undo.branched === 999 && undo.afterDelete === 3 && undo.restored === 4, 'a new edit drops the redo branch; a deleted point comes back');
+
 // Fullscreen toggle: the map covers the viewport, then goes back.
 const fs = await page.evaluate(() => {
     app.toggleFullscreen();
     const r = document.getElementById('map-wrap').getBoundingClientRect();
     const full = r.width === innerWidth && r.height === innerHeight;
+    const c = document.getElementById('sim-canvas').getBoundingClientRect();
+    const framed = Math.abs(c.left - innerWidth * 0.04) < 1 && Math.abs(c.top - innerHeight * 0.04) < 1 && Math.abs(c.width - innerWidth * 0.92) < 2;
     app.toggleFullscreen();
-    return { full, off: !document.body.classList.contains('map-fs') };
+    // the middle button starts a pan, the right button does not
+    const ev = b => ({ button: b, pointerId: 9, preventDefault() {}, clientX: 300, clientY: 300 });
+    app.handleCanvasClick(ev(2)); const rightPans = !!app._panState; app.endPan({ pointerId: 9 });
+    app.handleCanvasClick(ev(1)); const middlePans = !!app._panState; app.endPan({ pointerId: 9 });
+    return { full, framed, rightPans, middlePans, off: !document.body.classList.contains('map-fs') };
 });
 check(fs.full && fs.off, 'fullscreen button gives the map the whole viewport');
+check(fs.framed, 'with a 4% frame around the canvas');
+check(fs.middlePans && !fs.rightPans, 'the middle mouse button pans the camera, the right one does not');
 
 // "Wipe All Data" deletes the saved tracks too.
 page.once('dialog', d => d.accept());
@@ -998,12 +1025,12 @@ await page.evaluate(() => { if (app.state.isEditing) editor.cancel(); });
         app._clampView();
         const zoomed = Math.max(...pts.map(([x, y]) => roundTrip(x, y)));
 
-        // A right-button drag has to move the map by exactly the distance the
+        // A pan drag (the middle button) has to move the map by exactly the distance the
         // pointer moved over it. Held here against the world point under the
         // pointer, which must not shift at all during the drag.
         const anchor = [700, 500];
         const from = worldToClient(...anchor);
-        app.startPan({ preventDefault() {}, pointerId: 7, button: 2,
+        app.startPan({ preventDefault() {}, pointerId: 7, button: 1,
                        clientX: from.clientX, clientY: from.clientY });
         app.movePan({ pointerId: 7, clientX: from.clientX + 37, clientY: from.clientY - 21 });
         const moved = app.screenToWorld(

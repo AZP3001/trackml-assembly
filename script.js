@@ -409,7 +409,7 @@ const app = {
         // Apply the pending Engine core label now that the element is cached
         if(ui.coreCount && Engine._pendingCoreLabel) ui.coreCount.innerHTML = Engine._pendingCoreLabel;
         // Click/tap a car to spectate it (independent of the editor's own
-        // pointer handlers, which only attach while editing). Right-button
+        // pointer handlers, which only attach while editing). Middle-button
         // drag pans instead, in both the normal view and the editor — it's
         // deliberately a different button than the editor's own left-click
         // point dragging, so the two gestures can never fight over the same
@@ -430,7 +430,9 @@ const app = {
         ui.canvas.addEventListener('pointercancel', e => {
             if (e.pointerType === 'touch') this._touchEnd(e); else this.endPan(e);
         });
-        // No browser menu anywhere in the app (right-click pans, and deletes grid boxes); text fields keep theirs for paste.
+        // The middle button pans; without this the browser starts its own autoscroll on it.
+        ui.canvas.addEventListener('mousedown', e => { if (e.button === 1) e.preventDefault(); });
+        // No browser menu anywhere in the app (right-click deletes grid boxes); text fields keep theirs for paste.
         document.addEventListener('contextmenu', e => { if (!/^(INPUT|TEXTAREA)$/.test(e.target.tagName) || e.target.type === 'range') e.preventDefault(); });
         ui.canvas.addEventListener('wheel', e => {
             e.preventDefault();
@@ -552,14 +554,19 @@ const app = {
     // bounds coincide there, so the centre is pinned to the map centre —
     // exactly the old, un-zoomed behaviour, and exactly what this collapses
     // to whenever the viewport is the plain 1200x900 (viewportW===CANVAS_WIDTH).
+    _fitCentre: { x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT / 2 },
     _clampView: function() {
         const v = this.state.view;
         const vw = this._viewportW, vh = this._viewportH;
         const halfW = vw / (2 * v.zoom), halfH = vh / (2 * v.zoom);
         const loX = CANVAS_WIDTH / 2 - vw / 2 + halfW, hiX = CANVAS_WIDTH / 2 + vw / 2 - halfW;
         const loY = CANVAS_HEIGHT / 2 - vh / 2 + halfH, hiY = CANVAS_HEIGHT / 2 + vh / 2 - halfH;
-        v.panX = Math.max(loX, Math.min(hiX, v.panX));
-        v.panY = Math.max(loY, Math.min(hiY, v.panY));
+        // Stretched to take in the centre of the track itself (fitView): a track
+        // drawn against one edge of the map is still shown in the middle of the
+        // screen, with grass past the map's edge, rather than pinned off-centre.
+        const f = this._fitCentre;
+        v.panX = Math.max(Math.min(loX, f.x), Math.min(Math.max(hiX, f.x), v.panX));
+        v.panY = Math.max(Math.min(loY, f.y), Math.min(Math.max(hiY, f.y), v.panY));
     },
 
     resetView: function() {
@@ -569,21 +576,25 @@ const app = {
         this._needsDraw = true;
     },
 
-    // Race view: centre on the track and zoom in as far as still shows all of
-    // it. Zoom never goes below 1, so a track larger than the world stays at 1:1.
+    // Centre on the track and zoom in as far as still shows all of it, with 2%
+    // of the view left free on every side. Zoom never goes below 1, so a track
+    // larger than the world stays at 1:1. In the editor it fits the track being
+    // edited (its points, padded by the road's half-width).
     fitView: function() {
-        const t = this.currentTrack, v = this.state.view;
-        const w = t && t.wallsF32;
-        if (!w || !w.length) return this.resetView();
-        // Bounds of the real walls, not of the centreline path.
+        const v = this.state.view;
         let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-        for (let i = 0; i < w.length; i += 2) {
-            if (w[i] < x0) x0 = w[i]; if (w[i] > x1) x1 = w[i];
-            if (w[i + 1] < y0) y0 = w[i + 1]; if (w[i + 1] > y1) y1 = w[i + 1];
+        const add = (x, y, pad) => { if (x - pad < x0) x0 = x - pad; if (x + pad > x1) x1 = x + pad; if (y - pad < y0) y0 = y - pad; if (y + pad > y1) y1 = y + pad; };
+        if (this.state.isEditing) {
+            const t = editor.track;
+            if (t && t.path.length >= 3) for (const p of t.path) add(p.x, p.y, t.trackWidth);
+        } else {
+            const w = this.currentTrack && this.currentTrack.wallsF32;   // the real walls, not the centreline
+            if (w) for (let i = 0; i < w.length; i += 2) add(w[i], w[i + 1], 0);
         }
-        x0 -= 20; y0 -= 20; x1 += 20; y1 += 20;
-        v.zoom = Math.max(1, Math.min(8, this._viewportW / (x1 - x0), this._viewportH / (y1 - y0)));
+        if (!(x1 > x0 && y1 > y0)) return this.resetView();
+        v.zoom = Math.max(1, Math.min(8, this._viewportW * 0.96 / (x1 - x0), this._viewportH * 0.96 / (y1 - y0)));
         v.panX = (x0 + x1) / 2; v.panY = (y0 + y1) / 2;
+        this._fitCentre = { x: v.panX, y: v.panY };
         this._clampView();
         this._needsDraw = true;
     },
@@ -620,7 +631,7 @@ const app = {
     },
 
     // ---- touch: pinch-zoom and one-finger pan/tap ------------------------
-    // The mouse path above (right-drag pan, wheel zoom, left-click select) is
+    // The mouse path above (middle-drag pan, wheel zoom, left-click select) is
     // untouched; this is its touch equivalent, routed separately by
     // e.pointerType so neither has to know the other exists. Only active
     // outside the editor — the editor's own onpointerdown/onpointermove
@@ -805,7 +816,7 @@ const app = {
     },
 
     handleCanvasClick: function(e) {
-        if(e.button === 2) { this.startPan(e); return; }
+        if(e.button === 1) { this.startPan(e); return; }   // hold the scroll wheel and drag: pan
         if(e.button !== undefined && e.button !== 0) return;
         this._selectCarAt(e);
     },
@@ -1447,6 +1458,8 @@ const app = {
         // (0,0,CANVAS_WIDTH,CANVAS_HEIGHT exactly when there is no margin).
         if(this.state.bgCanvas) {
             const marginX = (this._viewportW - CANVAS_WIDTH) / 2, marginY = (this._viewportH - CANVAS_HEIGHT) / 2;
+            // Grass first: a camera centred on a track at the map's edge sees past the cached image.
+            ctx.fillStyle = '#3a5a40'; ctx.fillRect(-1e4, -1e4, 2e4, 2e4);
             ctx.drawImage(this.state.bgCanvas, -marginX, -marginY, this._viewportW, this._viewportH);
         }
 
@@ -2117,6 +2130,7 @@ const app = {
                         a === '@el' ? el :
                         a === '@event' ? ev : a);
                     fn.apply(target, args);
+                    if(target === editor && app.state.isEditing) editor.commitSoon();   // undo history
                 });
             }
         });
@@ -2484,12 +2498,13 @@ const editor = {
         this.syncAutoWidthUI();
         app.resetView();   // the editor starts on the whole map
         this.grid.cells.clear(); this.grid.press = null;
+        this._hist = [this.snapshot()]; this._hi = 0;
         this.setMode('path');
         const c = document.getElementById('sim-canvas');
         c.style.touchAction = 'none';
         c.onpointerdown = e => { e.preventDefault(); c.setPointerCapture(e.pointerId); this.onDown(e); };
         c.onpointermove = e => { e.preventDefault(); this.onMove(e); };
-        c.onpointerup = c.onpointercancel = e => { c.releasePointerCapture(e.pointerId); this.dragIndex=null; this.snap=null; this.selectUp(); this.gridUp(); if(this.isDraggingStart) this.pinStart(); this.isDraggingStart=false; this.isResizingZone=false; if(this.isDrawing) this.finishDrawing(); };
+        c.onpointerup = c.onpointercancel = e => { c.releasePointerCapture(e.pointerId); this.dragIndex=null; this.snap=null; this.selectUp(); this.gridUp(); if(this.isDraggingStart) this.pinStart(); this.commit(); this.isDraggingStart=false; this.isResizingZone=false; if(this.isDrawing) this.finishDrawing(); };
     },
 
     setMode: function(m) {
@@ -2782,6 +2797,41 @@ const editor = {
         document.getElementById('code-modal').classList.remove('hidden');
     },
 
+    // ---- undo / redo: whole-track snapshots, the last 20 edits ----------------
+    _hist: [], _hi: 0, _histTimer: 0,
+    snapshot: function() {
+        const t = this.track, g = this.grid;
+        return JSON.stringify({ path: t.path, trackWidth: t.trackWidth, startPos: t.startPos, startAngle: t.startAngle, zones: t.zones || [],
+            autoWidth: !!t.autoWidth, autoWidthBlend: t.autoWidthBlend || 0, grid: { size: g.size, arrows: g.arrows, cells: [...g.cells] } });
+    },
+    // Record the current state if it differs from the last one recorded.
+    commit: function() {
+        clearTimeout(this._histTimer); this._histTimer = 0;
+        if(!this.track) return;
+        const s = this.snapshot();
+        if(s === this._hist[this._hi]) return;
+        this._hist = this._hist.slice(Math.max(0, this._hi - 19), this._hi + 1);   // 20 steps back, and nothing ahead
+        this._hist.push(s); this._hi = this._hist.length - 1;
+    },
+    // Sliders fire on every pixel of a drag: one history entry once they settle, not one per event.
+    commitSoon: function() { clearTimeout(this._histTimer); this._histTimer = setTimeout(() => this.commit(), 400); },
+    undo: function() { if(this._histTimer) this.commit(); if(this._hi > 0) this.restore(this._hist[--this._hi]); },
+    redo: function() { if(this._histTimer) this.commit(); if(this._hi < this._hist.length - 1) this.restore(this._hist[++this._hi]); },
+    restore: function(json) {
+        const s = JSON.parse(json), t = this.track, g = this.grid;
+        Object.assign(t, { path: s.path, trackWidth: s.trackWidth, startPos: s.startPos, startAngle: s.startAngle, zones: s.zones, autoWidth: s.autoWidth, autoWidthBlend: s.autoWidthBlend });
+        g.size = s.grid.size; g.arrows = s.grid.arrows; g.cells = new Map(s.grid.cells); g.press = null;
+        // Everything that pointed into the old state.
+        this.selectedIndex = null; this.selectedZone = null; this.sel = []; this.marquee = null; this.xf = null; this.dragIndex = null; this.snap = null;
+        this.updatePointUI(); this.updateZoneUI();
+        document.getElementById('edit-width').value = t.trackWidth;
+        document.getElementById('edit-autowidth').checked = t.autoWidth;
+        document.getElementById('edit-autowidth-blend').value = Math.round(t.autoWidthBlend * 100);
+        this.syncAutoWidthUI(); this.showAngle(t.startAngle);
+        document.getElementById('grid-size').value = g.size; document.getElementById('grid-size-val').textContent = g.size;
+        this.syncGridButtons();
+    },
+
     toggleTools: function() { document.getElementById('editor-controls').classList.toggle('collapsed'); },
     cancel: function() {
         app.state.isEditing = false; app.fitView();
@@ -2873,11 +2923,12 @@ const editor = {
     },
 
     onDown: function(e) {
-        // Right-button is pan (app-level, see startPan) in the editor too —
+        // The middle button is pan (app-level, see startPan) in the editor too —
         // never a new path point.
         const {x,y} = this.getPos(e);
         // Right-click in Grid mode deletes the box under it.
         if (e.button === 2) { if (this.mode === 'grid') { this.grid.cells.delete(this.gridKey(x, y)); this.gridApply(); } return; }
+        if (e.button === 1) return;
 
         if (this.mode === 'draw') {
             this.isDrawing = true;
@@ -3083,10 +3134,13 @@ const editor = {
         }
         if (!on) for (const k of g.cells.keys()) g.cells.set(k, null);
         g.arrows = on;
-        const ON = 'px-2 py-1 text-[10px] rounded bg-blue-600 text-white', OFF = 'px-2 py-1 text-[10px] rounded text-slate-400';
+        this.syncGridButtons();
+        this.gridApply();
+    },
+    syncGridButtons: function() {
+        const on = this.grid.arrows, ON = 'px-2 py-1 text-[10px] rounded bg-blue-600 text-white', OFF = 'px-2 py-1 text-[10px] rounded text-slate-400';
         document.getElementById('btn-grid-boxes').className = on ? OFF : ON;
         document.getElementById('btn-grid-arrows').className = on ? ON : OFF;
-        this.gridApply();
     },
     clearGrid: function() { this.grid.cells.clear(); this.gridApply(); },
     drawGrid: function(ctx, v) {
@@ -3378,6 +3432,11 @@ document.addEventListener('keydown', (e) => {
         else if (e.key === 'Backspace' || e.key === 'Delete') {
             e.preventDefault();
             if (editor.mode === 'select') editor.deleteSelection(); else if (editor.mode === 'path') editor.deleteSelectedPoint();
+            editor.commit();
+        }
+        else if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z' || e.key === 'y' || e.key === 'Y')) {
+            e.preventDefault();
+            if (e.key === 'y' || e.key === 'Y' || e.shiftKey) editor.redo(); else editor.undo();
         }
         return;
     }

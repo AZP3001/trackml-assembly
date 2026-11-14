@@ -525,6 +525,7 @@ detour. The code export above is the replacement.
 
 ## Keyboard Shortcuts
 * **Space:** Play / Pause
+* **Ctrl+Z / Ctrl+Y (in the editor):** undo / redo, up to 20 edits
 * **Backspace / Delete (in the editor):** delete the selected point, or the whole selection in Select mode
 * **H:** Toggle Hyper Mode
 * **R:** Reset

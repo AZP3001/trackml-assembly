@@ -493,14 +493,14 @@
                 <span class="text-xs font-bold uppercase tracking-wider">Hyper Mode Active</span>
             </div>
 
-            <!-- Zoom: scroll-wheel + right-drag-to-pan on a mouse, pinch + one-
+            <!-- Zoom: scroll-wheel + middle-button-drag-to-pan on a mouse, pinch + one-
                  finger drag on a touchscreen, all work directly on the canvas
                  (in both the race view and the editor); these buttons are a
                  fixed-step equivalent for whichever input isn't in hand. -->
             <div class="absolute bottom-3 right-3 z-10 flex flex-col gap-1 bg-slate-800/85 backdrop-blur-sm rounded-lg border border-slate-700 p-1">
                 <button data-click="app.zoomStep|1.3" title="Zoom in" class="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-700 rounded text-base leading-none">+</button>
                 <button data-click="app.zoomStep|0.77" title="Zoom out" class="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-700 rounded text-base leading-none">&minus;</button>
-                <button data-click="app.resetView" title="Reset zoom (scroll or pinch to zoom, right-drag or one-finger-drag to pan)" class="w-7 h-7 flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-700 rounded text-[9px] font-bold">1:1</button>
+                <button data-click="app.fitView" title="Fit the track to the view (scroll or pinch to zoom; hold the scroll wheel and drag, or one-finger-drag, to pan)" class="w-7 h-7 flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-700 rounded text-[9px] font-bold">1:1</button>
                 <button data-click="app.toggleFullscreen" title="Fullscreen map" aria-label="Fullscreen map" class="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-700 rounded text-base leading-none">&#x26F6;</button>
                 <button id="btn-follow-car" data-click="app.toggleFollowCar" title="Follow the spectated car while zoomed in (click a car on track to choose one)" aria-pressed="false" class="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-white hover:bg-slate-700 rounded text-sm leading-none">&#8982;</button>
             </div>
